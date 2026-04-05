@@ -12,8 +12,9 @@ import (
 var remoteLog = &RemoteLog{}
 
 type RemoteLog struct {
-	mu    sync.Mutex
-	lines []string
+	mu       sync.Mutex
+	lines    []string
+	errCount int
 }
 
 func (l *RemoteLog) Add(proto, direction, msg string) {
@@ -23,6 +24,15 @@ func (l *RemoteLog) Add(proto, direction, msg string) {
 	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
 		l.lines = append(l.lines, fmt.Sprintf("%s %s %s %s", ts, proto, direction, line))
 	}
+	if direction == "ERR" {
+		l.errCount++
+	}
+}
+
+func (l *RemoteLog) ErrCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.errCount
 }
 
 func (l *RemoteLog) Lines() []string {
@@ -40,11 +50,13 @@ func (l *RemoteLog) Len() int {
 }
 
 type LogDialog struct {
-	visible bool
-	offset  int
-	follow  bool
-	width   int
-	height  int
+	visible      bool
+	offset       int
+	follow       bool
+	width        int
+	height       int
+	lastSeenErrs int
+	closedAt     time.Time
 }
 
 func NewLogDialog() *LogDialog {
@@ -52,7 +64,23 @@ func NewLogDialog() *LogDialog {
 }
 
 func (d *LogDialog) Open()        { d.visible = true; d.follow = true }
-func (d *LogDialog) Close()       { d.visible = false }
+func (d *LogDialog) Close() {
+	d.visible = false
+	d.closedAt = time.Now()
+	d.lastSeenErrs = remoteLog.ErrCount()
+}
+
+func (d *LogDialog) AutoOpen(errCount int) {
+	if d.visible || errCount <= d.lastSeenErrs {
+		return
+	}
+	if !d.closedAt.IsZero() && time.Since(d.closedAt) < 5*time.Second {
+		return
+	}
+	d.lastSeenErrs = errCount
+	d.visible = true
+	d.follow = true
+}
 func (d *LogDialog) IsOpen() bool { return d.visible }
 
 func (d *LogDialog) viewHeight() int {

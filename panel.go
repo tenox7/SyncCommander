@@ -19,6 +19,7 @@ type Panel struct {
 	isLeft   bool
 	wrap     bool
 	cmpOpts  *CompareOpts
+	spinner  string
 }
 
 func NewPanel(title string) *Panel {
@@ -189,7 +190,11 @@ func (p *Panel) renderNode(node *TreeNode) string {
 		if node.Expanded {
 			arrow = "▼"
 		}
-		left = styleChrome.Render(arrow) + " " + p.dirStyle(node).Render(p.title)
+		spin := ""
+		if p.spinner != "" {
+			spin = " " + p.spinner
+		}
+		left = styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(p.title)
 	} else {
 		chrome := renderGuides(node)
 		arrow := "▶"

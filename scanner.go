@@ -9,17 +9,19 @@ import (
 )
 
 type ScanProgress struct {
-	TotalFiles    int64
-	TotalDirs     int64
-	DirsListed    int64
-	DirsTotal     int64
-	FilesEqual    int64
+	TotalFiles     int64
+	TotalDirs      int64
+	DirsListed     int64
+	DirsTotal      int64
+	FilesEqual     int64
 	FilesDifferent int64
 	FilesLeftOnly  int64
 	FilesRightOnly int64
-	ChecksumFiles int64
-	ChecksumDone  int64
-	Phase         string
+	ChecksumFiles  int64
+	ChecksumDone   int64
+	Phase          string
+	LeftActive     bool
+	RightActive    bool
 }
 
 type checksumProber interface {
@@ -87,11 +89,13 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 	var stats struct {
 		totalFiles, totalDirs                          atomic.Int64
 		dirsListed, dirsTotal                          atomic.Int64
-		filesEqual, filesDiff, filesLeft, filesRight    atomic.Int64
+		filesEqual, filesDiff, filesLeft, filesRight   atomic.Int64
 	}
 
-	queue := []dirJob{{relDir: "", parent: root, depth: 1}}
+	queue := []dirJob{{relDir: "", parent: root, depth: 1, listLeft: true, listRight: true}}
 	stats.dirsTotal.Store(1)
+	leftPending := 1
+	rightPending := 1
 
 	progress := func(phase string) ScanProgress {
 		return ScanProgress{
@@ -104,6 +108,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 			FilesDifferent: stats.filesDiff.Load(),
 			FilesLeftOnly:  stats.filesLeft.Load(),
 			FilesRightOnly: stats.filesRight.Load(),
+			LeftActive:     leftPending > 0,
+			RightActive:    rightPending > 0,
 		}
 	}
 
@@ -117,7 +123,15 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 
 		s.setProgress(progress("scanning..."))
 
-		leftEntries, rightEntries := s.listBoth(ctx, job.relDir)
+		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+
+		if job.listLeft {
+			leftPending--
+		}
+		if job.listRight {
+			rightPending--
+		}
+
 		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond)
 
 		s.mu.Lock()
@@ -130,10 +144,20 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 			if child.IsDir {
 				stats.totalDirs.Add(1)
 				stats.dirsTotal.Add(1)
+				ll := child.Compare.Presence != PresenceRightOnly
+				lr := child.Compare.Presence != PresenceLeftOnly
+				if ll {
+					leftPending++
+				}
+				if lr {
+					rightPending++
+				}
 				queue = append(queue, dirJob{
-					relDir: child.RelPath,
-					parent: child,
-					depth:  job.depth + 1,
+					relDir:    child.RelPath,
+					parent:    child,
+					depth:     job.depth + 1,
+					listLeft:  ll,
+					listRight: lr,
 				})
 				continue
 			}
@@ -167,6 +191,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 	var checksumDone atomic.Int64
 
 	p := progress("checksumming...")
+	p.LeftActive = true
+	p.RightActive = true
 	p.ChecksumFiles = checksumTotal
 	s.setProgress(p)
 
@@ -185,6 +211,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 			s.checksumNode(ctx, n)
 			done := checksumDone.Add(1)
 			p := progress("checksumming...")
+			p.LeftActive = true
+			p.RightActive = true
 			p.ChecksumFiles = checksumTotal
 			p.ChecksumDone = done
 			s.setProgress(p)
@@ -240,7 +268,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		collectExpanded(child, oldExpanded)
 	}
 
-	queue := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1}}
+	queue := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: true, listRight: true}}
 
 	for len(queue) > 0 {
 		if ctx.Err() != nil {
@@ -249,7 +277,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		job := queue[0]
 		queue = queue[1:]
 
-		leftEntries, rightEntries := s.listBoth(ctx, job.relDir)
+		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond)
 		restoreExpanded(children, oldExpanded)
 
@@ -261,9 +289,11 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		for _, child := range children {
 			if child.IsDir {
 				queue = append(queue, dirJob{
-					relDir: child.RelPath,
-					parent: child,
-					depth:  job.depth + 1,
+					relDir:    child.RelPath,
+					parent:    child,
+					depth:     job.depth + 1,
+					listLeft:  child.Compare.Presence != PresenceRightOnly,
+					listRight: child.Compare.Presence != PresenceLeftOnly,
 				})
 			}
 		}
@@ -531,9 +561,51 @@ func (s *Scanner) setProgress(p ScanProgress) {
 }
 
 type dirJob struct {
-	relDir string
-	parent *TreeNode
-	depth  int
+	relDir    string
+	parent    *TreeNode
+	depth     int
+	listLeft  bool
+	listRight bool
+}
+
+func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRight bool) ([]FileEntry, []FileEntry) {
+	ctx, cancel := context.WithTimeout(ctx, s.stallTimeout)
+	defer cancel()
+	if !listLeft {
+		e, _ := s.right.List(ctx, relDir)
+		return nil, e
+	}
+	if !listRight {
+		e, _ := s.left.List(ctx, relDir)
+		return e, nil
+	}
+	type result struct {
+		entries []FileEntry
+		side    int
+	}
+	ch := make(chan result, 2)
+	go func() {
+		e, _ := s.left.List(ctx, relDir)
+		ch <- result{e, 0}
+	}()
+	go func() {
+		e, _ := s.right.List(ctx, relDir)
+		ch <- result{e, 1}
+	}()
+	var left, right []FileEntry
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ctx.Done():
+			return left, right
+		case r := <-ch:
+			if r.side == 0 {
+				left = r.entries
+			} else {
+				right = r.entries
+			}
+		}
+	}
+	return left, right
 }
 
 func collectFiles(node *TreeNode, files *[]*TreeNode) {

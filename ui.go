@@ -127,6 +127,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
 			m.options.UpdateChecksumLabel(algo)
 		}
+		m.logView.AutoOpen(remoteLog.ErrCount())
 		m.refreshTree()
 		return m, m.tickCmd()
 	case scanDoneMsg:
@@ -706,6 +707,19 @@ func (m Model) View() string {
 	topBar := RenderTopBar(progress, tree, spinner, operation, cksumStatus, m.width)
 	bottomBar := RenderBottomBar(m.width)
 
+	if m.deleting || m.copying {
+		m.leftPanel.spinner = spinner
+		m.rightPanel.spinner = spinner
+	} else {
+		m.leftPanel.spinner = ""
+		m.rightPanel.spinner = ""
+		if progress.LeftActive {
+			m.leftPanel.spinner = spinner
+		}
+		if progress.RightActive {
+			m.rightPanel.spinner = spinner
+		}
+	}
 	left := m.leftPanel.View()
 	right := m.rightPanel.View()
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)

@@ -1,5 +1,6 @@
 # TODO
 
+- support remote move with relative and absolute paths, ask for path
 - support multiple concurrent remote connections and spread listing across dirs, multiple file copies
 - set base directory
 - export to csv/xls

@@ -59,8 +59,8 @@ func RenderTopBar(progress ScanProgress, tree *TreeNode, spinner string, operati
 		}
 		return styleBar.Width(width).Render(s)
 	default:
-		s := fmt.Sprintf("%s %s dirs:%d/%d files:%d  =%d ≠%d",
-			spinner, progress.Phase,
+		s := fmt.Sprintf("%s dirs:%d/%d files:%d  =%d ≠%d",
+			progress.Phase,
 			progress.DirsListed, progress.DirsTotal,
 			progress.TotalFiles,
 			progress.FilesEqual, progress.FilesDifferent)

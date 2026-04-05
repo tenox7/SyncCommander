@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -37,19 +36,6 @@ func main() {
 	}
 	defer closeBackend(left)
 	defer closeBackend(right)
-
-	for _, b := range []struct {
-		name    string
-		backend Backend
-	}{{"left", left}, {"right", right}} {
-		fmt.Fprintf(os.Stderr, "%s: %s ... ", b.name, b.backend.BasePath())
-		entries, err := b.backend.List(context.Background(), "")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "ok (%d entries)\n", len(entries))
-	}
 
 	model := NewModel(left, right, *cksum)
 	p := tea.NewProgram(model, tea.WithAltScreen())

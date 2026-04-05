@@ -135,35 +135,59 @@ func (b *SFTPBackend) setChecksumAlgo(algo string) {
 }
 
 func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {
-	return b.client.Chtimes(path.Join(b.base, relPath), atime, mtime)
+	err := b.client.Chtimes(path.Join(b.base, relPath), atime, mtime)
+	if err != nil {
+		remoteLog.Add("sftp", "ERR", "CHTIMES "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *SFTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+	remoteLog.Add("sftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
 	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
+		remoteLog.Add("sftp", "ERR", err.Error())
 		return err
 	}
 	f, err := b.client.Create(fullPath)
 	if err != nil {
+		remoteLog.Add("sftp", "ERR", err.Error())
 		return err
 	}
 	defer f.Close()
 	if _, err := io.Copy(f, src); err != nil {
+		remoteLog.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	return b.client.Chmod(fullPath, mode)
+	if err := b.client.Chmod(fullPath, mode); err != nil {
+		remoteLog.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	return nil
 }
 
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	return b.client.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+	err := b.client.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+	if err != nil {
+		remoteLog.Add("sftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
-	return b.client.Remove(path.Join(b.base, relPath))
+	err := b.client.Remove(path.Join(b.base, relPath))
+	if err != nil {
+		remoteLog.Add("sftp", "ERR", "REMOVE "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
-	return b.removeAll(path.Join(b.base, relPath))
+	err := b.removeAll(path.Join(b.base, relPath))
+	if err != nil {
+		remoteLog.Add("sftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *SFTPBackend) removeAll(fullPath string) error {
@@ -194,5 +218,9 @@ func (b *SFTPBackend) removeAll(fullPath string) error {
 }
 
 func (b *SFTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	return b.client.Open(path.Join(b.base, relPath))
+	rc, err := b.client.Open(path.Join(b.base, relPath))
+	if err != nil {
+		remoteLog.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
+	}
+	return rc, err
 }

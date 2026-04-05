@@ -259,26 +259,46 @@ func (b *FTPBackend) setChecksumAlgo(algo string) {
 }
 
 func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ time.Time) error {
-	return b.conn.SetTime(path.Join(b.base, relPath), mtime)
+	err := b.conn.SetTime(path.Join(b.base, relPath), mtime)
+	if err != nil {
+		remoteLog.Add("ftp", "ERR", "MFMT "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+	remoteLog.Add("ftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
-	dir := path.Dir(fullPath)
-	b.mkdirAll(dir)
-	return b.conn.Stor(fullPath, src)
+	b.mkdirAll(path.Dir(fullPath))
+	err := b.conn.Stor(fullPath, src)
+	if err != nil {
+		remoteLog.Add("ftp", "ERR", err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	return b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+	err := b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+	if err != nil {
+		remoteLog.Add("ftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) Remove(_ context.Context, relPath string) error {
-	return b.conn.Delete(path.Join(b.base, relPath))
+	err := b.conn.Delete(path.Join(b.base, relPath))
+	if err != nil {
+		remoteLog.Add("ftp", "ERR", "DELETE "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) RemoveAll(_ context.Context, relPath string) error {
-	return b.removeAll(path.Join(b.base, relPath))
+	err := b.removeAll(path.Join(b.base, relPath))
+	if err != nil {
+		remoteLog.Add("ftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) removeAll(fullPath string) error {
@@ -305,8 +325,10 @@ func (b *FTPBackend) removeAll(fullPath string) error {
 }
 
 func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+	remoteLog.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
 	if err != nil {
+		remoteLog.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
 	return resp, nil
