@@ -1,6 +1,8 @@
 # Sync Commander
 
-Directory tree comparisation and synchronization TUI app.
+Directory tree comparisation and synchronization tool.
+
+Like Norton Commander or / Midnight Commander but focused on sync.
 
 
 ## Supported protocols
