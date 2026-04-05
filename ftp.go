@@ -43,7 +43,6 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 
 	var opts []ftp.DialOption
 	opts = append(opts, ftp.DialWithTimeout(10*time.Second))
-	opts = append(opts, ftp.DialWithDisabledEPSV(true))
 
 	tlsCfg := &tls.Config{ServerName: host, InsecureSkipVerify: insecure}
 
