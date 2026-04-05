@@ -86,7 +86,7 @@ func NewRootNode() *TreeNode {
 	return &TreeNode{Name: "/", IsDir: true, Expanded: true, Listed: true}
 }
 
-func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond bool) []*TreeNode {
+func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace bool) []*TreeNode {
 	byName := make(map[string]*TreeNode)
 
 	for i := range leftEntries {
@@ -124,7 +124,7 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 
 	nodes := make([]*TreeNode, 0, len(byName))
 	for _, n := range byName {
-		compareNode(n, subSecond)
+		compareNode(n, subSecond, timeGrace)
 		nodes = append(nodes, n)
 	}
 
@@ -139,7 +139,7 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 	return nodes
 }
 
-func compareNode(n *TreeNode, subSecond bool) {
+func compareNode(n *TreeNode, subSecond, timeGrace bool) {
 	n.Compare.Presence = PresenceBoth
 	if n.Left == nil {
 		n.Compare.Presence = PresenceRightOnly
@@ -160,17 +160,24 @@ func compareNode(n *TreeNode, subSecond bool) {
 		return
 	}
 	n.Compare.Size = cmpAttr(n.Left.Size == n.Right.Size)
-	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, subSecond)
-	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, subSecond)
-	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, subSecond)
-	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, subSecond)
+	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, subSecond, timeGrace)
+	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, subSecond, timeGrace)
+	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, subSecond, timeGrace)
+	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, subSecond, timeGrace)
 	n.Compare.Mode = cmpAttr(n.Left.Mode == n.Right.Mode)
 }
 
-func cmpTime(a, b time.Time, subSecond bool) AttrStatus {
+func cmpTime(a, b time.Time, subSecond, timeGrace bool) AttrStatus {
 	if !subSecond {
 		a = a.Truncate(time.Second)
 		b = b.Truncate(time.Second)
+	}
+	if timeGrace {
+		diff := a.Sub(b)
+		if diff < 0 {
+			diff = -diff
+		}
+		return cmpAttr(diff <= time.Second)
 	}
 	return cmpAttr(a.Equal(b))
 }

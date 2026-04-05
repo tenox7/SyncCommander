@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 
 type RsyncBackend struct {
 	host        string
+	user        string
+	pass        string
 	module      string
 	base        string
 	display     string
@@ -25,7 +28,7 @@ type RsyncBackend struct {
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
-	_, _, _, host, port, remotePath := parseRemoteURL(rawURL)
+	_, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	if port == "" {
 		port = "873"
 	}
@@ -52,6 +55,8 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 
 	return &RsyncBackend{
 		host:    net.JoinHostPort(host, port),
+		user:    user,
+		pass:    pass,
 		module:  module,
 		base:    base,
 		display: display,
@@ -68,7 +73,15 @@ func (b *RsyncBackend) remoteURL(relPath string) string {
 	if relPath != "" {
 		p = p + "/" + relPath
 	}
-	return "rsync://" + b.host + "/" + p
+	hostPart := b.host
+	if b.user != "" {
+		userinfo := url.PathEscape(b.user)
+		if b.pass != "" {
+			userinfo += ":" + url.PathEscape(b.pass)
+		}
+		hostPart = userinfo + "@" + b.host
+	}
+	return "rsync://" + hostPart + "/" + p
 }
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
@@ -127,11 +140,15 @@ func parseRsyncListLine(line, relDir string) (FileEntry, bool) {
 	if err != nil {
 		return FileEntry{}, false
 	}
-	modTime, err := time.Parse("2006/01/02 15:04:05", fields[2]+" "+fields[3])
+	modTime, err := time.ParseInLocation("2006/01/02 15:04:05", fields[2]+" "+fields[3], time.Local)
 	if err != nil {
 		return FileEntry{}, false
 	}
-	name := strings.Join(fields[4:], " ")
+	nameIdx := strings.Index(line, fields[3]) + len(fields[3])
+	if nameIdx >= len(line) {
+		return FileEntry{}, false
+	}
+	name := strings.TrimLeft(line[nameIdx:], " ")
 	if len(modeStr) > 0 && modeStr[0] == 'l' {
 		return FileEntry{}, false
 	}

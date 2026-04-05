@@ -78,7 +78,7 @@ func (s *Scanner) Cancel() {
 	}
 }
 
-func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
+func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGrace bool) {
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	root := NewRootNode()
@@ -132,7 +132,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 			rightPending--
 		}
 
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond)
+		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace)
 
 		s.mu.Lock()
 		job.parent.Children = children
@@ -226,15 +226,15 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond bool) {
 	s.setProgress(p)
 }
 
-func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond bool) {
+func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace)
 		return
 	}
-	s.rescanFile(ctx, node, withChecksum, subSecond)
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace)
 }
 
-func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond bool) {
+func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
 	leftEntries, rightEntries := s.listBoth(ctx, dirOf(node.RelPath))
 
 	var le, re *FileEntry
@@ -254,7 +254,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	s.mu.Lock()
 	node.Left = le
 	node.Right = re
-	compareNode(node, subSecond)
+	compareNode(node, subSecond, timeGrace)
 	s.mu.Unlock()
 
 	if withChecksum && node.Compare.Presence == PresenceBoth {
@@ -262,7 +262,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	}
 }
 
-func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond bool) {
+func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
 	oldExpanded := make(map[string]bool)
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
@@ -278,7 +278,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		queue = queue[1:]
 
 		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond)
+		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace)
 		restoreExpanded(children, oldExpanded)
 
 		s.mu.Lock()
@@ -354,7 +354,7 @@ func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, 
 	return s.listBoth(ctx, relDir)
 }
 
-func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond bool) {
+func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond, timeGrace bool) {
 	tree := s.Tree()
 	if tree == nil {
 		return
@@ -367,7 +367,7 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecon
 	for _, child := range parent.Children {
 		collectExpanded(child, oldExpanded)
 	}
-	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond)
+	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond, timeGrace)
 	restoreExpanded(children, oldExpanded)
 	s.mu.Lock()
 	parent.Children = children

@@ -43,3 +43,5 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.70 // indirect
 )
+
+replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260405222736-90146afa23d7 // branch: main

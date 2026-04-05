@@ -27,6 +27,7 @@ type CompareOpts struct {
 	Mode      bool
 	Checksum  bool
 	SubSecond bool
+	TimeGrace bool
 }
 
 type renameDoneMsg struct{ err error }
@@ -79,7 +80,7 @@ func NewModel(left, right Backend, cksum bool) Model {
 		right:      right,
 		scanner:    NewScanner(left, right, 4),
 		activeLeft: true,
-		cmpOpts:    CompareOpts{Size: true, ModTime: true, Checksum: cksum},
+		cmpOpts:    CompareOpts{Size: true, ModTime: true, Checksum: cksum, TimeGrace: true},
 		options:    NewOptionsDialog(),
 		input:      NewInputDialog(),
 		confirm:      NewConfirmDialog(),
@@ -99,6 +100,7 @@ func NewModel(left, right Backend, cksum bool) Model {
 		{Label: "Permissions", Value: &m.cmpOpts.Mode},
 		{Label: "Checksum", Value: &m.cmpOpts.Checksum},
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},
+		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
 	})
 	return m
 }
@@ -431,6 +433,7 @@ func (m *Model) deleteNode(node *TreeNode) tea.Cmd {
 	right := m.right
 	scanner := m.scanner
 	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
 	isDir := node.IsDir
 	relPath := node.RelPath
 	presence := node.Compare.Presence
@@ -459,7 +462,7 @@ func (m *Model) deleteNode(node *TreeNode) tea.Cmd {
 		}
 		parentDir := dirOf(relPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
-		scanner.RefreshDir(parentDir, le, re, subSecond)
+		scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace)
 		return deleteDoneMsg{}
 	}
 }
@@ -469,6 +472,7 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 	right := m.right
 	scanner := m.scanner
 	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
 	checksum := m.cmpOpts.Checksum
 	opts := m.cmpOpts
 	progress := m.copyProgress
@@ -530,11 +534,11 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 					}
 				}
 			}
-			scanner.RescanNode(ctx, node, checksum, subSecond)
+			scanner.RescanNode(ctx, node, checksum, subSecond, timeGrace)
 		} else {
 			parentDir := dirOf(node.RelPath)
 			le, re := scanner.ListBothDir(ctx, parentDir)
-			scanner.RefreshDir(parentDir, le, re, subSecond)
+			scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace)
 		}
 		return copyDoneMsg{}
 	}
@@ -572,6 +576,7 @@ func (m *Model) touchNode(node *TreeNode) tea.Cmd {
 	right := m.right
 	scanner := m.scanner
 	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
 	return func() tea.Msg {
 		ctx := context.Background()
 		l, r := node.Left, node.Right
@@ -587,7 +592,7 @@ func (m *Model) touchNode(node *TreeNode) tea.Cmd {
 		_ = olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime)
 		parentDir := dirOf(node.RelPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
-		scanner.RefreshDir(dirOf(node.RelPath), le, re, subSecond)
+		scanner.RefreshDir(dirOf(node.RelPath), le, re, subSecond, timeGrace)
 		return touchDoneMsg{}
 	}
 }
@@ -627,9 +632,10 @@ func (m *Model) startScan() tea.Cmd {
 	m.scanning = true
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
 	scanner := m.scanner
 	return func() tea.Msg {
-		scanner.Scan(context.Background(), checksum, subSecond)
+		scanner.Scan(context.Background(), checksum, subSecond, timeGrace)
 		return scanDoneMsg{}
 	}
 }
@@ -645,9 +651,10 @@ func (m *Model) checksumNode(node *TreeNode) tea.Cmd {
 func (m *Model) rescanNode(node *TreeNode) tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
 	scanner := m.scanner
 	return func() tea.Msg {
-		scanner.RescanNode(context.Background(), node, checksum, subSecond)
+		scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace)
 		return rescanDoneMsg{}
 	}
 }
