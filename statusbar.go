@@ -74,5 +74,5 @@ func RenderTopBar(progress ScanProgress, tree *TreeNode, spinner string, operati
 }
 
 func RenderBottomBar(width int) string {
-	return styleBar.Width(width).Render("←→=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=logO=opts ?=help Q=quit")
+	return styleBar.Width(width).Render("←→=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log O=opts ?=help Q=quit")
 }

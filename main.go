@@ -23,17 +23,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	left, err := openBackend(flag.Arg(0), *insecure)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	right, err := openBackend(flag.Arg(1), *insecure)
-	if err != nil {
-		closeBackend(left)
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
+	left := openBackendLazy(flag.Arg(0), *insecure)
+	right := openBackendLazy(flag.Arg(1), *insecure)
 	defer closeBackend(left)
 	defer closeBackend(right)
 
@@ -43,6 +34,36 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func openBackendLazy(arg string, insecure bool) Backend {
+	if !isRemote(arg) {
+		info, err := os.Stat(arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: %v\n", arg, err)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "error: %s: not a directory\n", arg)
+			os.Exit(1)
+		}
+		return NewLocalBackend(arg)
+	}
+	return &lazyBackend{
+		factory: func() (Backend, error) {
+			return openBackend(arg, insecure)
+		},
+		display: arg,
+	}
+}
+
+func isRemote(arg string) bool {
+	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://"} {
+		if strings.HasPrefix(arg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func openBackend(arg string, insecure bool) (Backend, error) {
@@ -60,13 +81,6 @@ func openBackend(arg string, insecure bool) (Backend, error) {
 	}
 	if strings.HasPrefix(arg, "rsync://") {
 		return NewRsyncBackend(arg)
-	}
-	info, err := os.Stat(arg)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %v", arg, err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%s: not a directory", arg)
 	}
 	return NewLocalBackend(arg), nil
 }
