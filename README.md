@@ -16,6 +16,6 @@ Like Norton Commander or / Midnight Commander but focused on sync.
 
 - SFTP/SCP - sha/md5 tools via SSH
 - FTP - via XCRC, XSHA, HASH
-- rsync - internal md4, not exposed
+- rsync - via rsync own md4
 - rsync+ssh - sha/md5 tools via SSH
 

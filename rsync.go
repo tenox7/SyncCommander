@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -12,8 +13,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gokrazy/rsync/rsyncclient"
 	"github.com/gokrazy/rsync/rsynccmd"
 )
 
@@ -25,6 +28,10 @@ type RsyncBackend struct {
 	base        string
 	display     string
 	useChecksum bool
+	cksumAlgo   string
+	md4cache    map[string]string
+	md4once     sync.Once
+	md4err      error
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -185,18 +192,78 @@ func parseRsyncMode(s string) os.FileMode {
 }
 
 func (b *RsyncBackend) probeChecksums() []string {
-	return []string{"rsync"}
+	return []string{"md4", "rsync"}
 }
 
 func (b *RsyncBackend) setChecksumAlgo(algo string) {
-	b.useChecksum = algo == "rsync"
+	b.cksumAlgo = algo
+	b.useChecksum = algo == "rsync" || algo == "md4"
 }
 
-func (b *RsyncBackend) Checksum(_ context.Context, _ string) (string, error) {
+func (b *RsyncBackend) Checksum(ctx context.Context, relPath string) (string, error) {
+	if b.cksumAlgo == "md4" {
+		b.md4once.Do(func() { b.md4err = b.fetchMD4(ctx) })
+		if b.md4err != nil {
+			return "", b.md4err
+		}
+		sum, ok := b.md4cache[relPath]
+		if !ok {
+			return "", fmt.Errorf("md4: no checksum for %s", relPath)
+		}
+		return sum, nil
+	}
 	if !b.useChecksum {
 		return "", fmt.Errorf("rsync: checksum not enabled")
 	}
 	return "rsync_internal", nil
+}
+
+func (b *RsyncBackend) fetchMD4(ctx context.Context) error {
+	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	client, err := rsyncclient.New([]string{"-r", "-c"}, rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
+	if err != nil {
+		return err
+	}
+
+	remotePath := b.module + "/"
+	if b.base != "" {
+		remotePath = b.module + "/" + b.base + "/"
+	}
+
+	if b.user != "" {
+		os.Setenv("RSYNC_USERNAME", b.user)
+	}
+	if b.pass != "" {
+		os.Setenv("RSYNC_PASSWORD", b.pass)
+	}
+
+	conn, err := net.DialTimeout("tcp", b.host, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	remoteLog.Add("rsync", ">>>", "MD4 "+remotePath)
+	result, err := client.RunDaemon(ctx, conn, remotePath, []string{tmpDir + "/"})
+	if err != nil {
+		return err
+	}
+
+	b.md4cache = make(map[string]string, len(result.FileList))
+	var zero [16]byte
+	for _, fi := range result.FileList {
+		if fi.Checksum == zero {
+			continue
+		}
+		b.md4cache[fi.Name] = hex.EncodeToString(fi.Checksum[:])
+	}
+	remoteLog.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
+	return nil
 }
 
 func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) error {

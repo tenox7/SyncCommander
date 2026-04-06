@@ -624,7 +624,7 @@ func (s *Scanner) negotiateChecksum() bool {
 		s.cksumRight = probeBackend(s.right)
 		leftSet := toSet(s.cksumLeft)
 		rightSet := toSet(s.cksumRight)
-		for _, algo := range []string{"sha256", "sha1", "md5", "rsync"} {
+		for _, algo := range []string{"sha256", "sha1", "md5", "md4", "rsync"} {
 			if leftSet[algo] && rightSet[algo] {
 				setBackendAlgo(s.left, algo)
 				setBackendAlgo(s.right, algo)

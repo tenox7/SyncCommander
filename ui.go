@@ -704,7 +704,11 @@ func (m Model) View() string {
 	cksumStatus := "off"
 	if m.cmpOpts.Checksum {
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
-			cksumStatus = algo
+			if algo == "md4" {
+				cksumStatus = "rsync:md4"
+			} else {
+				cksumStatus = algo
+			}
 		} else if m.scanner.ChecksumProbed() {
 			cksumStatus = "none!"
 		} else {

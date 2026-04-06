@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -22,6 +24,9 @@ type RsyncSSHBackend struct {
 	display   string
 	cksumAlgo string
 	cksumCmds map[string]string
+	md4cache  map[string]string
+	md4once   sync.Once
+	md4err    error
 }
 
 func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
@@ -86,9 +91,20 @@ func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]FileEntry,
 	return result, nil
 }
 
-func (b *RsyncSSHBackend) Checksum(_ context.Context, relPath string) (string, error) {
+func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	if b.cksumAlgo == "" {
 		return "", fmt.Errorf("no checksum algorithm configured")
+	}
+	if b.cksumAlgo == "md4" {
+		b.md4once.Do(func() { b.md4err = b.fetchMD4(ctx) })
+		if b.md4err != nil {
+			return "", b.md4err
+		}
+		sum, ok := b.md4cache[relPath]
+		if !ok {
+			return "", fmt.Errorf("md4: no checksum for %s", relPath)
+		}
+		return sum, nil
 	}
 	cmd := fmt.Sprintf("%s %s", b.cksumCmds[b.cksumAlgo], shellQuote(path.Join(b.base, relPath)))
 	out, err := b.sshRun(cmd)
@@ -102,12 +118,62 @@ func (b *RsyncSSHBackend) Checksum(_ context.Context, relPath string) (string, e
 	return fields[0], nil
 }
 
+func (b *RsyncSSHBackend) fetchMD4(ctx context.Context) error {
+	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	remotePath := b.base + "/"
+	client, err := rsyncclient.New([]string{"-r", "-c"}, rsyncclient.WithStderr(io.Discard), rsyncclient.DontRestrict())
+	if err != nil {
+		return err
+	}
+
+	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remotePath))
+	remoteLog.Add("rsync+ssh", ">>>", "MD4 "+serverCmd)
+
+	session, err := b.client.NewSession()
+	if err != nil {
+		return err
+	}
+
+	rw, err := b.sessionReadWriter(session)
+	if err != nil {
+		session.Close()
+		return err
+	}
+
+	if err := session.Start(serverCmd); err != nil {
+		session.Close()
+		return err
+	}
+
+	result, err := client.Run(ctx, rw, []string{tmpDir + "/"})
+	session.Close()
+	if err != nil {
+		return err
+	}
+
+	b.md4cache = make(map[string]string, len(result.FileList))
+	var zero [16]byte
+	for _, fi := range result.FileList {
+		if fi.Checksum == zero {
+			continue
+		}
+		b.md4cache[fi.Name] = hex.EncodeToString(fi.Checksum[:])
+	}
+	remoteLog.Add("rsync+ssh", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
+	return nil
+}
+
 func (b *RsyncSSHBackend) probeChecksums() []string {
 	if b.cksumCmds == nil {
 		run := func(cmd string) (string, error) { return b.sshRun(cmd) }
 		var algos []string
 		algos, b.cksumCmds = probeSSHChecksums(run)
-		return algos
+		return append(algos, "md4")
 	}
 	var algos []string
 	seen := make(map[string]bool)
@@ -117,7 +183,7 @@ func (b *RsyncSSHBackend) probeChecksums() []string {
 			seen[p.algo] = true
 		}
 	}
-	return algos
+	return append(algos, "md4")
 }
 
 func (b *RsyncSSHBackend) setChecksumAlgo(algo string) {

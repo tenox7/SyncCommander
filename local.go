@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/mmcloughlin/md4"
 )
 
 type LocalBackend struct {
@@ -72,6 +74,8 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 		h = sha1.New()
 	case "md5":
 		h = md5.New()
+	case "md4":
+		h = md4.New()
 	default:
 		h = sha256.New()
 	}
@@ -95,7 +99,7 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 }
 
 func (b *LocalBackend) probeChecksums() []string {
-	return []string{"sha256", "sha1", "md5"}
+	return []string{"sha256", "sha1", "md5", "md4"}
 }
 
 func (b *LocalBackend) setChecksumAlgo(algo string) {

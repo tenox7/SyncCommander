@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/gokrazy/rsync v0.3.3
 	github.com/jlaffaye/ftp v0.2.0
+	github.com/mmcloughlin/md4 v0.1.2
 	github.com/pkg/sftp v1.13.10
 	golang.org/x/crypto v0.49.0
 	golang.org/x/sys v0.42.0
@@ -33,7 +34,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.22 // indirect
-	github.com/mmcloughlin/md4 v0.1.2 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
@@ -44,4 +44,4 @@ require (
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )
 
-replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260405222736-90146afa23d7 // branch: main
+replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260406000401-b2b914b37b56 // branch: main
