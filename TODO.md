@@ -13,3 +13,4 @@
   - nfs
   - s3/gs
   - http scraping
+  - afero fs lib
