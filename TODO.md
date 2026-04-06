@@ -5,8 +5,6 @@
 - set base directory
 - open/collapse all
 - export to csv/xls
-- gokrazy/rsync support checksum
-- gokrazy/rsync output File.Checksum to client
 - syncthing
 - misc protocols
   - smb/cifs
