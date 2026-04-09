@@ -263,6 +263,30 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 }
 
 func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+	// Update the node's own Left/Right entries so its presence reflects current
+	// state on both backends. Skip for the root node which has no parent to list.
+	if node.RelPath != "" {
+		leftEntries, rightEntries := s.listBoth(ctx, dirOf(node.RelPath))
+		var le, re *FileEntry
+		for i := range leftEntries {
+			if leftEntries[i].Name == node.Name {
+				le = &leftEntries[i]
+				break
+			}
+		}
+		for i := range rightEntries {
+			if rightEntries[i].Name == node.Name {
+				re = &rightEntries[i]
+				break
+			}
+		}
+		s.mu.Lock()
+		node.Left = le
+		node.Right = re
+		compareNode(node, subSecond, timeGrace)
+		s.mu.Unlock()
+	}
+
 	oldExpanded := make(map[string]bool)
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
