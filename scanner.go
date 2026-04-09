@@ -354,6 +354,25 @@ func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, 
 	return s.listBoth(ctx, relDir)
 }
 
+// FindNearestDestNode walks up from relPath and returns the deepest tree node
+// that has an entry on the copy destination side. Used to find the correct
+// rescan root when intermediate directories are created during a copy.
+func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNode {
+	tree := s.Tree()
+	if tree == nil {
+		return nil
+	}
+	for path := relPath; path != ""; path = dirOf(path) {
+		n := findNode(tree, path)
+		if n != nil {
+			if (leftToRight && n.Right != nil) || (!leftToRight && n.Left != nil) {
+				return n
+			}
+		}
+	}
+	return tree // root as fallback
+}
+
 func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond, timeGrace bool) {
 	tree := s.Tree()
 	if tree == nil {

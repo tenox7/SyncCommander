@@ -2,7 +2,7 @@
 
 Directory tree comparisation and synchronization tool.
 
-Like Norton Commander or / Midnight Commander but focused on sync.
+Like Norton Commander or Midnight Commander but focused on sync.
 
 
 ## Supported protocols

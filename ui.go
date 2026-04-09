@@ -537,8 +537,10 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 			scanner.RescanNode(ctx, node, checksum, subSecond, timeGrace)
 		} else {
 			parentDir := dirOf(node.RelPath)
-			le, re := scanner.ListBothDir(ctx, parentDir)
-			scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace)
+			ancestor := scanner.FindNearestDestNode(parentDir, leftToRight)
+			if ancestor != nil {
+				scanner.RescanNode(ctx, ancestor, checksum, subSecond, timeGrace)
+			}
 		}
 		return copyDoneMsg{}
 	}
