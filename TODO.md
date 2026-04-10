@@ -2,6 +2,8 @@
 
 ## Bugs
 
+- Improve top status line, current format is not very well understood
+  I think we need dir/files/size on both left right and count of ≠ and Δ size to the right
 
 ## Features
 - support remote move with relative and absolute paths, ask for path
@@ -19,6 +21,6 @@
   - syncthing protocol
   - smb/cifs
   - nfs
-  - s3/gs
+  - s3/gs with ETag
   - http scraping
   - afero fs lib

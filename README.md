@@ -1,22 +1,12 @@
 # Sync Commander
 
-Directory tree comparisation and synchronization tool.
+A tool for manual comparison, inspection, verification and troubleshooting of file/directory tree synchronization. Like Norton Commander or Midnight Commander but for sync.
 
-Manual inspection, comparison, verification and troubleshooting of directory tree sync.
+## Supported protocols and checksums
 
-Like Norton Commander or Midnight Commander but for sync.
+- Local dir including remote mounts. SHA/MD5 checksums.
+- ftp://  ftps://  ftpes://  with implicit/explicit TLS. XCRC, XSHA, HASH.
+- sftp:// scp:// ssh://. SHA/MD5 over ssh.
+- rsync://, rsync+ssh://. Rsync MD4 and SHA/MD5 over ssh.
 
-## Supported protocols
-
-- Local dir including remote mounts
-- ftp://  ftps://  ftpes://  with implicit/explicit TLS
-- sftp:// scp:// ssh://
-- rsync://, rsync+ssh://
-
-## Remote checksum calculation
-
-- SFTP/SCP - sha/md5 tools via SSH
-- FTP - via XCRC, XSHA, HASH
-- rsync - via rsync own md4
-- rsync+ssh - sha/md5 tools via SSH
 
