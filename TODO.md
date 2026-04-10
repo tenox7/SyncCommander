@@ -14,8 +14,9 @@
 - open/collapse all
 - select multiple files / folders and execute a batch
 - export to csv/xls
-- syncthing
+- color schemes
 - misc protocols
+  - syncthing protocol
   - smb/cifs
   - nfs
   - s3/gs

@@ -224,10 +224,29 @@ func (p *Panel) renderNode(node *TreeNode) string {
 func (p *Panel) renderAttrRow(node *TreeNode) string {
 	chrome := renderGuides(node)
 
-	label := styleUnknown.Render(fmt.Sprintf("%-5s", node.AttrLabel))
-	st := attrChar("=", node.AttrStatus)
-	if node.AttrStatus == AttrDifferent {
-		st = attrChar("≠", node.AttrStatus)
+	// Determine the active colour: grey when inactive (option off or invalid time),
+	// otherwise green/red per status. AttrNA and AttrScanning stay as-is.
+	activeStyle := styleUnknown
+	if !node.AttrInactive {
+		switch node.AttrStatus {
+		case AttrEqual:
+			activeStyle = styleEqual
+		case AttrDifferent:
+			activeStyle = styleDifferent
+		}
+	}
+	label := activeStyle.Render(fmt.Sprintf("%-5s", node.AttrLabel))
+
+	var st string
+	switch node.AttrStatus {
+	case AttrNA:
+		st = styleUnknown.Render("-")
+	case AttrScanning:
+		st = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render("=")
+	case AttrDifferent:
+		st = activeStyle.Render("≠")
+	default:
+		st = activeStyle.Render("=")
 	}
 
 	left := node.AttrLeftVal
@@ -237,9 +256,11 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 	}
 
 	val := left
+	raw := node.AttrLeftRaw
 	win := node.AttrWinner
 	if !p.isLeft {
 		val = right
+		raw = node.AttrRightRaw
 		win = -win
 	}
 	if node.AttrStatus == AttrDifferent && win != 0 {
@@ -248,6 +269,9 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 		} else {
 			val = styleDifferent.Render(val)
 		}
+	}
+	if raw != "" && val != "-" {
+		val += styleChrome.Render(" ["+raw+"]")
 	}
 	return fmt.Sprintf("%s %s %s  %s", chrome, label, st, val)
 }
@@ -274,7 +298,7 @@ func (p *Panel) inlineInfo(node *TreeNode) string {
 	if entry == nil {
 		return ""
 	}
-	return styleChrome.Render(entry.ModTime.Format("060102 15:04") + " " + fmt.Sprintf("%7s", formatSize(entry.Size)))
+	return styleChrome.Render(timeAgo(entry.ModTime) + " " + fmt.Sprintf("%7s", formatSize(entry.Size)))
 }
 
 func attrChar(label string, status AttrStatus) string {

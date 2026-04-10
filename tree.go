@@ -57,7 +57,10 @@ type TreeNode struct {
 	AttrLabel    string
 	AttrLeftVal  string
 	AttrRightVal string
+	AttrLeftRaw  string
+	AttrRightRaw string
 	AttrStatus   AttrStatus
+	AttrInactive bool
 	AttrWinner   int
 	AttrPresence Presence
 }
@@ -319,7 +322,10 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 		label    string
 		leftVal  string
 		rightVal string
+		leftRaw  string
+		rightRaw string
 		status   AttrStatus
+		inactive bool
 		winner   int
 	}
 
@@ -360,13 +366,37 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 
 	var attrs []attr
 
-	addTime := func(label string, get func(*FileEntry) time.Time, status AttrStatus) {
-		lv, rv := val(func(e *FileEntry) string { return get(e).Format(tf) })
+	rawStr := func(get func(*FileEntry) string) (string, string) {
+		lv, rv := "", ""
+		if l != nil {
+			lv = get(l)
+		}
+		if r != nil {
+			rv = get(r)
+		}
+		return lv, rv
+	}
+
+	addTime := func(label string, get func(*FileEntry) time.Time, status AttrStatus, optEnabled bool) {
+		lv, rv := val(func(e *FileEntry) string {
+			if t := get(e); !t.IsZero() {
+				return t.Format(tf)
+			}
+			return "n/a"
+		})
+		lraw, rraw := rawStr(func(e *FileEntry) string {
+			if t := get(e); !t.IsZero() {
+				return fmt.Sprintf("%d", t.Unix())
+			}
+			return ""
+		})
+		bothValid := l != nil && r != nil && !get(l).IsZero() && !get(r).IsZero()
+		inactive := !optEnabled || !bothValid
 		w := 0
-		if l != nil && r != nil {
+		if !inactive {
 			w = timeWin(get(l), get(r))
 		}
-		attrs = append(attrs, attr{label, lv, rv, status, w})
+		attrs = append(attrs, attr{label, lv, rv, lraw, rraw, status, inactive, w})
 	}
 
 	ls, rs := val(func(e *FileEntry) string { return formatSize(e.Size) })
@@ -374,13 +404,15 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 		ls = fmt.Sprintf("%d", l.Size)
 		rs = fmt.Sprintf("%d", r.Size)
 	}
-	attrs = append(attrs, attr{"size", ls, rs, node.Compare.Size, sizeWin})
-	addTime("mtime", func(e *FileEntry) time.Time { return e.ModTime }, node.Compare.ModTime)
-	addTime("atime", func(e *FileEntry) time.Time { return e.ATime }, node.Compare.ATime)
-	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime }, node.Compare.CTime)
-	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime)
+	lsraw, rsraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("%d", e.Size) })
+	attrs = append(attrs, attr{"size", ls, rs, lsraw, rsraw, node.Compare.Size, false, sizeWin})
+	addTime("mtime", func(e *FileEntry) time.Time { return e.ModTime }, node.Compare.ModTime, opts != nil && opts.ModTime)
+	addTime("atime", func(e *FileEntry) time.Time { return e.ATime }, node.Compare.ATime, opts != nil && opts.ATime)
+	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime }, node.Compare.CTime, opts != nil && opts.CTime)
+	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime, opts != nil && opts.BTime)
 	lv, rv := val(func(e *FileEntry) string { return e.Mode.String() })
-	attrs = append(attrs, attr{"perm", lv, rv, node.Compare.Mode, 0})
+	lpraw, rpraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("0%o", e.Mode.Perm()) })
+	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0})
 	lc := node.LeftChecksum
 	rc := node.RightChecksum
 	if lc == "" {
@@ -389,7 +421,7 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 	if rc == "" {
 		rc = "-"
 	}
-	attrs = append(attrs, attr{"cksum", lc, rc, node.Compare.Checksum, 0})
+	attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0})
 
 	for i, a := range attrs {
 		row := &TreeNode{
@@ -397,7 +429,10 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 			AttrLabel:    a.label,
 			AttrLeftVal:  a.leftVal,
 			AttrRightVal: a.rightVal,
+			AttrLeftRaw:  a.leftRaw,
+			AttrRightRaw: a.rightRaw,
 			AttrStatus:   a.status,
+			AttrInactive: a.inactive,
 			AttrWinner:   a.winner,
 			AttrPresence: node.Compare.Presence,
 			Guides:       childGuides,
@@ -503,6 +538,31 @@ func countDescendants(node *TreeNode) (files, dirs int, complete bool) {
 		}
 	}
 	return
+}
+
+
+func timeAgo(t time.Time) string {
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	days := int(d.Hours() / 24)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case days < 1:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case days < 7:
+		return fmt.Sprintf("%dd ago", days)
+	case days < 30:
+		return fmt.Sprintf("%dwk ago", days/7)
+	case days < 365:
+		return fmt.Sprintf("%dmo ago", days/30)
+	default:
+		return fmt.Sprintf("%dyr ago", days/365)
+	}
 }
 
 func formatSize(b int64) string {
