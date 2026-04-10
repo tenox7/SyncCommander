@@ -7,10 +7,11 @@ import (
 )
 
 type ConfirmDialog struct {
-	visible bool
-	title   string
-	lines   []string
-	danger  bool
+	visible    bool
+	title      string
+	lines      []string
+	danger     bool
+	choiceMode bool // L=left / R=right / B=both, used for PresenceBoth deletes
 }
 
 func NewConfirmDialog() *ConfirmDialog {
@@ -24,8 +25,17 @@ func (d *ConfirmDialog) Open(title string, lines []string, danger bool) {
 	d.danger = danger
 }
 
+func (d *ConfirmDialog) OpenChoice(title string, lines []string, danger bool) {
+	d.visible = true
+	d.title = title
+	d.lines = lines
+	d.danger = danger
+	d.choiceMode = true
+}
+
 func (d *ConfirmDialog) Close() {
 	d.visible = false
+	d.choiceMode = false
 }
 
 func (d *ConfirmDialog) IsOpen() bool {
@@ -51,7 +61,14 @@ func (d *ConfirmDialog) View(width, height int) string {
 		sb.WriteString(line)
 	}
 	sb.WriteString("\n\n")
-	if d.danger {
+	if d.choiceMode {
+		accent := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		if d.danger {
+			accent = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		}
+		sb.WriteString(accent.Render(",=left  .=right  ↵=both"))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  Esc=cancel"))
+	} else if d.danger {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("Y=confirm"))
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  Esc=cancel"))
 	} else {

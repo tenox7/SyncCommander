@@ -376,6 +376,34 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Choice mode: L/R/B select which side(s) to delete
+	if m.confirm.choiceMode && m.pendingDelete != nil {
+		var side Presence
+		found := true
+		switch msg.String() {
+		case ",":
+			side = PresenceLeftOnly
+		case ".":
+			side = PresenceRightOnly
+		case "enter":
+			side = PresenceBoth
+		case "esc", "ctrl+c", "q":
+			m.confirm.Close()
+			m.pendingDelete = nil
+			return m, nil
+		default:
+			found = false
+		}
+		if found {
+			m.confirm.Close()
+			node := m.pendingDelete
+			m.pendingDelete = nil
+			m.deleting = true
+			return m, m.deleteNode(node, side)
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "y", "Y":
 		m.confirm.Close()
@@ -383,7 +411,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, m.deleteNode(node)
+			return m, m.deleteNode(node, node.Compare.Presence)
 		}
 		if m.pendingCopy != nil {
 			pc := m.pendingCopy
@@ -401,19 +429,32 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) openDelete(node *TreeNode) {
 	m.pendingDelete = node
-	sides := "both sides"
-	switch node.Compare.Presence {
-	case PresenceLeftOnly:
-		sides = "left side only"
-	case PresenceRightOnly:
-		sides = "right side only"
-	}
 
-	if !node.IsDir {
-		m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)
+	if node.Compare.Presence != PresenceBoth {
+		sides := "left side only"
+		if node.Compare.Presence == PresenceRightOnly {
+			sides = "right side only"
+		}
+		if !node.IsDir {
+			m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)
+			return
+		}
+		files, dirs, complete := countDescendants(node)
+		countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
+		if !complete {
+			countStr = fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
+		} else if files == 0 && dirs == 0 {
+			countStr = "empty folder"
+		}
+		m.confirm.Open("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr, sides}, true)
 		return
 	}
 
+	// PresenceBoth: let user pick which side
+	if !node.IsDir {
+		m.confirm.OpenChoice("Delete "+node.Name+"?", []string{""}, false)
+		return
+	}
 	files, dirs, complete := countDescendants(node)
 	countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
 	if !complete {
@@ -421,14 +462,10 @@ func (m *Model) openDelete(node *TreeNode) {
 	} else if files == 0 && dirs == 0 {
 		countStr = "empty folder"
 	}
-	m.confirm.Open(
-		"\u26a0 RECURSIVE DELETE",
-		[]string{"", node.Name + "/", countStr, sides},
-		true,
-	)
+	m.confirm.OpenChoice("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr}, true)
 }
 
-func (m *Model) deleteNode(node *TreeNode) tea.Cmd {
+func (m *Model) deleteNode(node *TreeNode, side Presence) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
@@ -436,27 +473,22 @@ func (m *Model) deleteNode(node *TreeNode) tea.Cmd {
 	timeGrace := m.cmpOpts.TimeGrace
 	isDir := node.IsDir
 	relPath := node.RelPath
-	presence := node.Compare.Presence
 	return func() tea.Msg {
 		ctx := context.Background()
+		delLeft := side != PresenceRightOnly
+		delRight := side != PresenceLeftOnly
 		if isDir {
-			switch presence {
-			case PresenceLeftOnly:
+			if delLeft {
 				_ = left.RemoveAll(ctx, relPath)
-			case PresenceRightOnly:
-				_ = right.RemoveAll(ctx, relPath)
-			default:
-				_ = left.RemoveAll(ctx, relPath)
+			}
+			if delRight {
 				_ = right.RemoveAll(ctx, relPath)
 			}
 		} else {
-			switch presence {
-			case PresenceLeftOnly:
+			if delLeft {
 				_ = left.Remove(ctx, relPath)
-			case PresenceRightOnly:
-				_ = right.Remove(ctx, relPath)
-			default:
-				_ = left.Remove(ctx, relPath)
+			}
+			if delRight {
 				_ = right.Remove(ctx, relPath)
 			}
 		}

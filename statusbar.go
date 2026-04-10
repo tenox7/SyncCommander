@@ -74,5 +74,13 @@ func RenderTopBar(progress ScanProgress, tree *TreeNode, spinner string, operati
 }
 
 func RenderBottomBar(width int) string {
-	return styleBar.Width(width).Render("←→=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log O=opts ?=help Q=quit")
+	hint := "↵=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log O=opts ?=help Q=quit"
+	inner := width - 2 // styleBar has Padding(0,1) on each side
+	if inner < 0 {
+		inner = 0
+	}
+	if runes := []rune(hint); len(runes) > inner {
+		hint = string(runes[:inner])
+	}
+	return styleBar.Width(width).Render(hint)
 }
