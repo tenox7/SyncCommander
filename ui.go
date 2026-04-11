@@ -67,9 +67,11 @@ type Model struct {
 	logView       *LogDialog
 	pendingDelete *TreeNode
 	pendingCopy   *pendingCopyInfo
+	openDlg       *OpenDialog
+	insecure      bool
 }
 
-func NewModel(left, right Backend, cksum bool) Model {
+func NewModel(left, right Backend, cksum, insecure bool) Model {
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
@@ -87,7 +89,9 @@ func NewModel(left, right Backend, cksum bool) Model {
 		help:         NewHelpDialog(),
 		info:         NewInfoDialog(),
 		logView:      NewLogDialog(),
+		openDlg:      NewOpenDialog(),
 		copyProgress: &CopyProgress{},
+		insecure:     insecure,
 	}
 	lp.cmpOpts = &m.cmpOpts
 	rp.cmpOpts = &m.cmpOpts
@@ -199,6 +203,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.input.IsOpen() {
 		return m.handleInputKey(msg)
+	}
+	if m.openDlg.IsOpen() {
+		return m.handleOpenDlgKey(msg)
 	}
 	if m.settings.IsOpen() {
 		return m.handleSettingsKey(msg)
@@ -345,6 +352,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cl, cr := m.scanner.ChecksumInfo()
 			m.info.Open(computeTreeStats(tree), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
 		}
+	case "u":
+		if m.copying || m.deleting {
+			break
+		}
+		m.openDlg.Open(m.left.BasePath(), m.right.BasePath())
 	}
 	return m, nil
 }
@@ -371,6 +383,49 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Confirm()
 	default:
 		m.input.HandleKey(msg.String())
+	}
+	return m, nil
+}
+
+func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.openDlg.Close()
+	case "enter":
+		leftPath := m.openDlg.leftValue
+		rightPath := m.openDlg.rightValue
+		if leftPath == "" || rightPath == "" {
+			m.openDlg.SetError("both paths are required")
+			return m, nil
+		}
+		leftBackend, err := tryOpenBackend(leftPath, m.insecure)
+		if err != nil {
+			m.openDlg.SetError("left: " + err.Error())
+			return m, nil
+		}
+		rightBackend, err := tryOpenBackend(rightPath, m.insecure)
+		if err != nil {
+			closeBackend(leftBackend)
+			m.openDlg.SetError("right: " + err.Error())
+			return m, nil
+		}
+		m.scanner.Cancel()
+		oldLeft, oldRight := m.left, m.right
+		go func() {
+			closeBackend(oldLeft)
+			closeBackend(oldRight)
+		}()
+		m.left = leftBackend
+		m.right = rightBackend
+		m.scanner = NewScanner(leftBackend, rightBackend, 4)
+		m.leftPanel.title = leftBackend.BasePath()
+		m.rightPanel.title = rightBackend.BasePath()
+		m.leftPanel.SetNodes(nil)
+		m.rightPanel.SetNodes(nil)
+		m.openDlg.Close()
+		return m, m.startScan()
+	default:
+		m.openDlg.HandleKey(msg.String())
 	}
 	return m, nil
 }
@@ -785,6 +840,9 @@ func (m Model) View() string {
 	}
 	if m.settings.IsOpen() {
 		return m.settings.View(m.width, m.height)
+	}
+	if m.openDlg.IsOpen() {
+		return m.openDlg.View(m.width, m.height)
 	}
 	if m.input.IsOpen() {
 		return m.input.View(m.width, m.height)

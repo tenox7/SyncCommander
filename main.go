@@ -13,22 +13,34 @@ func main() {
 	cksum := flag.Bool("cksum", false, "enable checksum comparison")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: sc [--cksum] [--insecure] <left-path> <right-path>\n")
+		fmt.Fprintf(os.Stderr, "usage: sc [--cksum] [--insecure] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh}://[user[:pass]@]host/path\n")
 	}
 	flag.Parse()
 
-	if flag.NArg() != 2 {
+	var leftPath, rightPath string
+	switch flag.NArg() {
+	case 0:
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+		leftPath = cwd
+		rightPath = cwd
+	case 2:
+		leftPath = flag.Arg(0)
+		rightPath = flag.Arg(1)
+	default:
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	left := openBackendLazy(flag.Arg(0), *insecure)
-	right := openBackendLazy(flag.Arg(1), *insecure)
+	left := openBackendLazy(leftPath, *insecure)
+	right := openBackendLazy(rightPath, *insecure)
 	defer closeBackend(left)
 	defer closeBackend(right)
 
-	model := NewModel(left, right, *cksum)
+	model := NewModel(left, right, *cksum, *insecure)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -83,6 +95,25 @@ func openBackend(arg string, insecure bool) (Backend, error) {
 		return NewRsyncBackend(arg)
 	}
 	return NewLocalBackend(arg), nil
+}
+
+func tryOpenBackend(arg string, insecure bool) (Backend, error) {
+	if !isRemote(arg) {
+		info, err := os.Stat(arg)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", arg, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("%s: not a directory", arg)
+		}
+		return NewLocalBackend(arg), nil
+	}
+	return &lazyBackend{
+		factory: func() (Backend, error) {
+			return openBackend(arg, insecure)
+		},
+		display: arg,
+	}, nil
 }
 
 func closeBackend(b Backend) {
