@@ -32,6 +32,7 @@ var helpKeys = []struct{ key, desc string }{
 	{"PgUp/Dn", "Page up / down"},
 	{"I", "Info / statistics"},
 	{"~", "Remote protocol log"},
+	{"B", "Set base to selected directory"},
 	{"U", "Change directory / URL"},
 	{"S", "Settings"},
 	{"W", "Toggle line wrap"},

@@ -357,6 +357,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.openDlg.Open(m.left.BasePath(), m.right.BasePath())
+	case "b":
+		if m.copying || m.deleting {
+			break
+		}
+		node := m.activePanel().CursorNode()
+		if node == nil || !node.IsDir || node.IsAttr {
+			break
+		}
+		leftPath := m.left.BasePath()
+		rightPath := m.right.BasePath()
+		if node.Left != nil {
+			leftPath = leftPath + "/" + node.RelPath
+		}
+		if node.Right != nil {
+			rightPath = rightPath + "/" + node.RelPath
+		}
+		cmd, _ := m.reopenBackends(leftPath, rightPath)
+		if cmd != nil {
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -387,6 +407,47 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
+	var newLeft, newRight Backend
+	var err error
+
+	if leftPath != m.left.BasePath() {
+		newLeft, err = tryOpenBackend(leftPath, m.insecure)
+		if err != nil {
+			return nil, "left: " + err.Error()
+		}
+	}
+	if rightPath != m.right.BasePath() {
+		newRight, err = tryOpenBackend(rightPath, m.insecure)
+		if err != nil {
+			if newLeft != nil {
+				closeBackend(newLeft)
+			}
+			return nil, "right: " + err.Error()
+		}
+	}
+
+	m.scanner.Cancel()
+
+	if newLeft != nil {
+		oldLeft := m.left
+		go func() { closeBackend(oldLeft) }()
+		m.left = newLeft
+	}
+	if newRight != nil {
+		oldRight := m.right
+		go func() { closeBackend(oldRight) }()
+		m.right = newRight
+	}
+
+	m.scanner = NewScanner(m.left, m.right, 4)
+	m.leftPanel.title = m.left.BasePath()
+	m.rightPanel.title = m.right.BasePath()
+	m.leftPanel.SetNodes(nil)
+	m.rightPanel.SetNodes(nil)
+	return m.startScan(), ""
+}
+
 func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -398,32 +459,13 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openDlg.SetError("both paths are required")
 			return m, nil
 		}
-		leftBackend, err := tryOpenBackend(leftPath, m.insecure)
-		if err != nil {
-			m.openDlg.SetError("left: " + err.Error())
+		cmd, errMsg := m.reopenBackends(leftPath, rightPath)
+		if errMsg != "" {
+			m.openDlg.SetError(errMsg)
 			return m, nil
 		}
-		rightBackend, err := tryOpenBackend(rightPath, m.insecure)
-		if err != nil {
-			closeBackend(leftBackend)
-			m.openDlg.SetError("right: " + err.Error())
-			return m, nil
-		}
-		m.scanner.Cancel()
-		oldLeft, oldRight := m.left, m.right
-		go func() {
-			closeBackend(oldLeft)
-			closeBackend(oldRight)
-		}()
-		m.left = leftBackend
-		m.right = rightBackend
-		m.scanner = NewScanner(leftBackend, rightBackend, 4)
-		m.leftPanel.title = leftBackend.BasePath()
-		m.rightPanel.title = rightBackend.BasePath()
-		m.leftPanel.SetNodes(nil)
-		m.rightPanel.SetNodes(nil)
 		m.openDlg.Close()
-		return m, m.startScan()
+		return m, cmd
 	default:
 		m.openDlg.HandleKey(msg.String())
 	}

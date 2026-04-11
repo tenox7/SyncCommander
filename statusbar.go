@@ -74,7 +74,7 @@ func RenderTopBar(progress ScanProgress, tree *TreeNode, spinner string, operati
 }
 
 func RenderBottomBar(width int) string {
-	hint := "↵=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log U=url S=set ?=help Q=quit"
+	hint := "↵=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log B=base U=url S=set ?=help Q=quit"
 	inner := width - 2 // styleBar has Padding(0,1) on each side
 	if inner < 0 {
 		inner = 0
