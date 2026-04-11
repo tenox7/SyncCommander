@@ -169,7 +169,7 @@ func (p *Panel) isHidden(node *TreeNode) bool {
 
 func (p *Panel) renderNode(node *TreeNode) string {
 	if p.isHidden(node) {
-		return ""
+		return renderGuidesOnly(node)
 	}
 
 	if node.IsAttr {
@@ -390,6 +390,26 @@ func renderGuides(node *TreeNode) string {
 		sb.WriteString("└")
 	} else {
 		sb.WriteString("├")
+	}
+	return styleChrome.Render(sb.String())
+}
+
+func renderGuidesOnly(node *TreeNode) string {
+	var sb strings.Builder
+	for i, cont := range node.Guides {
+		if i == 0 {
+			continue
+		}
+		if cont {
+			sb.WriteString("│")
+		} else {
+			sb.WriteString(" ")
+		}
+	}
+	if !node.IsLast {
+		sb.WriteString("│")
+	} else {
+		sb.WriteString(" ")
 	}
 	return styleChrome.Render(sb.String())
 }
