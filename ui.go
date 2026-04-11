@@ -59,7 +59,7 @@ type Model struct {
 	width         int
 	height        int
 	spinFrame     int
-	options       *OptionsDialog
+	settings      *SettingsDialog
 	input         *InputDialog
 	confirm       *ConfirmDialog
 	help          *HelpDialog
@@ -81,7 +81,7 @@ func NewModel(left, right Backend, cksum bool) Model {
 		scanner:    NewScanner(left, right, 4),
 		activeLeft: true,
 		cmpOpts:    CompareOpts{Size: true, ModTime: true, Checksum: cksum, TimeGrace: true},
-		options:    NewOptionsDialog(),
+		settings:   NewSettingsDialog(),
 		input:      NewInputDialog(),
 		confirm:      NewConfirmDialog(),
 		help:         NewHelpDialog(),
@@ -91,7 +91,7 @@ func NewModel(left, right Backend, cksum bool) Model {
 	}
 	lp.cmpOpts = &m.cmpOpts
 	rp.cmpOpts = &m.cmpOpts
-	m.options.SetOptions([]Option{
+	m.settings.SetOptions([]Option{
 		{Label: "Size", Value: &m.cmpOpts.Size},
 		{Label: "Modify time", Value: &m.cmpOpts.ModTime},
 		{Label: "Access time", Value: &m.cmpOpts.ATime},
@@ -127,7 +127,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
-			m.options.UpdateChecksumLabel(algo)
+			m.settings.UpdateChecksumLabel(algo)
 		}
 		m.logView.AutoOpen(remoteLog.ErrCount())
 		m.refreshTree()
@@ -200,8 +200,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.input.IsOpen() {
 		return m.handleInputKey(msg)
 	}
-	if m.options.IsOpen() {
-		return m.handleOptionsKey(msg)
+	if m.settings.IsOpen() {
+		return m.handleSettingsKey(msg)
 	}
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
@@ -328,8 +328,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.copying = true
 		return m, m.copyNode(node, false, false)
-	case "o":
-		m.options.Open()
+	case "s":
+		m.settings.Open()
 	case "w":
 		m.leftPanel.wrap = !m.leftPanel.wrap
 		m.rightPanel.wrap = !m.rightPanel.wrap
@@ -349,16 +349,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleOptionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c", "o", "q":
-		m.options.Close()
+	case "esc", "ctrl+c", "s", "q":
+		m.settings.Close()
 	case "up", "k":
-		m.options.MoveUp()
+		m.settings.MoveUp()
 	case "down", "j":
-		m.options.MoveDown()
+		m.settings.MoveDown()
 	case " ", "enter":
-		m.options.Toggle()
+		m.settings.Toggle()
 	}
 	return m, nil
 }
@@ -783,8 +783,8 @@ func (m Model) View() string {
 	if m.confirm.IsOpen() {
 		return m.confirm.View(m.width, m.height)
 	}
-	if m.options.IsOpen() {
-		return m.options.View(m.width, m.height)
+	if m.settings.IsOpen() {
+		return m.settings.View(m.width, m.height)
 	}
 	if m.input.IsOpen() {
 		return m.input.View(m.width, m.height)

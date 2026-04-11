@@ -66,7 +66,7 @@ func (d *ConfirmDialog) View(width, height int) string {
 		if d.danger {
 			accent = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 		}
-		sb.WriteString(accent.Render(",=left  .=right  ↵=both"))
+		sb.WriteString(accent.Render(",=left only  .=right only  ↵=both"))
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  Esc=cancel"))
 	} else if d.danger {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("Y=confirm"))

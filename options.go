@@ -12,46 +12,46 @@ type Option struct {
 	Value *bool
 }
 
-type OptionsDialog struct {
+type SettingsDialog struct {
 	options []Option
 	cursor  int
 	visible bool
 }
 
-func NewOptionsDialog() *OptionsDialog {
-	return &OptionsDialog{}
+func NewSettingsDialog() *SettingsDialog {
+	return &SettingsDialog{}
 }
 
-func (d *OptionsDialog) SetOptions(opts []Option) {
+func (d *SettingsDialog) SetOptions(opts []Option) {
 	d.options = opts
 }
 
-func (d *OptionsDialog) Open() {
+func (d *SettingsDialog) Open() {
 	d.visible = true
 	d.cursor = 0
 }
 
-func (d *OptionsDialog) Close() {
+func (d *SettingsDialog) Close() {
 	d.visible = false
 }
 
-func (d *OptionsDialog) IsOpen() bool {
+func (d *SettingsDialog) IsOpen() bool {
 	return d.visible
 }
 
-func (d *OptionsDialog) MoveUp() {
+func (d *SettingsDialog) MoveUp() {
 	if d.cursor > 0 {
 		d.cursor--
 	}
 }
 
-func (d *OptionsDialog) MoveDown() {
+func (d *SettingsDialog) MoveDown() {
 	if d.cursor < len(d.options)-1 {
 		d.cursor++
 	}
 }
 
-func (d *OptionsDialog) UpdateChecksumLabel(algo string) {
+func (d *SettingsDialog) UpdateChecksumLabel(algo string) {
 	label := fmt.Sprintf("Checksum (%s)", algo)
 	for i := range d.options {
 		if strings.HasPrefix(d.options[i].Label, "Checksum") {
@@ -61,7 +61,7 @@ func (d *OptionsDialog) UpdateChecksumLabel(algo string) {
 	}
 }
 
-func (d *OptionsDialog) Toggle() {
+func (d *SettingsDialog) Toggle() {
 	if d.cursor >= 0 && d.cursor < len(d.options) {
 		opt := &d.options[d.cursor]
 		*opt.Value = !*opt.Value
@@ -78,13 +78,13 @@ var (
 	styleOptOff      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 )
 
-func (d *OptionsDialog) View(width, height int) string {
+func (d *SettingsDialog) View(width, height int) string {
 	if !d.visible {
 		return ""
 	}
 
 	var sb strings.Builder
-	sb.WriteString(styleDialogTitle.Render("Options"))
+	sb.WriteString(styleDialogTitle.Render("Settings"))
 	sb.WriteString("\n\n")
 
 	for i, opt := range d.options {
