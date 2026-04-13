@@ -404,18 +404,18 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 
 	addTime := func(label string, get func(*FileEntry) time.Time, status AttrStatus, optEnabled bool) {
 		lv, rv := val(func(e *FileEntry) string {
-			if t := get(e); !t.IsZero() {
+			if t := get(e); isTimeValid(t) {
 				return t.Format(tf)
 			}
 			return "n/a"
 		})
 		lraw, rraw := rawStr(func(e *FileEntry) string {
-			if t := get(e); !t.IsZero() {
+			if t := get(e); isTimeValid(t) {
 				return fmt.Sprintf("%d", t.Unix())
 			}
 			return ""
 		})
-		bothValid := l != nil && r != nil && !get(l).IsZero() && !get(r).IsZero()
+		bothValid := l != nil && r != nil && isTimeValid(get(l)) && isTimeValid(get(r))
 		inactive := !optEnabled || !bothValid
 		w := 0
 		if !inactive {
@@ -565,6 +565,10 @@ func countDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	return
 }
 
+
+func isTimeValid(t time.Time) bool {
+	return !t.IsZero() && t.Year() >= 1970
+}
 
 func timeAgo(t time.Time) string {
 	d := time.Since(t)
