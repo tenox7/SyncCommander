@@ -23,54 +23,47 @@ func progressBar(done, total int64, barWidth int) string {
 	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 }
 
-func sizeDiffStr(tree *TreeNode) string {
-	if tree == nil {
-		return ""
+func RenderPanelTopBar(stats *TreeStats, isLeft bool, prefix string, width int) string {
+	var sb strings.Builder
+	if prefix != "" {
+		sb.WriteString(prefix)
+		sb.WriteString("  ")
 	}
-	s := computeTreeStats(tree)
-	diff := s.LeftSize - s.RightSize
-	if diff == 0 {
-		return "Δ 0"
+	if stats != nil {
+		var dirDelta, fileDelta int
+		var sizeDelta int64
+		if isLeft {
+			dirDelta = stats.LeftDirs - stats.RightDirs
+			fileDelta = stats.LeftFiles - stats.RightFiles
+			sizeDelta = stats.LeftSize - stats.RightSize
+		} else {
+			dirDelta = stats.RightDirs - stats.LeftDirs
+			fileDelta = stats.RightFiles - stats.LeftFiles
+			sizeDelta = stats.RightSize - stats.LeftSize
+		}
+		sb.WriteString(fmt.Sprintf("%sd %sf %s",
+			formatDelta(dirDelta),
+			formatDelta(fileDelta),
+			formatSizeDelta(sizeDelta)))
 	}
-	sign := "L+"
-	if diff < 0 {
-		diff = -diff
-		sign = "R+"
-	}
-	return fmt.Sprintf("Δ %s%s", sign, formatSizeLong(diff))
+	return styleBar.Width(width).Render(sb.String())
 }
 
-func RenderTopBar(progress ScanProgress, tree *TreeNode, spinner string, operation string, cksumStatus string, width int) string {
-	cksum := "cksum=" + cksumStatus
-	if operation != "" {
-		return styleBar.Width(width).Render(operation + "  " + cksum)
+func formatDelta(d int) string {
+	if d == 0 {
+		return "0"
 	}
-	switch progress.Phase {
-	case "":
-		return styleBar.Width(width).Render(cksum)
-	case "done":
-		s := fmt.Sprintf("=%d ≠%d  %s",
-			progress.FilesEqual, progress.FilesDifferent,
-			sizeDiffStr(tree))
-		if progress.ChecksumFiles > 0 {
-			s += fmt.Sprintf("  cksum:%d/%d", progress.ChecksumDone, progress.ChecksumFiles)
-		} else {
-			s += "  " + cksum
-		}
-		return styleBar.Width(width).Render(s)
-	default:
-		s := fmt.Sprintf("%s dirs:%d/%d files:%d  =%d ≠%d",
-			progress.Phase,
-			progress.DirsListed, progress.DirsTotal,
-			progress.TotalFiles,
-			progress.FilesEqual, progress.FilesDifferent)
-		if progress.ChecksumFiles > 0 {
-			s += fmt.Sprintf("  cksum:%d/%d", progress.ChecksumDone, progress.ChecksumFiles)
-		} else {
-			s += "  " + cksum
-		}
-		return styleBar.Width(width).Render(s)
+	return fmt.Sprintf("%+d", d)
+}
+
+func formatSizeDelta(d int64) string {
+	if d == 0 {
+		return "0"
 	}
+	if d > 0 {
+		return "+" + formatSize(d)
+	}
+	return "-" + formatSize(-d)
 }
 
 func RenderBottomBar(width int) string {

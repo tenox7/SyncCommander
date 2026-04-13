@@ -49,8 +49,12 @@ type TreeNode struct {
 	ChildStatus    AttrStatus
 	LeftChecksum   string
 	RightChecksum  string
-	LeftTotalSize  int64
-	RightTotalSize int64
+	LeftTotalSize   int64
+	RightTotalSize  int64
+	LeftTotalFiles  int
+	RightTotalFiles int
+	LeftTotalDirs   int
+	RightTotalDirs  int
 	Guides       []bool
 	IsLast       bool
 	IsAttr       bool
@@ -217,10 +221,15 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		node.ChildStatus = AttrUnknown
 		node.LeftTotalSize = 0
 		node.RightTotalSize = 0
+		node.LeftTotalFiles = 0
+		node.RightTotalFiles = 0
+		node.LeftTotalDirs = 0
+		node.RightTotalDirs = 0
 		return AttrUnknown
 	}
 	result := AttrEqual
 	var lt, rt int64
+	var lf, rf, ld, rd int
 	for _, child := range node.Children {
 		s := propagateStatus(child, opts)
 		if s == AttrDifferent {
@@ -231,17 +240,33 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		if child.IsDir {
 			lt += child.LeftTotalSize
 			rt += child.RightTotalSize
+			lf += child.LeftTotalFiles
+			rf += child.RightTotalFiles
+			ld += child.LeftTotalDirs
+			rd += child.RightTotalDirs
+			if child.Left != nil {
+				ld++
+			}
+			if child.Right != nil {
+				rd++
+			}
 		} else {
 			if child.Left != nil {
 				lt += child.Left.Size
+				lf++
 			}
 			if child.Right != nil {
 				rt += child.Right.Size
+				rf++
 			}
 		}
 	}
 	node.LeftTotalSize = lt
 	node.RightTotalSize = rt
+	node.LeftTotalFiles = lf
+	node.RightTotalFiles = rf
+	node.LeftTotalDirs = ld
+	node.RightTotalDirs = rd
 	if node.Compare.Presence != PresenceBoth {
 		node.ChildStatus = AttrDifferent
 		return AttrDifferent

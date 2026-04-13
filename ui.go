@@ -832,21 +832,20 @@ func (m Model) View() string {
 		operation = fmt.Sprintf("%s copying... %s %d/%d", spinner, progressBar(done, total, 20), done, total)
 	}
 
-	cksumStatus := "off"
-	if m.cmpOpts.Checksum {
-		if algo := m.scanner.ChecksumAlgo(); algo != "" {
-			if algo == "md4" {
-				cksumStatus = "rsync:md4"
-			} else {
-				cksumStatus = algo
-			}
-		} else if m.scanner.ChecksumProbed() {
-			cksumStatus = "none!"
-		} else {
-			cksumStatus = "on"
-		}
+	var stats *TreeStats
+	if tree != nil {
+		s := computeTreeStats(tree)
+		stats = &s
 	}
-	topBar := RenderTopBar(progress, tree, spinner, operation, cksumStatus, m.width)
+	leftPrefix := ""
+	rightPrefix := ""
+	if operation != "" {
+		leftPrefix = operation
+		rightPrefix = operation
+	}
+	leftTopBar := RenderPanelTopBar(stats, true, leftPrefix, m.leftPanel.width)
+	rightTopBar := RenderPanelTopBar(stats, false, rightPrefix, m.rightPanel.width)
+	topBar := leftTopBar + rightTopBar
 	bottomBar := RenderBottomBar(m.width)
 
 	if m.deleting || m.copying {

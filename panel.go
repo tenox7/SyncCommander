@@ -278,16 +278,21 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 
 func (p *Panel) inlineInfo(node *TreeNode) string {
 	if node.IsDir {
+		var dirs, files int
 		var size int64
 		if p.isLeft {
+			dirs = node.LeftTotalDirs
+			files = node.LeftTotalFiles
 			size = node.LeftTotalSize
 		} else {
+			dirs = node.RightTotalDirs
+			files = node.RightTotalFiles
 			size = node.RightTotalSize
 		}
-		if size == 0 {
+		if dirs == 0 && files == 0 {
 			return ""
 		}
-		return styleChrome.Render(fmt.Sprintf("%7s", formatSize(size)))
+		return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", dirs, files, formatSize(size)))
 	}
 	var entry *FileEntry
 	if p.isLeft {
@@ -298,7 +303,7 @@ func (p *Panel) inlineInfo(node *TreeNode) string {
 	if entry == nil {
 		return ""
 	}
-	return styleChrome.Render(timeAgo(entry.ModTime) + " " + fmt.Sprintf("%7s", formatSize(entry.Size)))
+	return styleChrome.Render(fmt.Sprintf("%8s %7s", timeAgo(entry.ModTime), formatSize(entry.Size)))
 }
 
 func attrChar(label string, status AttrStatus) string {
