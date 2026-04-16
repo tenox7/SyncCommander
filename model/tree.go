@@ -579,6 +579,15 @@ func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {
 }
 
 
+func SetExpandedAll(node *TreeNode, expanded bool) {
+	if node.IsDir {
+		node.Expanded = expanded
+	}
+	for _, child := range node.Children {
+		SetExpandedAll(child, expanded)
+	}
+}
+
 func isTimeValid(t time.Time) bool {
 	return !t.IsZero() && t.Year() >= 1970
 }

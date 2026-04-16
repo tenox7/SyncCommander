@@ -28,6 +28,8 @@ var helpKeys = []struct{ key, desc string }{
 	{"<", "Copy right → left (mirror)"},
 	{"→/Enter", "Expand directory"},
 	{"←", "Collapse / go to parent"},
+	{"}", "Expand all directories"},
+	{"{", "Collapse all directories"},
 	{"Tab", "Switch active panel"},
 	{"PgUp/Dn", "Page up / down"},
 	{"I", "Info / statistics"},

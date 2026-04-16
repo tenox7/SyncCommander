@@ -247,6 +247,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "}":
+		tree := m.scanner.Tree()
+		if tree != nil {
+			model.SetExpandedAll(tree, true)
+			m.refreshTree()
+		}
+	case "{":
+		tree := m.scanner.Tree()
+		if tree != nil {
+			model.SetExpandedAll(tree, false)
+			tree.Expanded = true
+			m.refreshTree()
+		}
 	case "r":
 		node := m.activePanel().CursorNode()
 		if node != nil && node.IsAttr {
