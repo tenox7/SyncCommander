@@ -3,7 +3,6 @@
 ## Features
 
 - refactor go files, there are too many/ momove some to a sub dir
-- Better help line, not all keys are always needed, only most important one
 - support remote move with relative and absolute paths, ask for path
 - support resume/continue/append and intelligent upload/downloads for rsync
   especially if files are there but different sizes
@@ -11,7 +10,6 @@
 - support for retry upload on stale/conn drop etc 
 - support multiple concurrent remote connections and spread listing across dirs, multiple file copies
 - open/collapse all
-- swap panels left/right-
 - select multiple files / folders and execute a batch
 - open object, diff for text files, hex dump diff for binary
 - export to csv/xls

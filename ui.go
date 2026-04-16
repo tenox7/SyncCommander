@@ -337,6 +337,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.copyNode(node, false, false)
 	case "=":
 		m.settings.Open()
+	case "S", "s":
+		if !m.scanning && !m.copying && !m.deleting {
+			m.swapSides()
+		}
 	case "w":
 		m.leftPanel.wrap = !m.leftPanel.wrap
 		m.rightPanel.wrap = !m.rightPanel.wrap
@@ -798,6 +802,74 @@ func (m *Model) refreshTree() {
 	flat := FlattenTree(tree, &m.cmpOpts)
 	m.leftPanel.SetNodes(flat)
 	m.rightPanel.SetNodes(flat)
+}
+
+func (m *Model) swapSides() {
+	// Swap panel objects (exchanges cursor/offset/title state)
+	m.leftPanel, m.rightPanel = m.rightPanel, m.leftPanel
+	m.leftPanel.isLeft = true
+	m.rightPanel.isLeft = false
+	m.leftPanel.active = m.activeLeft
+	m.rightPanel.active = !m.activeLeft
+
+	// Swap backends
+	m.left, m.right = m.right, m.left
+
+	// Swap scanner backends and checksum probe results
+	m.scanner.left, m.scanner.right = m.scanner.right, m.scanner.left
+	m.scanner.cksumLeft, m.scanner.cksumRight = m.scanner.cksumRight, m.scanner.cksumLeft
+
+	// Swap all Left/Right data in the tree nodes
+	tree := m.scanner.Tree()
+	if tree != nil {
+		swapTreeData(tree)
+		m.refreshTree()
+	}
+}
+
+// swapTreeData mirrors all Left/Right data in a TreeNode so that after a
+// panel swap every existing operation (copy, delete, rename, render) continues
+// to work without modification — m.left/m.right and node.Left/node.Right are
+// the canonical references used by all operations, and swapping them here
+// makes new operations correct automatically.
+//
+// MAINTENANCE: if you add a new Left*/Right* field to TreeNode, add a swap
+// line here. That is the only place that needs updating for panel swap to
+// remain correct.
+func swapTreeData(node *TreeNode) {
+	// FileEntry pointers (used by operations and rendering)
+	node.Left, node.Right = node.Right, node.Left
+
+	// Checksums
+	node.LeftChecksum, node.RightChecksum = node.RightChecksum, node.LeftChecksum
+
+	// Directory aggregate counts (used by inlineInfo)
+	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
+	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
+	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
+
+	// Expanded attribute row values (renderAttrRow)
+	node.AttrLeftVal, node.AttrRightVal = node.AttrRightVal, node.AttrLeftVal
+	node.AttrLeftRaw, node.AttrRightRaw = node.AttrRightRaw, node.AttrLeftRaw
+	node.AttrWinner = -node.AttrWinner // sign encodes which side is "ahead"
+
+	// Presence: which backend(s) hold this entry
+	switch node.Compare.Presence {
+	case PresenceLeftOnly:
+		node.Compare.Presence = PresenceRightOnly
+	case PresenceRightOnly:
+		node.Compare.Presence = PresenceLeftOnly
+	}
+	switch node.AttrPresence {
+	case PresenceLeftOnly:
+		node.AttrPresence = PresenceRightOnly
+	case PresenceRightOnly:
+		node.AttrPresence = PresenceLeftOnly
+	}
+
+	for _, child := range node.Children {
+		swapTreeData(child)
+	}
 }
 
 func (m *Model) layoutPanels() {
