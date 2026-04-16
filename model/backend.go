@@ -1,4 +1,4 @@
-package main
+package model
 
 import (
 	"context"
@@ -29,4 +29,10 @@ type Backend interface {
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
+}
+
+// ChecksumProber is implemented by backends that support content checksums.
+type ChecksumProber interface {
+	ProbeChecksums() []string
+	SetChecksumAlgo(algo string)
 }

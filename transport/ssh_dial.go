@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bytes"
@@ -190,22 +190,22 @@ func probeSSHChecksums(run func(string) (string, error)) (algos []string, cmds m
 }
 
 func runSSHCmd(client interface{ NewSession() (*ssh.Session, error) }, proto, cmd string) (string, error) {
-	remoteLog.Add(proto, ">>>", cmd)
+	Log.Add(proto, ">>>", cmd)
 	session, err := client.NewSession()
 	if err != nil {
-		remoteLog.Add(proto, "ERR", err.Error())
+		Log.Add(proto, "ERR", err.Error())
 		return "", err
 	}
 	defer session.Close()
 	var stdout bytes.Buffer
 	session.Stdout = &stdout
 	if err := session.Run(cmd); err != nil {
-		remoteLog.Add(proto, "ERR", err.Error())
+		Log.Add(proto, "ERR", err.Error())
 		return "", err
 	}
 	out := stdout.String()
 	if out != "" {
-		remoteLog.Add(proto, "<<<", strings.TrimRight(out, "\n"))
+		Log.Add(proto, "<<<", strings.TrimRight(out, "\n"))
 	}
 	return out, nil
 }

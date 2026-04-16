@@ -1,4 +1,4 @@
-package main
+package model
 
 import (
 	"context"
@@ -22,11 +22,6 @@ type ScanProgress struct {
 	Phase          string
 	LeftActive     bool
 	RightActive    bool
-}
-
-type checksumProber interface {
-	probeChecksums() []string
-	setChecksumAlgo(algo string)
 }
 
 type Scanner struct {
@@ -235,7 +230,7 @@ func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum b
 }
 
 func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
-	leftEntries, rightEntries := s.listBoth(ctx, dirOf(node.RelPath))
+	leftEntries, rightEntries := s.listBoth(ctx, DirOf(node.RelPath))
 
 	var le, re *FileEntry
 	for i := range leftEntries {
@@ -266,7 +261,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 	// Update the node's own Left/Right entries so its presence reflects current
 	// state on both backends. Skip for the root node which has no parent to list.
 	if node.RelPath != "" {
-		leftEntries, rightEntries := s.listBoth(ctx, dirOf(node.RelPath))
+		leftEntries, rightEntries := s.listBoth(ctx, DirOf(node.RelPath))
 		var le, re *FileEntry
 		for i := range leftEntries {
 			if leftEntries[i].Name == node.Name {
@@ -386,7 +381,7 @@ func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNod
 	if tree == nil {
 		return nil
 	}
-	for path := relPath; path != ""; path = dirOf(path) {
+	for path := relPath; path != ""; path = DirOf(path) {
 		n := findNode(tree, path)
 		if n != nil {
 			if (leftToRight && n.Right != nil) || (!leftToRight && n.Left != nil) {
@@ -467,7 +462,7 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string) {
 		node.Right.RelPath = newRel
 	}
 	updateDescendantPaths(node.Children, oldRel, newRel)
-	parent := findNode(s.tree, dirOf(newRel))
+	parent := findNode(s.tree, DirOf(newRel))
 	if parent != nil {
 		sort.Slice(parent.Children, func(i, j int) bool {
 			a, b := parent.Children[i], parent.Children[j]
@@ -477,6 +472,14 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string) {
 			return a.Name < b.Name
 		})
 	}
+}
+
+// SwapSides exchanges the left and right backends and their checksum probe results.
+func (s *Scanner) SwapSides() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.left, s.right = s.right, s.left
+	s.cksumLeft, s.cksumRight = s.cksumRight, s.cksumLeft
 }
 
 func updateDescendantPaths(children []*TreeNode, oldPrefix, newPrefix string) {
@@ -524,7 +527,7 @@ func (s *Scanner) listBoth(ctx context.Context, relDir string) ([]FileEntry, []F
 	return left, right
 }
 
-func dirOf(relPath string) string {
+func DirOf(relPath string) string {
 	for i := len(relPath) - 1; i >= 0; i-- {
 		if relPath[i] == '/' {
 			return relPath[:i]
@@ -693,15 +696,15 @@ func (s *Scanner) ChecksumInfo() (left, right []string) {
 }
 
 func probeBackend(b Backend) []string {
-	if p, ok := b.(checksumProber); ok {
-		return p.probeChecksums()
+	if p, ok := b.(ChecksumProber); ok {
+		return p.ProbeChecksums()
 	}
 	return nil
 }
 
 func setBackendAlgo(b Backend, algo string) {
-	if p, ok := b.(checksumProber); ok {
-		p.setChecksumAlgo(algo)
+	if p, ok := b.(ChecksumProber); ok {
+		p.SetChecksumAlgo(algo)
 	}
 }
 

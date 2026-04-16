@@ -1,10 +1,12 @@
-package main
+package ui
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"sc/model"
 )
 
 type TreeStats struct {
@@ -16,13 +18,13 @@ type TreeStats struct {
 	FilesRightOnly          int
 }
 
-func computeTreeStats(root *TreeNode) TreeStats {
+func computeTreeStats(root *model.TreeNode) TreeStats {
 	var s TreeStats
 	walkStats(root, &s)
 	return s
 }
 
-func walkStats(node *TreeNode, s *TreeStats) {
+func walkStats(node *model.TreeNode, s *TreeStats) {
 	for _, child := range node.Children {
 		if child.IsDir {
 			if child.Left != nil {
@@ -43,27 +45,27 @@ func walkStats(node *TreeNode, s *TreeStats) {
 			s.RightSize += child.Right.Size
 		}
 		switch child.Compare.Presence {
-		case PresenceBoth:
-			if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
+		case model.PresenceBoth:
+			if child.Compare.Size == model.AttrEqual && child.Compare.ModTime == model.AttrEqual {
 				s.FilesEqual++
 			} else {
 				s.FilesDiff++
 			}
-		case PresenceLeftOnly:
+		case model.PresenceLeftOnly:
 			s.FilesLeftOnly++
-		case PresenceRightOnly:
+		case model.PresenceRightOnly:
 			s.FilesRightOnly++
 		}
 	}
 }
 
 type InfoDialog struct {
-	visible   bool
-	stats     TreeStats
-	left      string
-	right     string
-	cksumAlgo string
-	cksumLeft string
+	visible    bool
+	stats      TreeStats
+	left       string
+	right      string
+	cksumAlgo  string
+	cksumLeft  string
 	cksumRight string
 }
 

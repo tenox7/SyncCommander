@@ -1,10 +1,12 @@
-package main
+package ui
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"sc/model"
 )
 
 var styleBar = lipgloss.NewStyle().
@@ -61,9 +63,9 @@ func formatSizeDelta(d int64) string {
 		return "0"
 	}
 	if d > 0 {
-		return "+" + formatSize(d)
+		return "+" + model.FormatSize(d)
 	}
-	return "-" + formatSize(-d)
+	return "-" + model.FormatSize(-d)
 }
 
 func RenderBottomBar(width int) string {

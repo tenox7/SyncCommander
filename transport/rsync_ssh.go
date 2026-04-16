@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bytes"
@@ -16,6 +16,8 @@ import (
 
 	"github.com/gokrazy/rsync/rsyncclient"
 	"golang.org/x/crypto/ssh"
+
+	"sc/model"
 )
 
 type RsyncSSHBackend struct {
@@ -66,7 +68,7 @@ func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
 func (b *RsyncSSHBackend) BasePath() string { return b.display }
 func (b *RsyncSSHBackend) Close() error     { return b.client.Close() }
 
-func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
 	out, err := b.sshRun(cmd)
@@ -77,7 +79,7 @@ func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]FileEntry,
 	if out == "" {
 		return nil, nil
 	}
-	var result []FileEntry
+	var result []model.FileEntry
 	for _, line := range strings.Split(out, "\n") {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -132,7 +134,7 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context) error {
 	}
 
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remotePath))
-	remoteLog.Add("rsync+ssh", ">>>", "MD4 "+serverCmd)
+	Log.Add("rsync+ssh", ">>>", "MD4 "+serverCmd)
 
 	session, err := b.client.NewSession()
 	if err != nil {
@@ -164,11 +166,11 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context) error {
 		}
 		b.md4cache[fi.Name] = hex.EncodeToString(fi.Checksum[:])
 	}
-	remoteLog.Add("rsync+ssh", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
+	Log.Add("rsync+ssh", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
 	return nil
 }
 
-func (b *RsyncSSHBackend) probeChecksums() []string {
+func (b *RsyncSSHBackend) ProbeChecksums() []string {
 	if b.cksumCmds == nil {
 		run := func(cmd string) (string, error) { return b.sshRun(cmd) }
 		var algos []string
@@ -186,7 +188,7 @@ func (b *RsyncSSHBackend) probeChecksums() []string {
 	return append(algos, "md4")
 }
 
-func (b *RsyncSSHBackend) setChecksumAlgo(algo string) {
+func (b *RsyncSSHBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 }
 
@@ -230,7 +232,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	}
 
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remotePath))
-	remoteLog.Add("rsync+ssh", ">>>", serverCmd)
+	Log.Add("rsync+ssh", ">>>", serverCmd)
 
 	session, err := b.client.NewSession()
 	if err != nil {
@@ -248,7 +250,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	if err := session.Start(serverCmd); err != nil {
 		session.Close()
 		os.RemoveAll(tmpDir)
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return nil, err
 	}
 
@@ -256,10 +258,10 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	session.Close()
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return nil, err
 	}
-	remoteLog.Add("rsync+ssh", "<<<", "OK")
+	Log.Add("rsync+ssh", "<<<", "OK")
 
 	f, err := os.Open(filepath.Join(tmpDir, filepath.Base(relPath)))
 	if err != nil {
@@ -296,7 +298,7 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	}
 
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remoteDest + "/"))
-	remoteLog.Add("rsync+ssh", ">>>", "SEND "+relPath+" via "+serverCmd)
+	Log.Add("rsync+ssh", ">>>", "SEND "+relPath+" via "+serverCmd)
 
 	session, err := b.client.NewSession()
 	if err != nil {
@@ -311,17 +313,17 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 
 	if err := session.Start(serverCmd); err != nil {
 		session.Close()
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
 	}
 
 	_, err = client.Run(ctx, rw, []string{tmpFile})
 	session.Close()
 	if err != nil {
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
 	}
-	remoteLog.Add("rsync+ssh", "<<<", "OK")
+	Log.Add("rsync+ssh", "<<<", "OK")
 	return nil
 }
 
@@ -349,10 +351,10 @@ func (b *RsyncSSHBackend) sessionReadWriter(session *ssh.Session) (io.ReadWriter
 }
 
 func (b *RsyncSSHBackend) sshRun(cmd string) (string, error) {
-	remoteLog.Add("rsync+ssh", ">>>", cmd)
+	Log.Add("rsync+ssh", ">>>", cmd)
 	session, err := b.client.NewSession()
 	if err != nil {
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return "", err
 	}
 	defer session.Close()
@@ -362,26 +364,26 @@ func (b *RsyncSSHBackend) sshRun(cmd string) (string, error) {
 	if err := session.Run(cmd); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
-			remoteLog.Add("rsync+ssh", "ERR", msg)
+			Log.Add("rsync+ssh", "ERR", msg)
 			return "", fmt.Errorf("%s", msg)
 		}
-		remoteLog.Add("rsync+ssh", "ERR", err.Error())
+		Log.Add("rsync+ssh", "ERR", err.Error())
 		return "", err
 	}
 	out := stdout.String()
 	if out != "" {
-		remoteLog.Add("rsync+ssh", "<<<", strings.TrimRight(out, "\n"))
+		Log.Add("rsync+ssh", "<<<", strings.TrimRight(out, "\n"))
 	}
 	return out, nil
 }
 
-func parseFindLine(line, relDir string) (FileEntry, bool) {
+func parseFindLine(line, relDir string) (model.FileEntry, bool) {
 	fields := strings.SplitN(line, "\t", 7)
 	if len(fields) < 7 {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	if fields[6] == "l" {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	size, _ := strconv.ParseInt(fields[1], 10, 64)
 	modeVal, _ := strconv.ParseUint(fields[5], 8, 32)
@@ -390,7 +392,7 @@ func parseFindLine(line, relDir string) (FileEntry, bool) {
 	if isDir {
 		mode |= os.ModeDir
 	}
-	return FileEntry{
+	return model.FileEntry{
 		RelPath: path.Join(relDir, fields[0]),
 		Name:    fields[0],
 		Size:    size,

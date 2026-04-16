@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"context"
@@ -6,25 +6,32 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"sc/model"
 )
 
 type lazyBackend struct {
-	factory func() (Backend, error)
-	inner   Backend
+	factory func() (model.Backend, error)
+	inner   model.Backend
 	once    sync.Once
 	err     error
 	display string
 }
 
+// NewLazyBackend returns a Backend that defers connection until first use.
+func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
+	return &lazyBackend{factory: factory, display: display}
+}
+
 func (b *lazyBackend) connect() {
 	b.once.Do(func() {
-		remoteLog.Add("conn", ">>>", "connecting to "+b.display)
+		Log.Add("conn", ">>>", "connecting to "+b.display)
 		b.inner, b.err = b.factory()
 		if b.err != nil {
-			remoteLog.Add("conn", "ERR", b.display+": "+b.err.Error())
+			Log.Add("conn", "ERR", b.display+": "+b.err.Error())
 			return
 		}
-		remoteLog.Add("conn", "<<<", "connected to "+b.display)
+		Log.Add("conn", "<<<", "connected to "+b.display)
 	})
 }
 
@@ -35,7 +42,7 @@ func (b *lazyBackend) BasePath() string {
 	return b.display
 }
 
-func (b *lazyBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *lazyBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	b.connect()
 	if b.err != nil {
 		return nil, b.err
@@ -109,22 +116,22 @@ func (b *lazyBackend) Close() error {
 	return nil
 }
 
-func (b *lazyBackend) probeChecksums() []string {
+func (b *lazyBackend) ProbeChecksums() []string {
 	b.connect()
 	if b.err != nil {
 		return nil
 	}
-	if p, ok := b.inner.(checksumProber); ok {
-		return p.probeChecksums()
+	if p, ok := b.inner.(model.ChecksumProber); ok {
+		return p.ProbeChecksums()
 	}
 	return nil
 }
 
-func (b *lazyBackend) setChecksumAlgo(algo string) {
+func (b *lazyBackend) SetChecksumAlgo(algo string) {
 	if b.inner == nil {
 		return
 	}
-	if p, ok := b.inner.(checksumProber); ok {
-		p.setChecksumAlgo(algo)
+	if p, ok := b.inner.(model.ChecksumProber); ok {
+		p.SetChecksumAlgo(algo)
 	}
 }

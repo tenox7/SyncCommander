@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"context"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/mmcloughlin/md4"
+
+	"sc/model"
 )
 
 type LocalBackend struct {
@@ -28,13 +30,13 @@ func (b *LocalBackend) BasePath() string {
 	return b.base
 }
 
-func (b *LocalBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := filepath.Join(b.base, relDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]FileEntry, 0, len(entries))
+	result := make([]model.FileEntry, 0, len(entries))
 	for _, d := range entries {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -47,7 +49,7 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]FileEntry, er
 			continue
 		}
 		rel := filepath.Join(relDir, d.Name())
-		entry := FileEntry{
+		entry := model.FileEntry{
 			RelPath: rel,
 			Name:    d.Name(),
 			Size:    info.Size(),
@@ -98,11 +100,11 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (b *LocalBackend) probeChecksums() []string {
+func (b *LocalBackend) ProbeChecksums() []string {
 	return []string{"sha256", "sha1", "md5", "md4"}
 }
 
-func (b *LocalBackend) setChecksumAlgo(algo string) {
+func (b *LocalBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 }
 

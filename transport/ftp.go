@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bufio"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/jlaffaye/ftp"
+
+	"sc/model"
 )
 
 type FTPBackend struct {
@@ -152,16 +154,16 @@ func (b *FTPBackend) reconnect() error {
 			b.hasher.algo = algo
 		}
 	}
-	remoteLog.Add("ftp", "<<<", "reconnected")
+	Log.Add("ftp", "<<<", "reconnected")
 	return nil
 }
 
-func (b *FTPBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *FTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	result, err := b.listDir(ctx, relDir)
 	if err != nil && ctx.Err() == nil && !b.connAlive() {
-		remoteLog.Add("ftp", "ERR", "connection lost, reconnecting...")
+		Log.Add("ftp", "ERR", "connection lost, reconnecting...")
 		if rerr := b.reconnect(); rerr != nil {
-			remoteLog.Add("ftp", "ERR", "reconnect failed: "+rerr.Error())
+			Log.Add("ftp", "ERR", "reconnect failed: "+rerr.Error())
 			return nil, err
 		}
 		return b.listDir(ctx, relDir)
@@ -169,9 +171,9 @@ func (b *FTPBackend) List(ctx context.Context, relDir string) ([]FileEntry, erro
 	return result, err
 }
 
-func (b *FTPBackend) listDir(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *FTPBackend) listDir(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := path.Join(b.base, relDir)
-	remoteLog.Add("ftp", ">>>", "LIST "+dir)
+	Log.Add("ftp", ">>>", "LIST "+dir)
 	type listResult struct {
 		entries []*ftp.Entry
 		err     error
@@ -190,12 +192,12 @@ func (b *FTPBackend) listDir(ctx context.Context, relDir string) ([]FileEntry, e
 		entries, err = r.entries, r.err
 	}
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
-	remoteLog.Add("ftp", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("ftp", "<<<", fmt.Sprintf("%d entries", len(entries)))
 	useMDTM := b.conn.IsGetTimeSupported()
-	result := make([]FileEntry, 0, len(entries))
+	result := make([]model.FileEntry, 0, len(entries))
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -217,7 +219,7 @@ func (b *FTPBackend) listDir(ctx context.Context, relDir string) ([]FileEntry, e
 				modTime = t
 			}
 		}
-		result = append(result, FileEntry{
+		result = append(result, model.FileEntry{
 			RelPath: path.Join(relDir, e.Name),
 			Name:    e.Name,
 			Size:    int64(e.Size),
@@ -238,7 +240,7 @@ func (b *FTPBackend) Checksum(_ context.Context, relPath string) (string, error)
 	return b.hasher.hash(path.Join(b.base, relPath))
 }
 
-func (b *FTPBackend) probeChecksums() []string {
+func (b *FTPBackend) ProbeChecksums() []string {
 	if b.hasher == nil {
 		return nil
 	}
@@ -251,7 +253,7 @@ func (b *FTPBackend) probeChecksums() []string {
 	return algos
 }
 
-func (b *FTPBackend) setChecksumAlgo(algo string) {
+func (b *FTPBackend) SetChecksumAlgo(algo string) {
 	if b.hasher != nil {
 		b.hasher.algo = algo
 	}
@@ -260,18 +262,18 @@ func (b *FTPBackend) setChecksumAlgo(algo string) {
 func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ time.Time) error {
 	err := b.conn.SetTime(path.Join(b.base, relPath), mtime)
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", "MFMT "+relPath+": "+err.Error())
+		Log.Add("ftp", "ERR", "MFMT "+relPath+": "+err.Error())
 	}
 	return err
 }
 
 func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode) error {
-	remoteLog.Add("ftp", ">>>", "STOR "+relPath)
+	Log.Add("ftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
 	b.mkdirAll(path.Dir(fullPath))
 	err := b.conn.Stor(fullPath, src)
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", "ERR", err.Error())
 	}
 	return err
 }
@@ -279,7 +281,7 @@ func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, 
 func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	err := b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
+		Log.Add("ftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
 	}
 	return err
 }
@@ -287,7 +289,7 @@ func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) er
 func (b *FTPBackend) Remove(_ context.Context, relPath string) error {
 	err := b.conn.Delete(path.Join(b.base, relPath))
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", "DELETE "+relPath+": "+err.Error())
+		Log.Add("ftp", "ERR", "DELETE "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -295,7 +297,7 @@ func (b *FTPBackend) Remove(_ context.Context, relPath string) error {
 func (b *FTPBackend) RemoveAll(_ context.Context, relPath string) error {
 	err := b.removeAll(path.Join(b.base, relPath))
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
+		Log.Add("ftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -324,10 +326,10 @@ func (b *FTPBackend) removeAll(fullPath string) error {
 }
 
 func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	remoteLog.Add("ftp", ">>>", "RETR "+relPath)
+	Log.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
 	return resp, nil
@@ -430,19 +432,19 @@ func (h *ftpHasher) setConn(conn io.ReadWriter) {
 func (h *ftpHasher) sendCmd(format string, args ...any) (int, string, error) {
 	cmd := fmt.Sprintf(format, args...)
 	if strings.HasPrefix(strings.ToUpper(cmd), "PASS ") {
-		remoteLog.Add("ftp", ">>>", "PASS ***")
+		Log.Add("ftp", ">>>", "PASS ***")
 	} else {
-		remoteLog.Add("ftp", ">>>", cmd)
+		Log.Add("ftp", ">>>", cmd)
 	}
 	if err := h.writer.PrintfLine(format, args...); err != nil {
-		remoteLog.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", "ERR", err.Error())
 		return 0, "", err
 	}
 	code, msg, err := h.reader.ReadResponse(0)
 	if err != nil {
-		remoteLog.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", "ERR", err.Error())
 	} else {
-		remoteLog.Add("ftp", "<<<", fmt.Sprintf("%d %s", code, msg))
+		Log.Add("ftp", "<<<", fmt.Sprintf("%d %s", code, msg))
 	}
 	return code, msg, err
 }

@@ -1,12 +1,14 @@
-package main
+package transport
 
 import (
 	"os"
 	"syscall"
 	"time"
+
+	"sc/model"
 )
 
-func fillTimes(entry *FileEntry, path string) {
+func fillTimes(entry *model.FileEntry, path string) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return

@@ -1,10 +1,23 @@
-package main
+package model
 
 import (
 	"fmt"
 	"sort"
 	"time"
 )
+
+// CompareOpts controls which file attributes are compared.
+type CompareOpts struct {
+	Size      bool
+	ModTime   bool
+	ATime     bool
+	CTime     bool
+	BTime     bool
+	Mode      bool
+	Checksum  bool
+	SubSecond bool
+	TimeGrace bool
+}
 
 type AttrStatus int
 
@@ -424,7 +437,7 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 		attrs = append(attrs, attr{label, lv, rv, lraw, rraw, status, inactive, w})
 	}
 
-	ls, rs := val(func(e *FileEntry) string { return formatSize(e.Size) })
+	ls, rs := val(func(e *FileEntry) string { return FormatSize(e.Size) })
 	if node.Compare.Size == AttrDifferent && ls == rs && l != nil && r != nil {
 		ls = fmt.Sprintf("%d", l.Size)
 		rs = fmt.Sprintf("%d", r.Size)
@@ -468,7 +481,7 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 	}
 }
 
-func collectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool) []*TreeNode {
+func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool) []*TreeNode {
 	var result []*TreeNode
 	collectCopyFilesRec(node, opts, leftToRight, &result)
 	return result
@@ -500,7 +513,7 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 	}
 }
 
-func collectMirrorDeletes(node *TreeNode, leftToRight bool) []*TreeNode {
+func CollectMirrorDeletes(node *TreeNode, leftToRight bool) []*TreeNode {
 	var result []*TreeNode
 	destOnly := PresenceRightOnly
 	if !leftToRight {
@@ -512,13 +525,13 @@ func collectMirrorDeletes(node *TreeNode, leftToRight bool) []*TreeNode {
 			continue
 		}
 		if child.IsDir {
-			result = append(result, collectMirrorDeletes(child, leftToRight)...)
+			result = append(result, CollectMirrorDeletes(child, leftToRight)...)
 		}
 	}
 	return result
 }
 
-func countMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
+func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 	destOnly := PresenceRightOnly
 	if !leftToRight {
 		destOnly = PresenceLeftOnly
@@ -527,7 +540,7 @@ func countMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 		if child.Compare.Presence == destOnly {
 			if child.IsDir {
 				dirs++
-				cf, cd, _ := countDescendants(child)
+				cf, cd, _ := CountDescendants(child)
 				files += cf
 				dirs += cd
 			} else {
@@ -536,7 +549,7 @@ func countMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 			continue
 		}
 		if child.IsDir {
-			cf, cd := countMirrorDeletes(child, leftToRight)
+			cf, cd := CountMirrorDeletes(child, leftToRight)
 			files += cf
 			dirs += cd
 		}
@@ -544,7 +557,7 @@ func countMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 	return
 }
 
-func countDescendants(node *TreeNode) (files, dirs int, complete bool) {
+func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	complete = true
 	if !node.Listed {
 		return 0, 0, false
@@ -552,7 +565,7 @@ func countDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	for _, child := range node.Children {
 		if child.IsDir {
 			dirs++
-			cf, cd, cc := countDescendants(child)
+			cf, cd, cc := CountDescendants(child)
 			files += cf
 			dirs += cd
 			if !cc {
@@ -570,7 +583,7 @@ func isTimeValid(t time.Time) bool {
 	return !t.IsZero() && t.Year() >= 1970
 }
 
-func timeAgo(t time.Time) string {
+func TimeAgo(t time.Time) string {
 	d := time.Since(t)
 	if d < 0 {
 		d = 0
@@ -594,7 +607,7 @@ func timeAgo(t time.Time) string {
 	}
 }
 
-func formatSize(b int64) string {
+func FormatSize(b int64) string {
 	switch {
 	case b >= 1<<30:
 		return fmt.Sprintf("%.1fG", float64(b)/float64(1<<30))

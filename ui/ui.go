@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"context"
@@ -8,6 +8,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"sc/model"
+	"sc/transport"
 )
 
 type tickMsg time.Time
@@ -17,18 +20,6 @@ type checksumDoneMsg struct{}
 type touchDoneMsg struct{}
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-type CompareOpts struct {
-	Size      bool
-	ModTime   bool
-	ATime     bool
-	CTime     bool
-	BTime     bool
-	Mode      bool
-	Checksum  bool
-	SubSecond bool
-	TimeGrace bool
-}
 
 type renameDoneMsg struct{ err error }
 type deleteDoneMsg struct{}
@@ -40,22 +31,22 @@ type CopyProgress struct {
 }
 
 type pendingCopyInfo struct {
-	node        *TreeNode
+	node        *model.TreeNode
 	leftToRight bool
 }
 
 type Model struct {
 	leftPanel     *Panel
 	rightPanel    *Panel
-	left          Backend
-	right         Backend
-	scanner       *Scanner
+	left          model.Backend
+	right         model.Backend
+	scanner       *model.Scanner
 	activeLeft    bool
 	scanning      bool
 	deleting      bool
 	copying       bool
 	copyProgress  *CopyProgress
-	cmpOpts       CompareOpts
+	cmpOpts       model.CompareOpts
 	width         int
 	height        int
 	spinFrame     int
@@ -65,26 +56,26 @@ type Model struct {
 	help          *HelpDialog
 	info          *InfoDialog
 	logView       *LogDialog
-	pendingDelete *TreeNode
+	pendingDelete *model.TreeNode
 	pendingCopy   *pendingCopyInfo
 	openDlg       *OpenDialog
 	insecure      bool
 }
 
-func NewModel(left, right Backend, cksum, insecure bool) Model {
+func NewModel(left, right model.Backend, cksum, insecure bool) Model {
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
 	m := Model{
-		leftPanel:  lp,
-		rightPanel: rp,
-		left:       left,
-		right:      right,
-		scanner:    NewScanner(left, right, 4),
-		activeLeft: true,
-		cmpOpts:    CompareOpts{Size: true, ModTime: true, Checksum: cksum, TimeGrace: true},
-		settings:   NewSettingsDialog(),
-		input:      NewInputDialog(),
+		leftPanel:    lp,
+		rightPanel:   rp,
+		left:         left,
+		right:        right,
+		scanner:      model.NewScanner(left, right, 4),
+		activeLeft:   true,
+		cmpOpts:      model.CompareOpts{Size: true, ModTime: true, Checksum: cksum, TimeGrace: true},
+		settings:     NewSettingsDialog(),
+		input:        NewInputDialog(),
 		confirm:      NewConfirmDialog(),
 		help:         NewHelpDialog(),
 		info:         NewInfoDialog(),
@@ -133,7 +124,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
 			m.settings.UpdateChecksumLabel(algo)
 		}
-		m.logView.AutoOpen(remoteLog.ErrCount())
+		m.logView.AutoOpen(transport.Log.ErrCount())
 		m.refreshTree()
 		return m, m.tickCmd()
 	case scanDoneMsg:
@@ -280,7 +271,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "t":
 		node := m.activePanel().CursorNode()
-		if node != nil && !node.IsAttr && node.Compare.Presence == PresenceBoth {
+		if node != nil && !node.IsAttr && node.Compare.Presence == model.PresenceBoth {
 			return m, m.touchNode(node)
 		}
 	case "d":
@@ -296,11 +287,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || node.Compare.Presence == PresenceRightOnly {
+		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceRightOnly {
 			break
 		}
 		if node.IsDir {
-			delFiles, delDirs := countMirrorDeletes(node, true)
+			delFiles, delDirs := model.CountMirrorDeletes(node, true)
 			if delFiles > 0 || delDirs > 0 {
 				m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: true}
 				m.confirm.Open(
@@ -318,11 +309,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || node.Compare.Presence == PresenceLeftOnly {
+		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceLeftOnly {
 			break
 		}
 		if node.IsDir {
-			delFiles, delDirs := countMirrorDeletes(node, false)
+			delFiles, delDirs := model.CountMirrorDeletes(node, false)
 			if delFiles > 0 || delDirs > 0 {
 				m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: false}
 				m.confirm.Open(
@@ -412,20 +403,20 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
-	var newLeft, newRight Backend
+	var newLeft, newRight model.Backend
 	var err error
 
 	if leftPath != m.left.BasePath() {
-		newLeft, err = tryOpenBackend(leftPath, m.insecure)
+		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
 	if rightPath != m.right.BasePath() {
-		newRight, err = tryOpenBackend(rightPath, m.insecure)
+		newRight, err = transport.TryOpenBackend(rightPath, m.insecure)
 		if err != nil {
 			if newLeft != nil {
-				closeBackend(newLeft)
+				transport.CloseBackend(newLeft)
 			}
 			return nil, "right: " + err.Error()
 		}
@@ -435,16 +426,16 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 
 	if newLeft != nil {
 		oldLeft := m.left
-		go func() { closeBackend(oldLeft) }()
+		go func() { transport.CloseBackend(oldLeft) }()
 		m.left = newLeft
 	}
 	if newRight != nil {
 		oldRight := m.right
-		go func() { closeBackend(oldRight) }()
+		go func() { transport.CloseBackend(oldRight) }()
 		m.right = newRight
 	}
 
-	m.scanner = NewScanner(m.left, m.right, 4)
+	m.scanner = model.NewScanner(m.left, m.right, 4)
 	m.leftPanel.title = m.left.BasePath()
 	m.rightPanel.title = m.right.BasePath()
 	m.leftPanel.SetNodes(nil)
@@ -477,17 +468,16 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Choice mode: L/R/B select which side(s) to delete
 	if m.confirm.choiceMode && m.pendingDelete != nil {
-		var side Presence
+		var side model.Presence
 		found := true
 		switch msg.String() {
 		case ",":
-			side = PresenceLeftOnly
+			side = model.PresenceLeftOnly
 		case ".":
-			side = PresenceRightOnly
+			side = model.PresenceRightOnly
 		case "enter":
-			side = PresenceBoth
+			side = model.PresenceBoth
 		case "esc", "ctrl+c", "q":
 			m.confirm.Close()
 			m.pendingDelete = nil
@@ -528,19 +518,19 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) openDelete(node *TreeNode) {
+func (m *Model) openDelete(node *model.TreeNode) {
 	m.pendingDelete = node
 
-	if node.Compare.Presence != PresenceBoth {
+	if node.Compare.Presence != model.PresenceBoth {
 		sides := "left side only"
-		if node.Compare.Presence == PresenceRightOnly {
+		if node.Compare.Presence == model.PresenceRightOnly {
 			sides = "right side only"
 		}
 		if !node.IsDir {
 			m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)
 			return
 		}
-		files, dirs, complete := countDescendants(node)
+		files, dirs, complete := model.CountDescendants(node)
 		countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
 		if !complete {
 			countStr = fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
@@ -551,12 +541,11 @@ func (m *Model) openDelete(node *TreeNode) {
 		return
 	}
 
-	// PresenceBoth: let user pick which side
 	if !node.IsDir {
 		m.confirm.OpenChoice("Delete "+node.Name+"?", []string{""}, false)
 		return
 	}
-	files, dirs, complete := countDescendants(node)
+	files, dirs, complete := model.CountDescendants(node)
 	countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
 	if !complete {
 		countStr = fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
@@ -566,7 +555,7 @@ func (m *Model) openDelete(node *TreeNode) {
 	m.confirm.OpenChoice("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr}, true)
 }
 
-func (m *Model) deleteNode(node *TreeNode, side Presence) tea.Cmd {
+func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
@@ -576,8 +565,8 @@ func (m *Model) deleteNode(node *TreeNode, side Presence) tea.Cmd {
 	relPath := node.RelPath
 	return func() tea.Msg {
 		ctx := context.Background()
-		delLeft := side != PresenceRightOnly
-		delRight := side != PresenceLeftOnly
+		delLeft := side != model.PresenceRightOnly
+		delRight := side != model.PresenceLeftOnly
 		if isDir {
 			if delLeft {
 				_ = left.RemoveAll(ctx, relPath)
@@ -593,14 +582,14 @@ func (m *Model) deleteNode(node *TreeNode, side Presence) tea.Cmd {
 				_ = right.Remove(ctx, relPath)
 			}
 		}
-		parentDir := dirOf(relPath)
+		parentDir := model.DirOf(relPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
 		scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace)
 		return deleteDoneMsg{}
 	}
 }
 
-func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd {
+func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
@@ -612,11 +601,11 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		var files []*TreeNode
+		var files []*model.TreeNode
 		if node.IsDir {
-			files = collectCopyFiles(node, &opts, leftToRight)
+			files = model.CollectCopyFiles(node, &opts, leftToRight)
 		} else {
-			files = []*TreeNode{node}
+			files = []*model.TreeNode{node}
 		}
 
 		progress.Total.Store(int64(len(files)))
@@ -626,8 +615,8 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 			if ctx.Err() != nil {
 				break
 			}
-			var src, dst Backend
-			var srcEntry *FileEntry
+			var src, dst model.Backend
+			var srcEntry *model.FileEntry
 			if leftToRight {
 				src, dst = left, right
 				srcEntry = f.Left
@@ -652,8 +641,8 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 
 		if node.IsDir {
 			if mirror {
-				deletes := collectMirrorDeletes(node, leftToRight)
-				var delBackend Backend
+				deletes := model.CollectMirrorDeletes(node, leftToRight)
+				var delBackend model.Backend
 				if leftToRight {
 					delBackend = right
 				} else {
@@ -669,7 +658,7 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 			}
 			scanner.RescanNode(ctx, node, checksum, subSecond, timeGrace)
 		} else {
-			parentDir := dirOf(node.RelPath)
+			parentDir := model.DirOf(node.RelPath)
 			ancestor := scanner.FindNearestDestNode(parentDir, leftToRight)
 			if ancestor != nil {
 				scanner.RescanNode(ctx, ancestor, checksum, subSecond, timeGrace)
@@ -679,13 +668,13 @@ func (m *Model) copyNode(node *TreeNode, leftToRight bool, mirror bool) tea.Cmd 
 	}
 }
 
-func (m *Model) openRename(node *TreeNode) {
+func (m *Model) openRename(node *model.TreeNode) {
 	m.input.Open("Rename: "+node.Name, node.Name, func(newName string) {
 		if newName == "" || newName == node.Name {
 			return
 		}
 		oldRel := node.RelPath
-		newRel := dirOf(oldRel)
+		newRel := model.DirOf(oldRel)
 		if newRel != "" {
 			newRel += "/"
 		}
@@ -693,9 +682,9 @@ func (m *Model) openRename(node *TreeNode) {
 		go func() {
 			ctx := context.Background()
 			switch node.Compare.Presence {
-			case PresenceLeftOnly:
+			case model.PresenceLeftOnly:
 				_ = m.left.Rename(ctx, oldRel, newRel)
-			case PresenceRightOnly:
+			case model.PresenceRightOnly:
 				_ = m.right.Rename(ctx, oldRel, newRel)
 			default:
 				_ = m.left.Rename(ctx, oldRel, newRel)
@@ -706,7 +695,7 @@ func (m *Model) openRename(node *TreeNode) {
 	})
 }
 
-func (m *Model) touchNode(node *TreeNode) tea.Cmd {
+func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
@@ -725,14 +714,14 @@ func (m *Model) touchNode(node *TreeNode) tea.Cmd {
 			olderBackend = left
 		}
 		_ = olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime)
-		parentDir := dirOf(node.RelPath)
+		parentDir := model.DirOf(node.RelPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
-		scanner.RefreshDir(dirOf(node.RelPath), le, re, subSecond, timeGrace)
+		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace)
 		return touchDoneMsg{}
 	}
 }
 
-func (m *Model) parentFileNode() *TreeNode {
+func (m *Model) parentFileNode() *model.TreeNode {
 	p := m.activePanel()
 	for i := p.cursor - 1; i >= 0; i-- {
 		if !p.nodes[i].IsAttr {
@@ -775,7 +764,7 @@ func (m *Model) startScan() tea.Cmd {
 	}
 }
 
-func (m *Model) checksumNode(node *TreeNode) tea.Cmd {
+func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
 	scanner := m.scanner
 	return func() tea.Msg {
 		scanner.ChecksumNode(context.Background(), node)
@@ -783,7 +772,7 @@ func (m *Model) checksumNode(node *TreeNode) tea.Cmd {
 	}
 }
 
-func (m *Model) rescanNode(node *TreeNode) tea.Cmd {
+func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
@@ -799,27 +788,22 @@ func (m *Model) refreshTree() {
 	if tree == nil {
 		return
 	}
-	flat := FlattenTree(tree, &m.cmpOpts)
+	flat := model.FlattenTree(tree, &m.cmpOpts)
 	m.leftPanel.SetNodes(flat)
 	m.rightPanel.SetNodes(flat)
 }
 
 func (m *Model) swapSides() {
-	// Swap panel objects (exchanges cursor/offset/title state)
 	m.leftPanel, m.rightPanel = m.rightPanel, m.leftPanel
 	m.leftPanel.isLeft = true
 	m.rightPanel.isLeft = false
 	m.leftPanel.active = m.activeLeft
 	m.rightPanel.active = !m.activeLeft
 
-	// Swap backends
 	m.left, m.right = m.right, m.left
 
-	// Swap scanner backends and checksum probe results
-	m.scanner.left, m.scanner.right = m.scanner.right, m.scanner.left
-	m.scanner.cksumLeft, m.scanner.cksumRight = m.scanner.cksumRight, m.scanner.cksumLeft
+	m.scanner.SwapSides()
 
-	// Swap all Left/Right data in the tree nodes
 	tree := m.scanner.Tree()
 	if tree != nil {
 		swapTreeData(tree)
@@ -827,44 +811,27 @@ func (m *Model) swapSides() {
 	}
 }
 
-// swapTreeData mirrors all Left/Right data in a TreeNode so that after a
-// panel swap every existing operation (copy, delete, rename, render) continues
-// to work without modification — m.left/m.right and node.Left/node.Right are
-// the canonical references used by all operations, and swapping them here
-// makes new operations correct automatically.
-//
-// MAINTENANCE: if you add a new Left*/Right* field to TreeNode, add a swap
-// line here. That is the only place that needs updating for panel swap to
-// remain correct.
-func swapTreeData(node *TreeNode) {
-	// FileEntry pointers (used by operations and rendering)
+func swapTreeData(node *model.TreeNode) {
 	node.Left, node.Right = node.Right, node.Left
-
-	// Checksums
 	node.LeftChecksum, node.RightChecksum = node.RightChecksum, node.LeftChecksum
-
-	// Directory aggregate counts (used by inlineInfo)
 	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
 	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
 	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
-
-	// Expanded attribute row values (renderAttrRow)
 	node.AttrLeftVal, node.AttrRightVal = node.AttrRightVal, node.AttrLeftVal
 	node.AttrLeftRaw, node.AttrRightRaw = node.AttrRightRaw, node.AttrLeftRaw
-	node.AttrWinner = -node.AttrWinner // sign encodes which side is "ahead"
+	node.AttrWinner = -node.AttrWinner
 
-	// Presence: which backend(s) hold this entry
 	switch node.Compare.Presence {
-	case PresenceLeftOnly:
-		node.Compare.Presence = PresenceRightOnly
-	case PresenceRightOnly:
-		node.Compare.Presence = PresenceLeftOnly
+	case model.PresenceLeftOnly:
+		node.Compare.Presence = model.PresenceRightOnly
+	case model.PresenceRightOnly:
+		node.Compare.Presence = model.PresenceLeftOnly
 	}
 	switch node.AttrPresence {
-	case PresenceLeftOnly:
-		node.AttrPresence = PresenceRightOnly
-	case PresenceRightOnly:
-		node.AttrPresence = PresenceLeftOnly
+	case model.PresenceLeftOnly:
+		node.AttrPresence = model.PresenceRightOnly
+	case model.PresenceRightOnly:
+		node.AttrPresence = model.PresenceLeftOnly
 	}
 
 	for _, child := range node.Children {

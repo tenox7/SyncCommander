@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bytes"
@@ -18,6 +18,8 @@ import (
 
 	"github.com/gokrazy/rsync/rsyncclient"
 	"github.com/gokrazy/rsync/rsynccmd"
+
+	"sc/model"
 )
 
 type RsyncBackend struct {
@@ -107,21 +109,21 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 	return stdout.String(), nil
 }
 
-func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
-	url := b.remoteURL(relDir) + "/"
-	remoteLog.Add("rsync", ">>>", "LIST "+url)
+func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	u := b.remoteURL(relDir) + "/"
+	Log.Add("rsync", ">>>", "LIST "+u)
 	args := []string{}
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
-	args = append(args, url)
+	args = append(args, u)
 	out, err := b.rsyncRun(ctx, args...)
 	if err != nil {
-		remoteLog.Add("rsync", "ERR", err.Error())
+		Log.Add("rsync", "ERR", err.Error())
 		return nil, err
 	}
 
-	var entries []FileEntry
+	var entries []model.FileEntry
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -133,35 +135,35 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]FileEntry, er
 		}
 		entries = append(entries, entry)
 	}
-	remoteLog.Add("rsync", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("rsync", "<<<", fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
 
-func parseRsyncListLine(line, relDir string) (FileEntry, bool) {
+func parseRsyncListLine(line, relDir string) (model.FileEntry, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 5 {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	modeStr := fields[0]
 	size, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	modTime, err := time.ParseInLocation("2006/01/02 15:04:05", fields[2]+" "+fields[3], time.Local)
 	if err != nil {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	nameIdx := strings.Index(line, fields[3]) + len(fields[3])
 	if nameIdx >= len(line) {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	name := strings.TrimLeft(line[nameIdx:], " ")
 	if len(modeStr) > 0 && modeStr[0] == 'l' {
-		return FileEntry{}, false
+		return model.FileEntry{}, false
 	}
 	isDir := len(modeStr) > 0 && modeStr[0] == 'd'
 
-	return FileEntry{
+	return model.FileEntry{
 		RelPath: path.Join(relDir, name),
 		Name:    name,
 		Size:    size,
@@ -191,11 +193,11 @@ func parseRsyncMode(s string) os.FileMode {
 	return mode
 }
 
-func (b *RsyncBackend) probeChecksums() []string {
+func (b *RsyncBackend) ProbeChecksums() []string {
 	return []string{"md4", "rsync"}
 }
 
-func (b *RsyncBackend) setChecksumAlgo(algo string) {
+func (b *RsyncBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 	b.useChecksum = algo == "rsync" || algo == "md4"
 }
@@ -248,7 +250,7 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	remoteLog.Add("rsync", ">>>", "MD4 "+remotePath)
+	Log.Add("rsync", ">>>", "MD4 "+remotePath)
 	result, err := client.RunDaemon(ctx, conn, remotePath, []string{tmpDir + "/"})
 	if err != nil {
 		return err
@@ -262,7 +264,7 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context) error {
 		}
 		b.md4cache[fi.Name] = hex.EncodeToString(fi.Checksum[:])
 	}
-	remoteLog.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
+	Log.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
 	return nil
 }
 
@@ -289,7 +291,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	f.Close()
 
 	dest := b.remoteURL(path.Dir(relPath)) + "/"
-	remoteLog.Add("rsync", ">>>", "SEND "+relPath)
+	Log.Add("rsync", ">>>", "SEND "+relPath)
 	sendArgs := []string{"-t"}
 	if b.useChecksum {
 		sendArgs = append(sendArgs, "-c")
@@ -297,10 +299,10 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	sendArgs = append(sendArgs, tmpFile, dest)
 	_, err = b.rsyncRun(ctx, sendArgs...)
 	if err != nil {
-		remoteLog.Add("rsync", "ERR", err.Error())
+		Log.Add("rsync", "ERR", err.Error())
 		return err
 	}
-	remoteLog.Add("rsync", "<<<", "OK")
+	Log.Add("rsync", "<<<", "OK")
 	return nil
 }
 
@@ -322,20 +324,20 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 		return nil, err
 	}
 
-	url := b.remoteURL(relPath)
-	remoteLog.Add("rsync", ">>>", "RECV "+relPath)
+	u := b.remoteURL(relPath)
+	Log.Add("rsync", ">>>", "RECV "+relPath)
 	recvArgs := []string{}
 	if b.useChecksum {
 		recvArgs = append(recvArgs, "-c")
 	}
-	recvArgs = append(recvArgs, url, tmpDir+"/")
+	recvArgs = append(recvArgs, u, tmpDir+"/")
 	_, err = b.rsyncRun(ctx, recvArgs...)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		remoteLog.Add("rsync", "ERR", err.Error())
+		Log.Add("rsync", "ERR", err.Error())
 		return nil, err
 	}
-	remoteLog.Add("rsync", "<<<", "OK")
+	Log.Add("rsync", "<<<", "OK")
 
 	f, err := os.Open(filepath.Join(tmpDir, filepath.Base(relPath)))
 	if err != nil {

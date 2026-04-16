@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"bytes"
@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"sc/model"
 )
 
 type SCPBackend struct {
@@ -53,7 +55,7 @@ func (b *SCPBackend) BasePath() string { return b.display }
 
 func (b *SCPBackend) Close() error { return b.client.Close() }
 
-func (b *SCPBackend) List(ctx context.Context, relDir string) ([]FileEntry, error) {
+func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
 	out, err := b.sshRun(cmd)
@@ -64,7 +66,7 @@ func (b *SCPBackend) List(ctx context.Context, relDir string) ([]FileEntry, erro
 	if out == "" {
 		return nil, nil
 	}
-	var result []FileEntry
+	var result []model.FileEntry
 	for _, line := range strings.Split(out, "\n") {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -94,7 +96,7 @@ func (b *SCPBackend) Checksum(_ context.Context, relPath string) (string, error)
 	return fields[0], nil
 }
 
-func (b *SCPBackend) probeChecksums() []string {
+func (b *SCPBackend) ProbeChecksums() []string {
 	if b.cksumCmds == nil {
 		run := func(cmd string) (string, error) { return b.sshRun(cmd) }
 		var algos []string
@@ -112,7 +114,7 @@ func (b *SCPBackend) probeChecksums() []string {
 	return algos
 }
 
-func (b *SCPBackend) setChecksumAlgo(algo string) {
+func (b *SCPBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 }
 
@@ -174,10 +176,10 @@ func (b *SCPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, err
 }
 
 func (b *SCPBackend) sshRun(cmd string) (string, error) {
-	remoteLog.Add("scp", ">>>", cmd)
+	Log.Add("scp", ">>>", cmd)
 	session, err := b.client.NewSession()
 	if err != nil {
-		remoteLog.Add("scp", "ERR", err.Error())
+		Log.Add("scp", "ERR", err.Error())
 		return "", err
 	}
 	defer session.Close()
@@ -187,15 +189,15 @@ func (b *SCPBackend) sshRun(cmd string) (string, error) {
 	if err := session.Run(cmd); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
-			remoteLog.Add("scp", "ERR", msg)
+			Log.Add("scp", "ERR", msg)
 			return "", fmt.Errorf("%s", msg)
 		}
-		remoteLog.Add("scp", "ERR", err.Error())
+		Log.Add("scp", "ERR", err.Error())
 		return "", err
 	}
 	out := stdout.String()
 	if out != "" {
-		remoteLog.Add("scp", "<<<", strings.TrimRight(out, "\n"))
+		Log.Add("scp", "<<<", strings.TrimRight(out, "\n"))
 	}
 	return out, nil
 }

@@ -1,53 +1,14 @@
-package main
+package ui
 
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"sc/transport"
 )
-
-var remoteLog = &RemoteLog{}
-
-type RemoteLog struct {
-	mu       sync.Mutex
-	lines    []string
-	errCount int
-}
-
-func (l *RemoteLog) Add(proto, direction, msg string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	ts := time.Now().Format("15:04:05.000")
-	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
-		l.lines = append(l.lines, fmt.Sprintf("%s %s %s %s", ts, proto, direction, line))
-	}
-	if direction == "ERR" {
-		l.errCount++
-	}
-}
-
-func (l *RemoteLog) ErrCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.errCount
-}
-
-func (l *RemoteLog) Lines() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]string, len(l.lines))
-	copy(out, l.lines)
-	return out
-}
-
-func (l *RemoteLog) Len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.lines)
-}
 
 type LogDialog struct {
 	visible      bool
@@ -63,11 +24,11 @@ func NewLogDialog() *LogDialog {
 	return &LogDialog{follow: true}
 }
 
-func (d *LogDialog) Open()        { d.visible = true; d.follow = true }
+func (d *LogDialog) Open()  { d.visible = true; d.follow = true }
 func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()
-	d.lastSeenErrs = remoteLog.ErrCount()
+	d.lastSeenErrs = transport.Log.ErrCount()
 }
 
 func (d *LogDialog) AutoOpen(errCount int) {
@@ -100,7 +61,7 @@ func (d *LogDialog) ScrollUp() {
 }
 
 func (d *LogDialog) ScrollDown() {
-	lines := remoteLog.Len()
+	lines := transport.Log.Len()
 	vh := d.viewHeight()
 	d.offset += vh / 2
 	max := lines - vh
@@ -122,7 +83,7 @@ func (d *LogDialog) PageUp() {
 }
 
 func (d *LogDialog) PageDown() {
-	lines := remoteLog.Len()
+	lines := transport.Log.Len()
 	vh := d.viewHeight()
 	d.offset += vh
 	max := lines - vh
@@ -151,7 +112,7 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 	d.width = width
 	d.height = height
 
-	lines := remoteLog.Lines()
+	lines := transport.Log.Lines()
 	vh := d.viewHeight()
 	contentWidth := width - 6
 	if contentWidth < 20 {

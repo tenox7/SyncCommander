@@ -1,4 +1,4 @@
-package main
+package transport
 
 import (
 	"syscall"
@@ -6,9 +6,11 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"sc/model"
 )
 
-func fillTimes(entry *FileEntry, path string) {
+func fillTimes(entry *model.FileEntry, path string) {
 	var st syscall.Stat_t
 	if syscall.Lstat(path, &st) != nil {
 		return

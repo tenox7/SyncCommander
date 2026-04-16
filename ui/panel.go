@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"fmt"
@@ -6,27 +6,29 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"sc/model"
 )
 
 type Panel struct {
-	title    string
-	nodes    []*TreeNode
-	cursor   int
-	offset   int
-	width    int
-	height   int
-	active   bool
-	isLeft   bool
-	wrap     bool
-	cmpOpts  *CompareOpts
-	spinner  string
+	title   string
+	nodes   []*model.TreeNode
+	cursor  int
+	offset  int
+	width   int
+	height  int
+	active  bool
+	isLeft  bool
+	wrap    bool
+	cmpOpts *model.CompareOpts
+	spinner string
 }
 
 func NewPanel(title string) *Panel {
 	return &Panel{title: title}
 }
 
-func (p *Panel) SetNodes(nodes []*TreeNode) {
+func (p *Panel) SetNodes(nodes []*model.TreeNode) {
 	p.nodes = nodes
 	if p.cursor >= len(p.nodes) {
 		p.cursor = max(0, len(p.nodes)-1)
@@ -34,7 +36,7 @@ func (p *Panel) SetNodes(nodes []*TreeNode) {
 	p.clampOffset()
 }
 
-func (p *Panel) CursorNode() *TreeNode {
+func (p *Panel) CursorNode() *model.TreeNode {
 	if p.cursor < 0 || p.cursor >= len(p.nodes) {
 		return nil
 	}
@@ -107,7 +109,7 @@ var (
 	styleUnknown   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleChrome    = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	styleDir       = lipgloss.NewStyle()
-	styleCursor = lipgloss.NewStyle().Reverse(true)
+	styleCursor    = lipgloss.NewStyle().Reverse(true)
 )
 
 func (p *Panel) View() string {
@@ -148,26 +150,26 @@ func (p *Panel) View() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (p *Panel) isHidden(node *TreeNode) bool {
+func (p *Panel) isHidden(node *model.TreeNode) bool {
 	if node.IsAttr {
-		if p.isLeft && node.AttrPresence == PresenceRightOnly {
+		if p.isLeft && node.AttrPresence == model.PresenceRightOnly {
 			return true
 		}
-		if !p.isLeft && node.AttrPresence == PresenceLeftOnly {
+		if !p.isLeft && node.AttrPresence == model.PresenceLeftOnly {
 			return true
 		}
 		return false
 	}
-	if p.isLeft && node.Compare.Presence == PresenceRightOnly {
+	if p.isLeft && node.Compare.Presence == model.PresenceRightOnly {
 		return true
 	}
-	if !p.isLeft && node.Compare.Presence == PresenceLeftOnly {
+	if !p.isLeft && node.Compare.Presence == model.PresenceLeftOnly {
 		return true
 	}
 	return false
 }
 
-func (p *Panel) renderNode(node *TreeNode) string {
+func (p *Panel) renderNode(node *model.TreeNode) string {
 	if p.isHidden(node) {
 		return renderGuidesOnly(node)
 	}
@@ -221,17 +223,15 @@ func (p *Panel) renderNode(node *TreeNode) string {
 	return left + strings.Repeat(" ", gap) + info
 }
 
-func (p *Panel) renderAttrRow(node *TreeNode) string {
+func (p *Panel) renderAttrRow(node *model.TreeNode) string {
 	chrome := renderGuides(node)
 
-	// Determine the active colour: grey when inactive (option off or invalid time),
-	// otherwise green/red per status. AttrNA and AttrScanning stay as-is.
 	activeStyle := styleUnknown
 	if !node.AttrInactive {
 		switch node.AttrStatus {
-		case AttrEqual:
+		case model.AttrEqual:
 			activeStyle = styleEqual
-		case AttrDifferent:
+		case model.AttrDifferent:
 			activeStyle = styleDifferent
 		}
 	}
@@ -239,11 +239,11 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 
 	var st string
 	switch node.AttrStatus {
-	case AttrNA:
+	case model.AttrNA:
 		st = styleUnknown.Render("-")
-	case AttrScanning:
+	case model.AttrScanning:
 		st = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render("=")
-	case AttrDifferent:
+	case model.AttrDifferent:
 		st = activeStyle.Render("≠")
 	default:
 		st = activeStyle.Render("=")
@@ -263,7 +263,7 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 		raw = node.AttrRightRaw
 		win = -win
 	}
-	if node.AttrStatus == AttrDifferent && win != 0 {
+	if node.AttrStatus == model.AttrDifferent && win != 0 {
 		if win < 0 {
 			val = styleEqual.Render(val)
 		} else {
@@ -271,12 +271,12 @@ func (p *Panel) renderAttrRow(node *TreeNode) string {
 		}
 	}
 	if raw != "" && val != "-" {
-		val += styleChrome.Render(" ["+raw+"]")
+		val += styleChrome.Render(" [" + raw + "]")
 	}
 	return fmt.Sprintf("%s %s %s  %s", chrome, label, st, val)
 }
 
-func (p *Panel) inlineInfo(node *TreeNode) string {
+func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	if node.IsDir {
 		var dirs, files int
 		var size int64
@@ -292,9 +292,9 @@ func (p *Panel) inlineInfo(node *TreeNode) string {
 		if dirs == 0 && files == 0 {
 			return ""
 		}
-		return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", dirs, files, formatSize(size)))
+		return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", dirs, files, model.FormatSize(size)))
 	}
-	var entry *FileEntry
+	var entry *model.FileEntry
 	if p.isLeft {
 		entry = node.Left
 	} else {
@@ -303,46 +303,46 @@ func (p *Panel) inlineInfo(node *TreeNode) string {
 	if entry == nil {
 		return ""
 	}
-	return styleChrome.Render(fmt.Sprintf("%8s %7s", timeAgo(entry.ModTime), formatSize(entry.Size)))
+	return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
 }
 
-func attrChar(label string, status AttrStatus) string {
+func attrChar(label string, status model.AttrStatus) string {
 	switch status {
-	case AttrEqual:
+	case model.AttrEqual:
 		return styleEqual.Render(label)
-	case AttrDifferent:
+	case model.AttrDifferent:
 		return styleDifferent.Render(label)
-	case AttrScanning:
+	case model.AttrScanning:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render(label)
-	case AttrNA:
+	case model.AttrNA:
 		return styleUnknown.Render("-")
 	default:
 		return styleUnknown.Render(".")
 	}
 }
 
-func (p *Panel) dirStyle(node *TreeNode) lipgloss.Style {
+func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 	switch node.Compare.Presence {
-	case PresenceLeftOnly, PresenceRightOnly:
+	case model.PresenceLeftOnly, model.PresenceRightOnly:
 		return styleDir.Foreground(styleDifferent.GetForeground())
 	}
 	switch node.ChildStatus {
-	case AttrEqual:
+	case model.AttrEqual:
 		return styleDir.Foreground(styleEqual.GetForeground())
-	case AttrDifferent:
+	case model.AttrDifferent:
 		return styleDir.Foreground(styleDifferent.GetForeground())
 	default:
 		return styleDir
 	}
 }
 
-func (p *Panel) nodeStyle(node *TreeNode) lipgloss.Style {
+func (p *Panel) nodeStyle(node *model.TreeNode) lipgloss.Style {
 	switch node.Compare.Presence {
-	case PresenceLeftOnly, PresenceRightOnly:
+	case model.PresenceLeftOnly, model.PresenceRightOnly:
 		return styleDifferent
 	}
 	opts := p.cmpOpts
-	attrs := []AttrStatus{}
+	attrs := []model.AttrStatus{}
 	if opts != nil && opts.Size {
 		attrs = append(attrs, node.Compare.Size)
 	}
@@ -366,10 +366,10 @@ func (p *Panel) nodeStyle(node *TreeNode) lipgloss.Style {
 	}
 	hasUnknown := false
 	for _, a := range attrs {
-		if a == AttrDifferent {
+		if a == model.AttrDifferent {
 			return styleDifferent
 		}
-		if a == AttrUnknown || a == AttrScanning {
+		if a == model.AttrUnknown || a == model.AttrScanning {
 			hasUnknown = true
 		}
 	}
@@ -379,7 +379,7 @@ func (p *Panel) nodeStyle(node *TreeNode) lipgloss.Style {
 	return styleEqual
 }
 
-func renderGuides(node *TreeNode) string {
+func renderGuides(node *model.TreeNode) string {
 	var sb strings.Builder
 	for i, cont := range node.Guides {
 		if i == 0 {
@@ -399,7 +399,7 @@ func renderGuides(node *TreeNode) string {
 	return styleChrome.Render(sb.String())
 }
 
-func renderGuidesOnly(node *TreeNode) string {
+func renderGuidesOnly(node *model.TreeNode) string {
 	var sb strings.Builder
 	for i, cont := range node.Guides {
 		if i == 0 {

@@ -1,11 +1,13 @@
-package main
+package transport
 
 import (
 	"syscall"
 	"time"
+
+	"sc/model"
 )
 
-func fillTimes(entry *FileEntry, path string) {
+func fillTimes(entry *model.FileEntry, path string) {
 	var st syscall.Stat_t
 	if syscall.Lstat(path, &st) != nil {
 		return
