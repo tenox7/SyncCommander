@@ -67,7 +67,7 @@ func formatSizeDelta(d int64) string {
 }
 
 func RenderBottomBar(width int) string {
-	hint := "↵=expand R=rescan C=cksum T=touch N=ren D=del <Copy> I=info ~=log B=base U=url S=set ?=help Q=quit"
+	hint := "E=ren D=del <Lcp >Rcp I=info ~=log B=base U=url =pref ?=help"
 	inner := width - 2 // styleBar has Padding(0,1) on each side
 	if inner < 0 {
 		inner = 0

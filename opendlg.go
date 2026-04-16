@@ -56,7 +56,7 @@ func (d *OpenDialog) HandleKey(key string) {
 	}
 
 	switch key {
-	case "tab", "shift+tab":
+	case "tab", "shift+tab", "up", "down":
 		d.activeRight = !d.activeRight
 		d.errMsg = ""
 		return
@@ -150,7 +150,7 @@ func (d *OpenDialog) View(width, height int) string {
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	sb.WriteString(hintStyle.Render("/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://"))
 	sb.WriteString("\n\n")
-	sb.WriteString(hintStyle.Render("Tab=switch  Enter=open  Esc=cancel"))
+	sb.WriteString(hintStyle.Render("Enter=open  Esc=cancel"))
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

@@ -22,7 +22,7 @@ var helpKeys = []struct{ key, desc string }{
 	{"R", "Rescan file or directory"},
 	{"C", "Compute checksum (SHA256)"},
 	{"T", "Touch — sync timestamps"},
-	{"N", "Rename file or directory"},
+	{"E", "Rename file or directory"},
 	{"D", "Delete file or directory"},
 	{">", "Copy left → right (mirror)"},
 	{"<", "Copy right → left (mirror)"},
@@ -34,7 +34,7 @@ var helpKeys = []struct{ key, desc string }{
 	{"~", "Remote protocol log"},
 	{"B", "Set base to selected directory"},
 	{"U", "Change directory / URL"},
-	{"S", "Settings"},
+	{"=", "Settings"},
 	{"W", "Toggle line wrap"},
 	{"Ctrl+L", "Redraw screen"},
 	{"Q / Esc", "Quit"},
@@ -49,8 +49,8 @@ func (d *HelpDialog) View(width, height int) string {
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render("Keyboard Shortcuts"))
 	sb.WriteString("\n\n")
 
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Width(10)
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	keyStyle := lipgloss.NewStyle().Bold(true).Width(10)
+	descStyle := lipgloss.NewStyle()
 
 	for _, h := range helpKeys {
 		sb.WriteString(keyStyle.Render(h.key))
@@ -59,7 +59,7 @@ func (d *HelpDialog) View(width, height int) string {
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("?=help  Esc=close"))
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Render("?=help  Esc=close"))
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

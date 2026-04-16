@@ -1,9 +1,8 @@
-# TODO
+\# TODO
 
 ## Features
 
-- Improve top status line, current format is not very well understood
-  I think we need dir/files/size on both left right and count of ≠ and Δ size to the right
+- refactor go files, there are too many/ momove some to a sub dir
 - Better help line, not all keys are always needed, only most important one
 - support remote move with relative and absolute paths, ask for path
 - support resume/continue/append and intelligent upload/downloads for rsync
@@ -12,7 +11,9 @@
 - support for retry upload on stale/conn drop etc 
 - support multiple concurrent remote connections and spread listing across dirs, multiple file copies
 - open/collapse all
+- swap panels left/right-
 - select multiple files / folders and execute a batch
+- open object, diff for text files, hex dump diff for binary
 - export to csv/xls
 - color schemes
 - misc protocols

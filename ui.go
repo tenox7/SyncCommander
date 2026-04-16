@@ -273,7 +273,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node != nil {
 			return m, m.checksumNode(node)
 		}
-	case "n":
+	case "e":
 		node := m.activePanel().CursorNode()
 		if node != nil && !node.IsAttr {
 			m.openRename(node)
@@ -335,7 +335,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.copying = true
 		return m, m.copyNode(node, false, false)
-	case "s":
+	case "=":
 		m.settings.Open()
 	case "w":
 		m.leftPanel.wrap = !m.leftPanel.wrap
