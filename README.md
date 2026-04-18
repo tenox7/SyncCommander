@@ -2,6 +2,12 @@
 
 A tool for manual comparison, inspection, verification and troubleshooting of file/directory tree synchronization. Like Norton Commander or Midnight Commander but for sync.
 
+## Rationale
+
+- Out of band verification and inspection of dir sync tree
+- Troubleshooting, debugging sync issues
+- Manual touch up and maintenance
+
 ## Supported protocols and checksums
 
 - Local dir including remote mounts. SHA/MD5 checksums.

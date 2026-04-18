@@ -19,6 +19,7 @@ func (d *HelpDialog) Close()       { d.visible = false }
 func (d *HelpDialog) IsOpen() bool { return d.visible }
 
 var helpKeys = []struct{ key, desc string }{
+	{"O", "Open file diff / hex view"},
 	{"R", "Rescan file or directory"},
 	{"C", "Compute checksum (SHA256)"},
 	{"T", "Touch — sync timestamps"},

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,10 @@ type scanDoneMsg struct{}
 type rescanDoneMsg struct{}
 type checksumDoneMsg struct{}
 type touchDoneMsg struct{}
+type diffLoadDoneMsg struct {
+	left, right []byte
+	err         error
+}
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
@@ -56,6 +61,7 @@ type Model struct {
 	help          *HelpDialog
 	info          *InfoDialog
 	logView       *LogDialog
+	diffView      *DiffView
 	pendingDelete *model.TreeNode
 	pendingCopy   *pendingCopyInfo
 	openDlg       *OpenDialog
@@ -80,6 +86,7 @@ func NewModel(left, right model.Backend, cksum, insecure bool) Model {
 		help:         NewHelpDialog(),
 		info:         NewInfoDialog(),
 		logView:      NewLogDialog(),
+		diffView:     NewDiffView(),
 		openDlg:      NewOpenDialog(),
 		copyProgress: &CopyProgress{},
 		insecure:     insecure,
@@ -151,11 +158,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copying = false
 		m.refreshTree()
 		return m, nil
+	case diffLoadDoneMsg:
+		if msg.err != nil {
+			m.diffView.SetError(msg.err.Error())
+		} else {
+			m.diffView.LoadContent(msg.left, msg.right)
+		}
+		return m, nil
 	}
 	return m, nil
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.diffView.IsOpen() {
+		return m.handleDiffViewKey(msg)
+	}
 	if m.logView.IsOpen() {
 		switch msg.String() {
 		case "esc", "ctrl+c", "q", "~", "`":
@@ -365,6 +382,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.openDlg.Open(m.left.BasePath(), m.right.BasePath())
+	case "o":
+		node := m.activePanel().CursorNode()
+		if node != nil && node.IsAttr {
+			node = m.parentFileNode()
+		}
+		if node != nil && !node.IsDir {
+			m.diffView.Open(node.Name)
+			return m, m.loadDiffContent(node)
+		}
 	case "b":
 		if m.copying || m.deleting {
 			break
@@ -387,6 +413,66 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c", "q":
+		m.diffView.Close()
+	case "up", "k":
+		m.diffView.ScrollUp()
+	case "down", "j":
+		m.diffView.ScrollDown()
+	case "pgup":
+		m.diffView.PageUp()
+	case "pgdown":
+		m.diffView.PageDown()
+	case "home":
+		m.diffView.Home()
+	case "end":
+		m.diffView.End()
+	case "n":
+		m.diffView.NextDiff()
+	case "p":
+		m.diffView.PrevDiff()
+	}
+	return m, nil
+}
+
+func (m *Model) loadDiffContent(node *model.TreeNode) tea.Cmd {
+	left := m.left
+	right := m.right
+	relPath := node.RelPath
+	hasLeft := node.Left != nil
+	hasRight := node.Right != nil
+	return func() tea.Msg {
+		ctx := context.Background()
+		var leftData, rightData []byte
+		var err error
+
+		if hasLeft {
+			leftData, err = readAll(ctx, left, relPath)
+			if err != nil {
+				return diffLoadDoneMsg{err: fmt.Errorf("left: %w", err)}
+			}
+		}
+		if hasRight {
+			rightData, err = readAll(ctx, right, relPath)
+			if err != nil {
+				return diffLoadDoneMsg{err: fmt.Errorf("right: %w", err)}
+			}
+		}
+		return diffLoadDoneMsg{left: leftData, right: rightData}
+	}
+}
+
+func readAll(ctx context.Context, backend model.Backend, relPath string) ([]byte, error) {
+	rc, err := backend.Open(ctx, relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
 }
 
 func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -919,6 +1005,9 @@ func (m Model) View() string {
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, bottomBar)
 
+	if m.diffView.IsOpen() {
+		return m.diffView.View(m.width, m.height)
+	}
 	if m.logView.IsOpen() {
 		return m.logView.View(m.width, m.height, spinner)
 	}
