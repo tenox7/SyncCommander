@@ -31,9 +31,8 @@ type RsyncBackend struct {
 	display     string
 	useChecksum bool
 	cksumAlgo   string
+	md4mu       sync.Mutex
 	md4cache    map[string]string
-	md4once     sync.Once
-	md4err      error
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -204,11 +203,17 @@ func (b *RsyncBackend) SetChecksumAlgo(algo string) {
 
 func (b *RsyncBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	if b.cksumAlgo == "md4" {
-		b.md4once.Do(func() { b.md4err = b.fetchMD4(ctx) })
-		if b.md4err != nil {
-			return "", b.md4err
-		}
+		b.md4mu.Lock()
 		sum, ok := b.md4cache[relPath]
+		b.md4mu.Unlock()
+		if ok {
+			return sum, nil
+		}
+		got, err := b.fetchMD4(ctx, relPath, false)
+		if err != nil {
+			return "", err
+		}
+		sum, ok = got[relPath]
 		if !ok {
 			return "", fmt.Errorf("md4: no checksum for %s", relPath)
 		}
@@ -220,21 +225,39 @@ func (b *RsyncBackend) Checksum(ctx context.Context, relPath string) (string, er
 	return "rsync_internal", nil
 }
 
-func (b *RsyncBackend) fetchMD4(ctx context.Context) error {
+func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
+	if b.cksumAlgo != "md4" {
+		return nil
+	}
+	_, err := b.fetchMD4(ctx, scope, recursive)
+	return err
+}
+
+func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
 	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	client, err := rsyncclient.New([]string{"-r", "-c"}, rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
+	args := []string{"-c"}
+	if recursive {
+		args = append(args, "-r")
+	}
+	client, err := rsyncclient.New(args, rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	remotePath := b.module + "/"
 	if b.base != "" {
-		remotePath = b.module + "/" + b.base + "/"
+		remotePath += b.base + "/"
+	}
+	if scope != "" {
+		remotePath += scope
+		if recursive {
+			remotePath += "/"
+		}
 	}
 
 	if b.user != "" {
@@ -246,26 +269,49 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context) error {
 
 	conn, err := net.DialTimeout("tcp", b.host, 30*time.Second)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 
 	Log.Add("rsync", ">>>", "MD4 "+remotePath)
 	result, err := client.RunDaemon(ctx, conn, remotePath, []string{tmpDir + "/"})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	b.md4cache = make(map[string]string, len(result.FileList))
+	prefix := ""
+	if recursive {
+		prefix = scope
+	} else if scope != "" {
+		prefix = path.Dir(scope)
+		if prefix == "." {
+			prefix = ""
+		}
+	}
+
+	got := make(map[string]string, len(result.FileList))
 	var zero [16]byte
 	for _, fi := range result.FileList {
 		if fi.Checksum == zero {
 			continue
 		}
-		b.md4cache[fi.Name] = hex.EncodeToString(fi.Checksum[:])
+		key := fi.Name
+		if prefix != "" {
+			key = path.Join(prefix, fi.Name)
+		}
+		got[key] = hex.EncodeToString(fi.Checksum[:])
 	}
-	Log.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(b.md4cache)))
-	return nil
+	Log.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(got)))
+
+	b.md4mu.Lock()
+	if b.md4cache == nil {
+		b.md4cache = make(map[string]string, len(got))
+	}
+	for k, v := range got {
+		b.md4cache[k] = v
+	}
+	b.md4mu.Unlock()
+	return got, nil
 }
 
 func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) error {

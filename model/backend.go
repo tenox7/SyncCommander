@@ -36,3 +36,11 @@ type ChecksumProber interface {
 	ProbeChecksums() []string
 	SetChecksumAlgo(algo string)
 }
+
+// ChecksumPrefetcher is implemented by backends where a bulk fetch is cheaper
+// than per-file Checksum calls (e.g. rsync MD4 returns checksums via filelist).
+// scope is a relPath under the backend's base; "" means whole base.
+// recursive is true when scope refers to a directory subtree.
+type ChecksumPrefetcher interface {
+	PrefetchChecksums(ctx context.Context, scope string, recursive bool) error
+}

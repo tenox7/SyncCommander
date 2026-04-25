@@ -32,6 +32,7 @@ type FTPBackend struct {
 	host     string
 	port     string
 	tlsCfg   *tls.Config
+	mu       sync.Mutex
 }
 
 func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
@@ -117,24 +118,19 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 func (b *FTPBackend) BasePath() string { return b.display }
 
 func (b *FTPBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.hasher != nil {
 		b.hasher.close()
 	}
 	return b.conn.Quit()
 }
 
-func (b *FTPBackend) connAlive() bool {
-	ch := make(chan error, 1)
-	go func() { ch <- b.conn.NoOp() }()
-	select {
-	case err := <-ch:
-		return err == nil
-	case <-time.After(3 * time.Second):
-		return false
-	}
+func (b *FTPBackend) connAliveLocked() bool {
+	return b.conn.NoOp() == nil
 }
 
-func (b *FTPBackend) reconnect() error {
+func (b *FTPBackend) reconnectLocked() error {
 	b.conn.Quit()
 	conn, err := ftp.Dial(b.addr, b.dialOpts...)
 	if err != nil {
@@ -159,38 +155,27 @@ func (b *FTPBackend) reconnect() error {
 }
 
 func (b *FTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	result, err := b.listDir(ctx, relDir)
-	if err != nil && ctx.Err() == nil && !b.connAlive() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	result, err := b.listDirLocked(ctx, relDir)
+	if err != nil && ctx.Err() == nil && !b.connAliveLocked() {
 		Log.Add("ftp", "ERR", "connection lost, reconnecting...")
-		if rerr := b.reconnect(); rerr != nil {
+		if rerr := b.reconnectLocked(); rerr != nil {
 			Log.Add("ftp", "ERR", "reconnect failed: "+rerr.Error())
 			return nil, err
 		}
-		return b.listDir(ctx, relDir)
+		return b.listDirLocked(ctx, relDir)
 	}
 	return result, err
 }
 
-func (b *FTPBackend) listDir(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	dir := path.Join(b.base, relDir)
 	Log.Add("ftp", ">>>", "LIST "+dir)
-	type listResult struct {
-		entries []*ftp.Entry
-		err     error
-	}
-	ch := make(chan listResult, 1)
-	go func() {
-		e, err := b.conn.List(dir)
-		ch <- listResult{e, err}
-	}()
-	var entries []*ftp.Entry
-	var err error
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-ch:
-		entries, err = r.entries, r.err
-	}
+	entries, err := b.conn.List(dir)
 	if err != nil {
 		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
@@ -260,6 +245,8 @@ func (b *FTPBackend) SetChecksumAlgo(algo string) {
 }
 
 func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ time.Time) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	err := b.conn.SetTime(path.Join(b.base, relPath), mtime)
 	if err != nil {
 		Log.Add("ftp", "ERR", "MFMT "+relPath+": "+err.Error())
@@ -268,9 +255,11 @@ func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ tim
 }
 
 func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	Log.Add("ftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
-	b.mkdirAll(path.Dir(fullPath))
+	b.mkdirAllLocked(path.Dir(fullPath))
 	err := b.conn.Stor(fullPath, src)
 	if err != nil {
 		Log.Add("ftp", "ERR", err.Error())
@@ -279,6 +268,8 @@ func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, 
 }
 
 func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	err := b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
 	if err != nil {
 		Log.Add("ftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
@@ -287,6 +278,8 @@ func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) er
 }
 
 func (b *FTPBackend) Remove(_ context.Context, relPath string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	err := b.conn.Delete(path.Join(b.base, relPath))
 	if err != nil {
 		Log.Add("ftp", "ERR", "DELETE "+relPath+": "+err.Error())
@@ -295,14 +288,16 @@ func (b *FTPBackend) Remove(_ context.Context, relPath string) error {
 }
 
 func (b *FTPBackend) RemoveAll(_ context.Context, relPath string) error {
-	err := b.removeAll(path.Join(b.base, relPath))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	err := b.removeAllLocked(path.Join(b.base, relPath))
 	if err != nil {
 		Log.Add("ftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
 }
 
-func (b *FTPBackend) removeAll(fullPath string) error {
+func (b *FTPBackend) removeAllLocked(fullPath string) error {
 	entries, err := b.conn.List(fullPath)
 	if err != nil {
 		return b.conn.Delete(fullPath)
@@ -313,7 +308,7 @@ func (b *FTPBackend) removeAll(fullPath string) error {
 		}
 		child := path.Join(fullPath, e.Name)
 		if e.Type == ftp.EntryTypeFolder {
-			if err := b.removeAll(child); err != nil {
+			if err := b.removeAllLocked(child); err != nil {
 				return err
 			}
 			continue
@@ -326,24 +321,46 @@ func (b *FTPBackend) removeAll(fullPath string) error {
 }
 
 func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+	b.mu.Lock()
 	Log.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
 	if err != nil {
+		b.mu.Unlock()
 		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
-	return resp, nil
+	return &lockedFTPReader{rc: resp, mu: &b.mu}, nil
 }
 
-func (b *FTPBackend) mkdirAll(dir string) {
+func (b *FTPBackend) mkdirAllLocked(dir string) {
 	if dir == "/" || dir == "." || dir == "" {
 		return
 	}
 	b.conn.MakeDir(dir)
 	if _, err := b.conn.List(dir); err != nil {
-		b.mkdirAll(path.Dir(dir))
+		b.mkdirAllLocked(path.Dir(dir))
 		b.conn.MakeDir(dir)
 	}
+}
+
+type lockedFTPReader struct {
+	rc     io.ReadCloser
+	mu     *sync.Mutex
+	closed bool
+}
+
+func (r *lockedFTPReader) Read(p []byte) (int, error) {
+	return r.rc.Read(p)
+}
+
+func (r *lockedFTPReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	err := r.rc.Close()
+	r.mu.Unlock()
+	return err
 }
 
 type ftpHasher struct {

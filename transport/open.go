@@ -17,6 +17,30 @@ func IsRemote(arg string) bool {
 	return false
 }
 
+func MaskURLPassword(rawURL string) string {
+	idx := strings.Index(rawURL, "://")
+	if idx < 0 {
+		return rawURL
+	}
+	rest := rawURL[idx+3:]
+	authority := rest
+	tail := ""
+	if si := strings.IndexByte(rest, '/'); si >= 0 {
+		authority = rest[:si]
+		tail = rest[si:]
+	}
+	ai := strings.LastIndexByte(authority, '@')
+	if ai < 0 {
+		return rawURL
+	}
+	creds := authority[:ai]
+	ci := strings.IndexByte(creds, ':')
+	if ci < 0 {
+		return rawURL
+	}
+	return rawURL[:idx+3] + creds[:ci] + ":xxxxx@" + authority[ai+1:] + tail
+}
+
 func OpenBackend(arg string, insecure bool) (model.Backend, error) {
 	if strings.HasPrefix(arg, "sftp://") {
 		return NewSFTPBackend(arg)
@@ -49,7 +73,7 @@ func OpenBackendLazy(arg string, insecure bool) model.Backend {
 		}
 		return NewLocalBackend(arg)
 	}
-	return NewLazyBackend(arg, func() (model.Backend, error) {
+	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
 		return OpenBackend(arg, insecure)
 	})
 }
@@ -65,7 +89,7 @@ func TryOpenBackend(arg string, insecure bool) (model.Backend, error) {
 		}
 		return NewLocalBackend(arg), nil
 	}
-	return NewLazyBackend(arg, func() (model.Backend, error) {
+	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
 		return OpenBackend(arg, insecure)
 	}), nil
 }

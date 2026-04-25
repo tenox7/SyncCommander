@@ -198,6 +198,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	p.ChecksumFiles = checksumTotal
 	s.setProgress(p)
 
+	s.prefetchChecksums(ctx, "", true)
+
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
 
@@ -330,6 +332,10 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 	if !withChecksum {
 		return
 	}
+	if !s.negotiateChecksum() {
+		return
+	}
+	s.prefetchChecksums(ctx, node.RelPath, true)
 	var files []*TreeNode
 	collectFiles(node, &files)
 	sem := make(chan struct{}, s.concurrency)
@@ -359,6 +365,7 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 		}
 		return
 	}
+	s.prefetchChecksums(ctx, node.RelPath, true)
 	var files []*TreeNode
 	collectFiles(node, &files)
 	sem := make(chan struct{}, s.concurrency)
@@ -376,6 +383,15 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 		}(f)
 	}
 	wg.Wait()
+}
+
+func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive bool) {
+	if p, ok := s.left.(ChecksumPrefetcher); ok {
+		p.PrefetchChecksums(ctx, scope, recursive)
+	}
+	if p, ok := s.right.(ChecksumPrefetcher); ok {
+		p.PrefetchChecksums(ctx, scope, recursive)
+	}
 }
 
 func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, []FileEntry) {

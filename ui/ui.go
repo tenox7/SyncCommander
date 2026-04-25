@@ -50,6 +50,7 @@ type Model struct {
 	scanning      bool
 	deleting      bool
 	copying       bool
+	checksumming  bool
 	copyProgress  *CopyProgress
 	cmpOpts       model.CompareOpts
 	width         int
@@ -142,6 +143,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTree()
 		return m, nil
 	case checksumDoneMsg:
+		m.checksumming = false
 		m.refreshTree()
 		return m, nil
 	case renameDoneMsg:
@@ -287,11 +289,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.startScan()
 	case "c":
+		if m.checksumming {
+			break
+		}
 		node := m.activePanel().CursorNode()
 		if node != nil && node.IsAttr {
 			node = m.parentFileNode()
 		}
 		if node != nil {
+			m.checksumming = true
 			return m, m.checksumNode(node)
 		}
 	case "e":
@@ -958,7 +964,7 @@ func (m Model) View() string {
 	tree := m.scanner.Tree()
 
 	spinner := ""
-	if (progress.Phase != "" && progress.Phase != "done") || m.deleting || m.copying {
+	if (progress.Phase != "" && progress.Phase != "done") || m.deleting || m.copying || m.checksumming {
 		spinner = spinnerFrames[m.spinFrame]
 	}
 	operation := ""
@@ -968,6 +974,8 @@ func (m Model) View() string {
 		done := m.copyProgress.Done.Load()
 		total := m.copyProgress.Total.Load()
 		operation = fmt.Sprintf("%s copying... %s %d/%d", spinner, progressBar(done, total, 20), done, total)
+	} else if m.checksumming {
+		operation = spinner + " checksumming..."
 	}
 
 	var stats *TreeStats
@@ -986,7 +994,7 @@ func (m Model) View() string {
 	topBar := leftTopBar + rightTopBar
 	bottomBar := RenderBottomBar(m.width)
 
-	if m.deleting || m.copying {
+	if m.deleting || m.copying || m.checksumming {
 		m.leftPanel.spinner = spinner
 		m.rightPanel.spinner = spinner
 	} else {

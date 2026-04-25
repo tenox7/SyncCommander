@@ -137,3 +137,14 @@ func (b *lazyBackend) SetChecksumAlgo(algo string) {
 		p.SetChecksumAlgo(algo)
 	}
 }
+
+func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
+	b.connect()
+	if b.err != nil {
+		return b.err
+	}
+	if p, ok := b.inner.(model.ChecksumPrefetcher); ok {
+		return p.PrefetchChecksums(ctx, scope, recursive)
+	}
+	return nil
+}
