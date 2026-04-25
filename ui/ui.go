@@ -496,7 +496,7 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.input.Confirm()
 	default:
-		m.input.HandleKey(msg.String())
+		m.input.HandleKey(msg)
 	}
 	return m, nil
 }
@@ -561,7 +561,7 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openDlg.Close()
 		return m, cmd
 	default:
-		m.openDlg.HandleKey(msg.String())
+		m.openDlg.HandleKey(msg)
 	}
 	return m, nil
 }

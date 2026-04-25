@@ -26,11 +26,13 @@ func NewLazyBackend(display string, factory func() (model.Backend, error)) model
 func (b *lazyBackend) connect() {
 	b.once.Do(func() {
 		Log.Add("conn", ">>>", "connecting to "+b.display)
-		b.inner, b.err = b.factory()
-		if b.err != nil {
-			Log.Add("conn", "ERR", b.display+": "+b.err.Error())
+		inner, err := b.factory()
+		if err != nil {
+			b.err = err
+			Log.Add("conn", "ERR", b.display+": "+err.Error())
 			return
 		}
+		b.inner = inner
 		Log.Add("conn", "<<<", "connected to "+b.display)
 	})
 }

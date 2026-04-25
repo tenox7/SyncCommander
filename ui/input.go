@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -43,8 +44,8 @@ func (d *InputDialog) Confirm() {
 	d.Close()
 }
 
-func (d *InputDialog) HandleKey(key string) {
-	switch key {
+func (d *InputDialog) HandleKey(msg tea.KeyMsg) {
+	switch msg.String() {
 	case "left":
 		if d.cursor > 0 {
 			d.cursor--
@@ -72,10 +73,18 @@ func (d *InputDialog) HandleKey(key string) {
 	case "ctrl+k":
 		d.value = d.value[:d.cursor]
 	default:
-		if len(key) == 1 && key[0] >= 32 {
-			d.value = d.value[:d.cursor] + key + d.value[d.cursor:]
-			d.cursor++
+		if len(msg.Runes) == 0 {
+			return
 		}
+		s := string(msg.Runes)
+		if msg.Paste {
+			s = strings.NewReplacer("\r", "", "\n", "", "\t", " ").Replace(s)
+		}
+		if s == "" {
+			return
+		}
+		d.value = d.value[:d.cursor] + s + d.value[d.cursor:]
+		d.cursor += len(s)
 	}
 }
 
