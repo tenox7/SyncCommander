@@ -113,8 +113,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 			return
 		}
 
-		job := queue[0]
-		queue = queue[1:]
+		job := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
 
 		s.setProgress(progress("scanning..."))
 
@@ -147,13 +147,6 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 				if lr {
 					rightPending++
 				}
-				queue = append(queue, dirJob{
-					relDir:    child.RelPath,
-					parent:    child,
-					depth:     job.depth + 1,
-					listLeft:  ll,
-					listRight: lr,
-				})
 				continue
 			}
 			stats.totalFiles.Add(1)
@@ -169,6 +162,20 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 					stats.filesDiff.Add(1)
 				}
 			}
+		}
+
+		for i := len(children) - 1; i >= 0; i-- {
+			child := children[i]
+			if !child.IsDir {
+				continue
+			}
+			queue = append(queue, dirJob{
+				relDir:    child.RelPath,
+				parent:    child,
+				depth:     job.depth + 1,
+				listLeft:  child.Compare.Presence != PresenceRightOnly,
+				listRight: child.Compare.Presence != PresenceLeftOnly,
+			})
 		}
 
 		s.setProgress(progress("scanning..."))
@@ -293,8 +300,8 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		if ctx.Err() != nil {
 			return
 		}
-		job := queue[0]
-		queue = queue[1:]
+		job := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
 
 		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace)
@@ -305,16 +312,18 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		job.parent.Listed = true
 		s.mu.Unlock()
 
-		for _, child := range children {
-			if child.IsDir {
-				queue = append(queue, dirJob{
-					relDir:    child.RelPath,
-					parent:    child,
-					depth:     job.depth + 1,
-					listLeft:  child.Compare.Presence != PresenceRightOnly,
-					listRight: child.Compare.Presence != PresenceLeftOnly,
-				})
+		for i := len(children) - 1; i >= 0; i-- {
+			child := children[i]
+			if !child.IsDir {
+				continue
 			}
+			queue = append(queue, dirJob{
+				relDir:    child.RelPath,
+				parent:    child,
+				depth:     job.depth + 1,
+				listLeft:  child.Compare.Presence != PresenceRightOnly,
+				listRight: child.Compare.Presence != PresenceLeftOnly,
+			})
 		}
 	}
 
