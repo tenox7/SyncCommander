@@ -15,15 +15,6 @@ var styleBar = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
-var styleBarErr = lipgloss.NewStyle().
-	Background(lipgloss.Color("4")).
-	Foreground(lipgloss.Color("9")).
-	Bold(true)
-
-var styleBarDim = lipgloss.NewStyle().
-	Background(lipgloss.Color("4")).
-	Foreground(lipgloss.Color("7"))
-
 func progressBar(done, total int64, barWidth int) string {
 	if total <= 0 {
 		return strings.Repeat("░", barWidth)
@@ -137,15 +128,13 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	counters.WriteString("  ")
 	counters.WriteString(fmt.Sprintf("CRC:%s", crcLabel(info.ChecksumAlgo)))
 	if info.Errors > 0 {
-		counters.WriteString("  ")
-		counters.WriteString(styleBarErr.Render(fmt.Sprintf("err:%d", info.Errors)))
+		counters.WriteString(fmt.Sprintf("  err:%d", info.Errors))
 	}
 	if info.Retries > 0 {
-		counters.WriteString("  ")
-		counters.WriteString(styleBarErr.Render(fmt.Sprintf("ret:%d", info.Retries)))
+		counters.WriteString(fmt.Sprintf("  ret:%d", info.Retries))
 	}
 
-	right := styleBarDim.Render("?=help")
+	right := "?=help"
 
 	leftW := lipgloss.Width(left) + lipgloss.Width(counters.String())
 	rightW := lipgloss.Width(right)
