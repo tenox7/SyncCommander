@@ -3,7 +3,6 @@
 ## Features
 
 - status in bottom bar
-- add copy progress bar
 - support resume/continue/append and intelligent upload/downloads for rsync
   especially if files are there but different sizes
   if no file present on one side then always do a full copy
@@ -16,7 +15,6 @@
 - multi file progress bar
 
 - support remote move with relative and absolute paths, ask for path
-- open object, diff for text files, hex dump diff for binary
 - export to csv/xls
 - color schemes
 - misc protocols

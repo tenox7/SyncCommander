@@ -7,16 +7,27 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"sc/model"
 	"sc/transport"
 	"sc/ui"
 )
 
 func main() {
-	cksum := flag.Bool("cksum", false, "enable checksum comparison")
+	size := flag.Bool("size", true, "compare file size")
+	modtime := flag.Bool("modtime", true, "compare modify time")
+	atime := flag.Bool("atime", false, "compare access time")
+	ctime := flag.Bool("ctime", false, "compare change time")
+	btime := flag.Bool("btime", false, "compare birth time")
+	mode := flag.Bool("mode", false, "compare permissions")
+	cksum := flag.Bool("cksum", false, "compare checksums")
+	subsec := flag.Bool("subsec", false, "sub-second time precision")
+	grace := flag.Bool("grace", true, "allow ±1s time grace")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: sc [--cksum] [--insecure] [<left-path> <right-path>]\n")
+		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh}://[user[:pass]@]host/path\n")
+		fmt.Fprintf(os.Stderr, "compare flags (use --flag=false to disable defaults):\n")
+		flag.PrintDefaults()
 	}
 	flag.Parse()
 
@@ -37,13 +48,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	opts := &model.CompareOpts{
+		Size:      *size,
+		ModTime:   *modtime,
+		ATime:     *atime,
+		CTime:     *ctime,
+		BTime:     *btime,
+		Mode:      *mode,
+		Checksum:  *cksum,
+		SubSecond: *subsec,
+		TimeGrace: *grace,
+	}
+
 	left := transport.OpenBackendLazy(leftPath, *insecure)
 	right := transport.OpenBackendLazy(rightPath, *insecure)
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
 
-	model := ui.NewModel(left, right, *cksum, *insecure)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	mdl := ui.NewModel(left, right, opts, *insecure)
+	p := tea.NewProgram(mdl, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

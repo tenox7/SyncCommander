@@ -67,7 +67,7 @@ type Model struct {
 	copying       bool
 	checksumming  bool
 	copyProgress  *CopyProgress
-	cmpOpts       model.CompareOpts
+	cmpOpts       *model.CompareOpts
 	width         int
 	height        int
 	spinFrame     int
@@ -84,7 +84,7 @@ type Model struct {
 	insecure      bool
 }
 
-func NewModel(left, right model.Backend, cksum, insecure bool) Model {
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure bool) Model {
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
@@ -95,7 +95,7 @@ func NewModel(left, right model.Backend, cksum, insecure bool) Model {
 		right:        right,
 		scanner:      model.NewScanner(left, right, 4),
 		activeLeft:   true,
-		cmpOpts:      model.CompareOpts{Size: true, ModTime: true, Checksum: cksum, TimeGrace: true},
+		cmpOpts:      cmpOpts,
 		settings:     NewSettingsDialog(),
 		input:        NewInputDialog(),
 		confirm:      NewConfirmDialog(),
@@ -107,8 +107,8 @@ func NewModel(left, right model.Backend, cksum, insecure bool) Model {
 		copyProgress: &CopyProgress{},
 		insecure:     insecure,
 	}
-	lp.cmpOpts = &m.cmpOpts
-	rp.cmpOpts = &m.cmpOpts
+	lp.cmpOpts = m.cmpOpts
+	rp.cmpOpts = m.cmpOpts
 	m.settings.SetOptions([]Option{
 		{Label: "Size", Value: &m.cmpOpts.Size},
 		{Label: "Modify time", Value: &m.cmpOpts.ModTime},
@@ -718,7 +718,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
 	checksum := m.cmpOpts.Checksum
-	opts := m.cmpOpts
+	opts := *m.cmpOpts
 	progress := m.copyProgress
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -913,7 +913,7 @@ func (m *Model) refreshTree() {
 	if tree == nil {
 		return
 	}
-	flat := model.FlattenTree(tree, &m.cmpOpts)
+	flat := model.FlattenTree(tree, m.cmpOpts)
 	m.leftPanel.SetNodes(flat)
 	m.rightPanel.SetNodes(flat)
 }
