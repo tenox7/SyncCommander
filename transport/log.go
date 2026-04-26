@@ -11,9 +11,10 @@ import (
 var Log = &RemoteLog{}
 
 type RemoteLog struct {
-	mu       sync.Mutex
-	lines    []string
-	errCount int
+	mu         sync.Mutex
+	lines      []string
+	errCount   int
+	retryCount int
 }
 
 func (l *RemoteLog) Add(proto, direction, msg string) {
@@ -23,8 +24,11 @@ func (l *RemoteLog) Add(proto, direction, msg string) {
 	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
 		l.lines = append(l.lines, fmt.Sprintf("%s %s %s %s", ts, proto, direction, line))
 	}
-	if direction == "ERR" {
+	switch direction {
+	case "ERR":
 		l.errCount++
+	case "RETRY":
+		l.retryCount++
 	}
 }
 
@@ -32,6 +36,12 @@ func (l *RemoteLog) ErrCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.errCount
+}
+
+func (l *RemoteLog) RetryCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.retryCount
 }
 
 func (l *RemoteLog) Lines() []string {

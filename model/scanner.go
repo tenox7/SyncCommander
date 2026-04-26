@@ -92,6 +92,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	leftPending := 1
 	rightPending := 1
 
+	s.setProgress(ScanProgress{Phase: "scanning...", DirsTotal: 1, LeftActive: true, RightActive: true})
+
 	progress := func(phase string) ScanProgress {
 		return ScanProgress{
 			Phase:          phase,
@@ -239,6 +241,19 @@ func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum b
 }
 
 func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+	var totalFiles, ckFiles, ckDone int64
+	setp := func(phase string) {
+		s.setProgress(ScanProgress{
+			Phase:         phase,
+			TotalFiles:    totalFiles,
+			ChecksumFiles: ckFiles,
+			ChecksumDone:  ckDone,
+			LeftActive:    phase != "done",
+			RightActive:   phase != "done",
+		})
+	}
+	setp("scanning...")
+
 	leftEntries, rightEntries := s.listBoth(ctx, DirOf(node.RelPath))
 
 	var le, re *FileEntry
@@ -261,12 +276,34 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	compareNode(node, subSecond, timeGrace)
 	s.mu.Unlock()
 
+	totalFiles = 1
+	setp("scanning...")
+
 	if withChecksum && node.Compare.Presence == PresenceBoth {
+		ckFiles = 1
+		setp("checksumming...")
 		s.checksumNode(ctx, node)
+		ckDone = 1
 	}
+	setp("done")
 }
 
 func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+	var dirsListed, totalFiles, ckTotal int64
+	var ckDone atomic.Int64
+	setp := func(phase string) {
+		s.setProgress(ScanProgress{
+			Phase:         phase,
+			DirsListed:    dirsListed,
+			TotalFiles:    totalFiles,
+			ChecksumFiles: ckTotal,
+			ChecksumDone:  ckDone.Load(),
+			LeftActive:    phase != "done",
+			RightActive:   phase != "done",
+		})
+	}
+	setp("scanning...")
+
 	// Update the node's own Left/Right entries so its presence reflects current
 	// state on both backends. Skip for the root node which has no parent to list.
 	if node.RelPath != "" {
@@ -314,6 +351,14 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		job.parent.Listed = true
 		s.mu.Unlock()
 
+		dirsListed++
+		for _, child := range children {
+			if !child.IsDir {
+				totalFiles++
+			}
+		}
+		setp("scanning...")
+
 		for i := len(children) - 1; i >= 0; i-- {
 			child := children[i]
 			if !child.IsDir {
@@ -329,15 +374,15 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		}
 	}
 
-	if !withChecksum {
-		return
-	}
-	if !s.negotiateChecksum() {
+	if !withChecksum || !s.negotiateChecksum() {
+		setp("done")
 		return
 	}
 	s.prefetchChecksums(ctx, node.RelPath, true)
 	var files []*TreeNode
 	collectFiles(node, &files)
+	ckTotal = int64(len(files))
+	setp("checksumming...")
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
 	for _, f := range files {
@@ -350,24 +395,39 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 			defer wg.Done()
 			defer func() { <-sem }()
 			s.checksumNode(ctx, n)
+			ckDone.Add(1)
+			setp("checksumming...")
 		}(f)
 	}
 	wg.Wait()
+	setp("done")
 }
 
 func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	if !s.negotiateChecksum() {
 		return
 	}
-	if !node.IsDir {
-		if node.Compare.Presence == PresenceBoth {
-			s.checksumNode(ctx, node)
-		}
-		return
-	}
-	s.prefetchChecksums(ctx, node.RelPath, true)
 	var files []*TreeNode
-	collectFiles(node, &files)
+	if node.IsDir {
+		s.prefetchChecksums(ctx, node.RelPath, true)
+		collectFiles(node, &files)
+	} else if node.Compare.Presence == PresenceBoth {
+		files = []*TreeNode{node}
+	}
+
+	total := int64(len(files))
+	var done atomic.Int64
+	update := func() {
+		p := s.Progress()
+		p.Phase = "checksumming..."
+		p.ChecksumFiles = total
+		p.ChecksumDone = done.Load()
+		p.LeftActive = true
+		p.RightActive = true
+		s.setProgress(p)
+	}
+	update()
+
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
 	for _, f := range files {
@@ -380,9 +440,17 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			s.checksumNode(ctx, n)
+			done.Add(1)
+			update()
 		}(f)
 	}
 	wg.Wait()
+
+	p := s.Progress()
+	p.Phase = "done"
+	p.LeftActive = false
+	p.RightActive = false
+	s.setProgress(p)
 }
 
 func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive bool) {

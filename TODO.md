@@ -2,6 +2,7 @@
 
 ## Features
 
+- status in bottom bar
 - add copy progress bar
 - support resume/continue/append and intelligent upload/downloads for rsync
   especially if files are there but different sizes

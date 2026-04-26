@@ -33,6 +33,21 @@ type copyDoneMsg struct{}
 type CopyProgress struct {
 	Total atomic.Int64
 	Done  atomic.Int64
+	Bytes atomic.Int64
+	Start atomic.Int64
+}
+
+type countReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
 }
 
 type pendingCopyInfo struct {
@@ -140,6 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTree()
 		return m, nil
 	case rescanDoneMsg:
+		m.scanning = false
 		m.refreshTree()
 		return m, nil
 	case checksumDoneMsg:
@@ -285,6 +301,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if node != nil {
+			m.scanning = true
 			return m, m.rescanNode(node)
 		}
 		return m, m.startScan()
@@ -715,6 +732,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 
 		progress.Total.Store(int64(len(files)))
 		progress.Done.Store(0)
+		progress.Bytes.Store(0)
+		progress.Start.Store(time.Now().UnixNano())
 
 		for _, f := range files {
 			if ctx.Err() != nil {
@@ -738,7 +757,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				progress.Done.Add(1)
 				continue
 			}
-			_ = dst.CopyFrom(ctx, f.RelPath, reader, srcEntry.Mode)
+			cr := &countReader{r: reader, n: &progress.Bytes}
+			_ = dst.CopyFrom(ctx, f.RelPath, cr, srcEntry.Mode)
 			reader.Close()
 			_ = dst.SetTimes(ctx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 			progress.Done.Add(1)
@@ -944,6 +964,55 @@ func swapTreeData(node *model.TreeNode) {
 	}
 }
 
+func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
+	info := StatusInfo{
+		Errors:       transport.Log.ErrCount(),
+		Retries:      transport.Log.RetryCount(),
+		ChecksumAlgo: m.scanner.ChecksumAlgo(),
+	}
+	switch {
+	case m.copying:
+		info.State = "COPY"
+		info.FilesDone = m.copyProgress.Done.Load()
+		info.FilesTotal = m.copyProgress.Total.Load()
+		info.BytesCopied = m.copyProgress.Bytes.Load()
+		if start := m.copyProgress.Start.Load(); start > 0 {
+			info.Elapsed = time.Since(time.Unix(0, start))
+		}
+	case m.deleting:
+		info.State = "DELETE"
+	case m.checksumming || progress.Phase == "checksumming...":
+		info.State = "CHECKSUM"
+		info.ChecksumDone = progress.ChecksumDone
+		info.ChecksumTotal = progress.ChecksumFiles
+	case m.scanning || progress.Phase == "scanning...":
+		info.State = "DIR SCAN"
+		info.DirsListed = progress.DirsListed
+		info.DirsTotal = progress.DirsTotal
+		info.FilesScanned = progress.TotalFiles
+	default:
+		info.State = "IDLE"
+		if tree := m.scanner.Tree(); tree != nil {
+			info.DirsListed, info.FilesScanned = countTree(tree)
+		}
+	}
+	return info
+}
+
+func countTree(node *model.TreeNode) (dirs, files int64) {
+	for _, c := range node.Children {
+		if c.IsDir {
+			dirs++
+			d, f := countTree(c)
+			dirs += d
+			files += f
+			continue
+		}
+		files++
+	}
+	return
+}
+
 func (m *Model) layoutPanels() {
 	panelWidth := m.width / 2
 	panelHeight := m.height - 2
@@ -964,7 +1033,7 @@ func (m Model) View() string {
 	tree := m.scanner.Tree()
 
 	spinner := ""
-	if (progress.Phase != "" && progress.Phase != "done") || m.deleting || m.copying || m.checksumming {
+	if (progress.Phase != "" && progress.Phase != "done") || m.scanning || m.deleting || m.copying || m.checksumming {
 		spinner = spinnerFrames[m.spinFrame]
 	}
 	operation := ""
@@ -992,7 +1061,7 @@ func (m Model) View() string {
 	leftTopBar := RenderPanelTopBar(stats, true, leftPrefix, m.leftPanel.width)
 	rightTopBar := RenderPanelTopBar(stats, false, rightPrefix, m.rightPanel.width)
 	topBar := leftTopBar + rightTopBar
-	bottomBar := RenderBottomBar(m.width)
+	bottomBar := RenderStatusBar(m.buildStatus(progress), m.width)
 
 	if m.deleting || m.copying || m.checksumming {
 		m.leftPanel.spinner = spinner

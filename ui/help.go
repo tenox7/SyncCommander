@@ -21,8 +21,8 @@ func (d *HelpDialog) IsOpen() bool { return d.visible }
 var helpKeys = []struct{ key, desc string }{
 	{"O", "Open file diff / hex view"},
 	{"R", "Rescan file or directory"},
-	{"C", "Compute checksum (SHA256)"},
-	{"T", "Touch — sync timestamps"},
+	{"C", "Compute checksum (CRC)"},
+	{"T", "Touch — update timestamps"},
 	{"E", "Rename file or directory"},
 	{"D", "Delete file or directory"},
 	{">", "Copy left → right (mirror)"},

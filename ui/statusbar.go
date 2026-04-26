@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -13,6 +14,15 @@ var styleBar = lipgloss.NewStyle().
 	Background(lipgloss.Color("4")).
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
+
+var styleBarErr = lipgloss.NewStyle().
+	Background(lipgloss.Color("4")).
+	Foreground(lipgloss.Color("9")).
+	Bold(true)
+
+var styleBarDim = lipgloss.NewStyle().
+	Background(lipgloss.Color("4")).
+	Foreground(lipgloss.Color("7"))
 
 func progressBar(done, total int64, barWidth int) string {
 	if total <= 0 {
@@ -68,14 +78,85 @@ func formatSizeDelta(d int64) string {
 	return "-" + model.FormatSize(-d)
 }
 
-func RenderBottomBar(width int) string {
-	hint := "O=open E=ren D=del <Lcp >Rcp I=info ~=log B=base U=url =pref ?=help"
-	inner := width - 2 // styleBar has Padding(0,1) on each side
+type StatusInfo struct {
+	State         string
+	DirsListed    int64
+	DirsTotal     int64
+	FilesScanned  int64
+	ChecksumDone  int64
+	ChecksumTotal int64
+	FilesDone     int64
+	FilesTotal    int64
+	BytesCopied   int64
+	Elapsed       time.Duration
+	Errors        int
+	Retries       int
+	ChecksumAlgo  string
+}
+
+func crcLabel(algo string) string {
+	switch algo {
+	case "":
+		return "NO"
+	case "sha1", "sha256":
+		return "SHA"
+	default:
+		return strings.ToUpper(algo)
+	}
+}
+
+func RenderStatusBar(info StatusInfo, width int) string {
+	state := info.State
+	if state == "" {
+		state = "IDLE"
+	}
+	left := state
+	switch info.State {
+	case "DIR SCAN":
+		left = fmt.Sprintf("DIR SCAN: %d/%d dirs, %d files", info.DirsListed, info.DirsTotal, info.FilesScanned)
+	case "CHECKSUM":
+		left = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
+	case "COPY":
+		rate := ""
+		if info.Elapsed > 0 && info.BytesCopied > 0 {
+			mbps := float64(info.BytesCopied) / info.Elapsed.Seconds() / (1 << 20)
+			rate = fmt.Sprintf(" %.1f MB/s", mbps)
+		}
+		left = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
+	case "READ":
+		left = fmt.Sprintf("READ: %s", model.FormatSize(info.BytesCopied))
+	case "DELETE":
+		left = "DELETE"
+	case "IDLE":
+		if info.DirsListed > 0 || info.FilesScanned > 0 {
+			left = fmt.Sprintf("IDLE: %d dirs, %d files", info.DirsListed, info.FilesScanned)
+		}
+	}
+
+	var counters strings.Builder
+	counters.WriteString("  ")
+	counters.WriteString(fmt.Sprintf("CRC:%s", crcLabel(info.ChecksumAlgo)))
+	if info.Errors > 0 {
+		counters.WriteString("  ")
+		counters.WriteString(styleBarErr.Render(fmt.Sprintf("err:%d", info.Errors)))
+	}
+	if info.Retries > 0 {
+		counters.WriteString("  ")
+		counters.WriteString(styleBarErr.Render(fmt.Sprintf("ret:%d", info.Retries)))
+	}
+
+	right := styleBarDim.Render("?=help")
+
+	leftW := lipgloss.Width(left) + lipgloss.Width(counters.String())
+	rightW := lipgloss.Width(right)
+	inner := width - 2
 	if inner < 0 {
 		inner = 0
 	}
-	if runes := []rune(hint); len(runes) > inner {
-		hint = string(runes[:inner])
+	gap := inner - leftW - rightW
+	if gap < 1 {
+		gap = 1
 	}
-	return styleBar.Width(width).Render(hint)
+	content := left + counters.String() + strings.Repeat(" ", gap) + right
+	return styleBar.Width(width).Render(content)
 }
