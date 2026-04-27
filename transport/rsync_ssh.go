@@ -65,6 +65,8 @@ func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
 }
 
 func (b *RsyncSSHBackend) BasePath() string { return b.display }
+
+func (b *RsyncSSHBackend) OwnsCopyProgress() bool { return true }
 func (b *RsyncSSHBackend) Close() error     { return b.client.Close() }
 
 func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -271,9 +273,23 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 		return nil, err
 	}
 
+	counter := progressFromContext(ctx)
+	var stop chan struct{}
+	if counter != nil {
+		size := fileSizeFromContext(ctx)
+		if size <= 0 {
+			size = 1 << 62
+		}
+		stop = make(chan struct{})
+		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size))
+	}
+
 	remotePath := path.Join(b.base, relPath)
 	client, err := rsyncclient.New(nil, rsyncclient.WithStderr(io.Discard))
 	if err != nil {
+		if stop != nil {
+			close(stop)
+		}
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
@@ -283,6 +299,9 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 
 	session, err := b.client.NewSession()
 	if err != nil {
+		if stop != nil {
+			close(stop)
+		}
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
@@ -290,12 +309,18 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
 		session.Close()
+		if stop != nil {
+			close(stop)
+		}
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
 
 	if err := session.Start(serverCmd); err != nil {
 		session.Close()
+		if stop != nil {
+			close(stop)
+		}
 		os.RemoveAll(tmpDir)
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return nil, err
@@ -303,6 +328,9 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 
 	_, err = client.Run(ctx, rw, []string{tmpDir + "/"})
 	session.Close()
+	if stop != nil {
+		close(stop)
+	}
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		Log.Add("rsync+ssh", "ERR", err.Error())
@@ -315,7 +343,11 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
-	return &tempReadCloser{File: f, tmpDir: tmpDir}, nil
+	rc := &tempReadCloser{File: f, tmpDir: tmpDir}
+	if counter != nil {
+		return WrapPreCounted(rc), nil
+	}
+	return rc, nil
 }
 
 func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
@@ -330,7 +362,19 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, src); err != nil {
+
+	counter := progressFromContext(ctx)
+	fileSize := fileSizeFromContext(ctx)
+	var readBudget, pushBudget int64
+	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
+		readBudget = fileSize / 2
+		pushBudget = fileSize - readBudget
+	}
+	var copyDst io.Writer = f
+	if readBudget > 0 {
+		copyDst = &CountingWriter{W: f, Adder: NewCappedAdder(counter, readBudget)}
+	}
+	if _, err := io.Copy(copyDst, src); err != nil {
 		f.Close()
 		return err
 	}
@@ -364,6 +408,9 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 		return err
 	}
 
+	if pushBudget > 0 {
+		rw = &CountingReadWriter{RW: rw, Adder: NewCappedAdder(counter, pushBudget)}
+	}
 	_, err = client.Run(ctx, rw, []string{tmpFile})
 	session.Close()
 	if err != nil {

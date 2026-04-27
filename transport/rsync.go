@@ -73,6 +73,8 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 
 func (b *RsyncBackend) BasePath() string { return b.display }
 
+func (b *RsyncBackend) OwnsCopyProgress() bool { return true }
+
 func (b *RsyncBackend) remoteURL(relPath string) string {
 	p := b.module
 	if b.base != "" {
@@ -330,7 +332,14 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, src); err != nil {
+
+	counter := progressFromContext(ctx)
+	fileSize := fileSizeFromContext(ctx)
+	var copyDst io.Writer = f
+	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
+		copyDst = &CountingWriter{W: f, Adder: NewCappedAdder(counter, fileSize)}
+	}
+	if _, err := io.Copy(copyDst, src); err != nil {
 		f.Close()
 		return err
 	}
@@ -370,6 +379,17 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 		return nil, err
 	}
 
+	counter := progressFromContext(ctx)
+	var stop chan struct{}
+	if counter != nil {
+		size := fileSizeFromContext(ctx)
+		if size <= 0 {
+			size = 1 << 62
+		}
+		stop = make(chan struct{})
+		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size))
+	}
+
 	u := b.remoteURL(relPath)
 	Log.Add("rsync", ">>>", "RECV "+relPath)
 	recvArgs := []string{}
@@ -378,6 +398,9 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 	}
 	recvArgs = append(recvArgs, u, tmpDir+"/")
 	_, err = b.rsyncRun(ctx, recvArgs...)
+	if stop != nil {
+		close(stop)
+	}
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		Log.Add("rsync", "ERR", err.Error())
@@ -390,7 +413,11 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
-	return &tempReadCloser{File: f, tmpDir: tmpDir}, nil
+	rc := &tempReadCloser{File: f, tmpDir: tmpDir}
+	if counter != nil {
+		return WrapPreCounted(rc), nil
+	}
+	return rc, nil
 }
 
 type tempReadCloser struct {

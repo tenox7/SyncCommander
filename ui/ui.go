@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -28,13 +29,18 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 type renameDoneMsg struct{ err error }
 type deleteDoneMsg struct{}
-type copyDoneMsg struct{}
+type copyDoneMsg struct {
+	rescanRoot *model.TreeNode
+}
 
 type CopyProgress struct {
-	Total atomic.Int64
-	Done  atomic.Int64
-	Bytes atomic.Int64
-	Start atomic.Int64
+	Total       atomic.Int64
+	Done        atomic.Int64
+	Bytes       atomic.Int64
+	TotalBytes  atomic.Int64
+	Start       atomic.Int64
+	File        atomic.Value
+	LeftToRight atomic.Bool
 }
 
 type countReader struct {
@@ -175,6 +181,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case copyDoneMsg:
 		m.copying = false
 		m.refreshTree()
+		if msg.rescanRoot != nil {
+			m.scanning = true
+			return m, m.rescanNode(msg.rescanRoot)
+		}
 		return m, nil
 	case diffLoadDoneMsg:
 		if msg.err != nil {
@@ -715,13 +725,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	left := m.left
 	right := m.right
 	scanner := m.scanner
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	checksum := m.cmpOpts.Checksum
 	opts := *m.cmpOpts
 	progress := m.copyProgress
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx := transport.ContextWithProgress(context.Background(), &progress.Bytes)
 
 		var files []*model.TreeNode
 		if node.IsDir {
@@ -730,10 +737,23 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			files = []*model.TreeNode{node}
 		}
 
+		var totalBytes int64
+		for _, f := range files {
+			entry := f.Left
+			if !leftToRight {
+				entry = f.Right
+			}
+			if entry != nil {
+				totalBytes += entry.Size
+			}
+		}
 		progress.Total.Store(int64(len(files)))
+		progress.TotalBytes.Store(totalBytes)
 		progress.Done.Store(0)
 		progress.Bytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
+		progress.LeftToRight.Store(leftToRight)
+		progress.File.Store("")
 
 		for _, f := range files {
 			if ctx.Err() != nil {
@@ -752,18 +772,28 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				progress.Done.Add(1)
 				continue
 			}
-			reader, err := src.Open(ctx, f.RelPath)
+			progress.File.Store(f.RelPath)
+			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
+			reader, err := src.Open(fileCtx, f.RelPath)
 			if err != nil {
 				progress.Done.Add(1)
 				continue
 			}
-			cr := &countReader{r: reader, n: &progress.Bytes}
-			_ = dst.CopyFrom(ctx, f.RelPath, cr, srcEntry.Mode)
+			dstOwnsProgress := false
+			if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
+				dstOwnsProgress = true
+			}
+			var srcReader io.Reader = reader
+			if !transport.IsPreCounted(reader) && !dstOwnsProgress {
+				srcReader = &countReader{r: reader, n: &progress.Bytes}
+			}
+			_ = dst.CopyFrom(fileCtx, f.RelPath, srcReader, srcEntry.Mode)
 			reader.Close()
-			_ = dst.SetTimes(ctx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+			_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 			progress.Done.Add(1)
 		}
 
+		var rescanRoot *model.TreeNode
 		if node.IsDir {
 			if mirror {
 				deletes := model.CollectMirrorDeletes(node, leftToRight)
@@ -781,15 +811,12 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 					}
 				}
 			}
-			scanner.RescanNode(ctx, node, checksum, subSecond, timeGrace)
+			rescanRoot = node
 		} else {
 			parentDir := model.DirOf(node.RelPath)
-			ancestor := scanner.FindNearestDestNode(parentDir, leftToRight)
-			if ancestor != nil {
-				scanner.RescanNode(ctx, ancestor, checksum, subSecond, timeGrace)
-			}
+			rescanRoot = scanner.FindNearestDestNode(parentDir, leftToRight)
 		}
-		return copyDoneMsg{}
+		return copyDoneMsg{rescanRoot: rescanRoot}
 	}
 }
 
@@ -1081,6 +1108,36 @@ func (m Model) View() string {
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, bottomBar)
+
+	if m.copying {
+		popupW := 60
+		if max := m.width - 4; popupW > max {
+			popupW = max
+		}
+		if popupW < 24 {
+			popupW = 24
+		}
+		file, _ := m.copyProgress.File.Load().(string)
+		ltr := m.copyProgress.LeftToRight.Load()
+		done := m.copyProgress.Done.Load()
+		total := m.copyProgress.Total.Load()
+		bytes := m.copyProgress.Bytes.Load()
+		totalBytes := m.copyProgress.TotalBytes.Load()
+		var elapsed time.Duration
+		if start := m.copyProgress.Start.Load(); start > 0 {
+			elapsed = time.Since(time.Unix(0, start))
+		}
+		popup := RenderCopyPopup(file, ltr, done, total, bytes, totalBytes, elapsed, popupW)
+		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
+		py := (m.height - strings.Count(popup, "\n") - 1) / 2
+		if px < 0 {
+			px = 0
+		}
+		if py < 0 {
+			py = 0
+		}
+		screen = overlayString(screen, popup, px, py)
+	}
 
 	if m.diffView.IsOpen() {
 		return m.diffView.View(m.width, m.height)

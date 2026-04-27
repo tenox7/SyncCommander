@@ -6,9 +6,86 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"sc/model"
 )
+
+var styleCopyPopup = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("4")).
+	Background(lipgloss.Color("0")).
+	Foreground(lipgloss.Color("15")).
+	Padding(0, 1)
+
+func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalBytes int64, elapsed time.Duration, width int) string {
+	arrow := ">"
+	if !leftToRight {
+		arrow = "<"
+	}
+	inner := width - 4
+	if inner < 20 {
+		inner = 20
+	}
+	pct := 0
+	if totalBytes > 0 {
+		pct = int(bytes * 100 / totalBytes)
+	}
+	rate := ""
+	if elapsed > 0 && bytes > 0 {
+		mbps := float64(bytes) / elapsed.Seconds() / (1 << 20)
+		rate = fmt.Sprintf("  %.1f MB/s", mbps)
+	}
+	name := file
+	if name == "" {
+		name = "—"
+	}
+	if lipgloss.Width(name) > inner {
+		name = ansi.Truncate(name, inner, "…")
+	}
+	pctStr := fmt.Sprintf(" %3d%%", pct)
+	barWidth := inner - lipgloss.Width(arrow) - lipgloss.Width(pctStr) - 1
+	if barWidth < 5 {
+		barWidth = 5
+	}
+	line1 := fmt.Sprintf("COPY  %d/%d files  %s/%s%s", done, total, model.FormatSize(bytes), model.FormatSize(totalBytes), rate)
+	line2 := name
+	line3 := fmt.Sprintf("%s %s%s", arrow, progressBar(bytes, totalBytes, barWidth), pctStr)
+
+	pad := func(s string) string {
+		w := lipgloss.Width(s)
+		if w >= inner {
+			return s
+		}
+		return s + strings.Repeat(" ", inner-w)
+	}
+	body := pad(line1) + "\n" + pad(line2) + "\n" + pad(line3)
+	return styleCopyPopup.Width(width).Render(body)
+}
+
+func overlayString(base, popup string, x, y int) string {
+	baseLines := strings.Split(base, "\n")
+	popupLines := strings.Split(popup, "\n")
+	for i, pl := range popupLines {
+		row := y + i
+		if row < 0 || row >= len(baseLines) {
+			continue
+		}
+		bl := baseLines[row]
+		baseW := lipgloss.Width(bl)
+		popupW := lipgloss.Width(pl)
+		left := ansi.Cut(bl, 0, x)
+		if lw := lipgloss.Width(left); lw < x {
+			left += strings.Repeat(" ", x-lw)
+		}
+		right := ""
+		if rs := x + popupW; rs < baseW {
+			right = ansi.Cut(bl, rs, baseW)
+		}
+		baseLines[row] = left + pl + right
+	}
+	return strings.Join(baseLines, "\n")
+}
 
 var styleBar = lipgloss.NewStyle().
 	Background(lipgloss.Color("4")).
