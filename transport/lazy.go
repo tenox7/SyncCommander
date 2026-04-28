@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -9,6 +10,10 @@ import (
 
 	"sc/model"
 )
+
+// ErrResumeUnsupported is returned by lazyBackend.AppendFrom/OpenAt when the
+// underlying backend does not implement the corresponding optional interface.
+var ErrResumeUnsupported = errors.New("resume not supported by this backend")
 
 type lazyBackend struct {
 	factory func() (model.Backend, error)
@@ -147,4 +152,52 @@ func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recur
 		return p.PrefetchChecksums(ctx, scope, recursive)
 	}
 	return nil
+}
+
+func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+	b.connect()
+	if b.err != nil {
+		return b.err
+	}
+	r, ok := b.inner.(model.Resumer)
+	if !ok {
+		return ErrResumeUnsupported
+	}
+	return r.AppendFrom(ctx, relPath, src, mode, offset)
+}
+
+func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	b.connect()
+	if b.err != nil {
+		return nil, b.err
+	}
+	o, ok := b.inner.(model.SeekableOpener)
+	if !ok {
+		return nil, ErrResumeUnsupported
+	}
+	return o.OpenAt(ctx, relPath, offset)
+}
+
+func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
+	b.connect()
+	if b.err != nil {
+		return b.err
+	}
+	s, ok := b.inner.(model.LocalSender)
+	if !ok {
+		return ErrResumeUnsupported
+	}
+	return s.SendLocalFile(ctx, srcPath, relPath, mode)
+}
+
+func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
+	b.connect()
+	if b.err != nil {
+		return b.err
+	}
+	r, ok := b.inner.(model.LocalReceiver)
+	if !ok {
+		return ErrResumeUnsupported
+	}
+	return r.RecvToLocalFile(ctx, relPath, dstPath)
 }

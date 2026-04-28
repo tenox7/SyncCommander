@@ -141,6 +141,43 @@ func (b *SCPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, 
 		shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)))
 }
 
+func (b *SCPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+	fullPath := path.Join(b.base, relPath)
+	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
+
+	session, err := b.client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	session.Stdin = src
+	cmd := fmt.Sprintf("truncate -s %d %s && cat >> %s && chmod %04o %s",
+		offset, shellQuote(fullPath),
+		shellQuote(fullPath),
+		mode.Perm(), shellQuote(fullPath))
+	Log.Add("scp", ">>>", cmd)
+	return session.Run(cmd)
+}
+
+func (b *SCPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	session, err := b.client.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	rd, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return nil, err
+	}
+	cmd := fmt.Sprintf("tail -c +%d %s", offset+1, shellQuote(path.Join(b.base, relPath)))
+	Log.Add("scp", ">>>", cmd)
+	if err := session.Start(cmd); err != nil {
+		session.Close()
+		return nil, err
+	}
+	return &sshReadCloser{session: session, Reader: rd}, nil
+}
+
 func (b *SCPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	_, err := b.sshRun(fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),

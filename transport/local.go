@@ -30,6 +30,10 @@ func (b *LocalBackend) BasePath() string {
 	return b.base
 }
 
+func (b *LocalBackend) LocalPath(relPath string) string {
+	return filepath.Join(b.base, relPath)
+}
+
 func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := filepath.Join(b.base, relDir)
 	entries, err := os.ReadDir(dir)
@@ -124,6 +128,35 @@ func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	defer f.Close()
 	_, err = io.Copy(f, src)
 	return err
+}
+
+func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+	path := filepath.Join(b.base, relPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, mode)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	_, err = io.Copy(f, src)
+	return err
+}
+
+func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	f, err := os.Open(filepath.Join(b.base, relPath))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func (b *LocalBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {

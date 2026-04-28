@@ -760,13 +760,13 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				break
 			}
 			var src, dst model.Backend
-			var srcEntry *model.FileEntry
+			var srcEntry, dstEntry *model.FileEntry
 			if leftToRight {
 				src, dst = left, right
-				srcEntry = f.Left
+				srcEntry, dstEntry = f.Left, f.Right
 			} else {
 				src, dst = right, left
-				srcEntry = f.Right
+				srcEntry, dstEntry = f.Right, f.Left
 			}
 			if srcEntry == nil {
 				progress.Done.Add(1)
@@ -774,6 +774,19 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			progress.File.Store(f.RelPath)
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
+
+			if tryDirectTransfer(fileCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes) {
+				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				progress.Done.Add(1)
+				continue
+			}
+
+			if tryResumeCopy(fileCtx, src, dst, f.RelPath, srcEntry, dstEntry, &progress.Bytes) {
+				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				progress.Done.Add(1)
+				continue
+			}
+
 			reader, err := src.Open(fileCtx, f.RelPath)
 			if err != nil {
 				progress.Done.Add(1)
@@ -818,6 +831,105 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		}
 		return copyDoneMsg{rescanRoot: rescanRoot}
 	}
+}
+
+// tryDirectTransfer attempts a path-to-path transfer (e.g. rsync directly
+// between local filesystem and remote rsync daemon) when one side exposes a
+// LocalFS path and the other side supports a direct send/receive. This avoids
+// any intermediate tmp file and lets rsync do its own delta-sync resume
+// against whatever already exists at the destination. Returns true on success.
+func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) bool {
+	// src is local-backed and dst can pull a local file directly.
+	if lp, ok := src.(model.LocalFS); ok {
+		if r, ok2 := dst.(model.LocalSender); ok2 {
+			err := r.SendLocalFile(ctx, lp.LocalPath(relPath), relPath, srcEntry.Mode)
+			if err != nil {
+				return false
+			}
+			counter.Add(srcEntry.Size)
+			return true
+		}
+	}
+	// dst is local-backed and src can push directly to a local path.
+	if lp, ok := dst.(model.LocalFS); ok {
+		if r, ok2 := src.(model.LocalReceiver); ok2 {
+			// RecvToLocalFile uses tailDirSize and credits counter as the
+			// destination grows, so no manual top-up here.
+			err := r.RecvToLocalFile(ctx, relPath, lp.LocalPath(relPath))
+			return err == nil
+		}
+	}
+	return false
+}
+
+// tryResumeCopy attempts to resume an interrupted upload by appending only the
+// missing tail of srcEntry onto an existing partial dst file. Returns true on
+// success; false if resume is not applicable, not supported by either backend,
+// or if any step fails (caller should fall back to a full overwrite copy).
+//
+// On success the global counter ends up offset+(src.Size-offset) higher; on
+// failure any progress credited along the way is rolled back so a fallback
+// CopyFrom can re-credit the full source size without double-counting.
+func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, counter *atomic.Int64) bool {
+	if dstEntry == nil || dstEntry.IsDir {
+		return false
+	}
+	offset := dstEntry.Size
+	if offset <= 0 || offset >= srcEntry.Size {
+		return false
+	}
+	resumer, ok := dst.(model.Resumer)
+	if !ok {
+		return false
+	}
+
+	var reader io.ReadCloser
+	if seeker, ok := src.(model.SeekableOpener); ok {
+		r, err := seeker.OpenAt(ctx, relPath, offset)
+		if err != nil {
+			return false
+		}
+		reader = r
+	} else {
+		r, err := src.Open(ctx, relPath)
+		if err != nil {
+			return false
+		}
+		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
+			r.Close()
+			return false
+		}
+		reader = r
+	}
+	defer reader.Close()
+
+	var srcReader io.Reader = reader
+	var added atomic.Int64
+	if !transport.IsPreCounted(reader) {
+		counter.Add(offset)
+		added.Store(offset)
+		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+	}
+	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
+		counter.Add(-added.Load())
+		return false
+	}
+	return true
+}
+
+type trackedReader struct {
+	r      io.Reader
+	target *atomic.Int64
+	added  *atomic.Int64
+}
+
+func (t *trackedReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		t.target.Add(int64(n))
+		t.added.Add(int64(n))
+	}
+	return n, err
 }
 
 func (m *Model) openRename(node *model.TreeNode) {

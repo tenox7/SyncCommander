@@ -22,6 +22,13 @@ import (
 	"sc/model"
 )
 
+// rsyncTransferFlags are passed to every rsync invocation that moves file
+// data. -t preserves mtime; --inplace writes directly to the destination so
+// resume works at the rsync protocol level; --partial keeps interrupted files
+// for the next run; --no-whole-file forces delta-sync (the default for remote
+// transfers, but explicit for clarity).
+var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "--no-whole-file"}
+
 type RsyncBackend struct {
 	host        string
 	user        string
@@ -320,6 +327,60 @@ func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) 
 	return fmt.Errorf("rsync: set times not supported")
 }
 
+// SendLocalFile sends an existing local file directly to the rsync daemon
+// without writing to a tmp dir first. With rsyncTransferFlags it does delta
+// sync against any partial data already at dst.
+func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
+	dest := b.remoteURL(path.Dir(relPath)) + "/"
+	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath)
+	args := append([]string{}, rsyncTransferFlags...)
+	if b.useChecksum {
+		args = append(args, "-c")
+	}
+	args = append(args, srcPath, dest)
+	_, err := b.rsyncRun(ctx, args...)
+	if err != nil {
+		Log.Add("rsync", "ERR", err.Error())
+	}
+	return err
+}
+
+// RecvToLocalFile downloads a file from the rsync daemon directly to a local
+// path, no tmp dir. With --inplace any existing prefix at dstPath is reused
+// for delta sync (resume).
+func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return err
+	}
+
+	counter := progressFromContext(ctx)
+	var stop chan struct{}
+	if counter != nil {
+		size := fileSizeFromContext(ctx)
+		if size <= 0 {
+			size = 1 << 62
+		}
+		stop = make(chan struct{})
+		go tailDirSize(stop, filepath.Dir(dstPath), filepath.Base(dstPath), NewCappedAdder(counter, size))
+	}
+
+	u := b.remoteURL(relPath)
+	Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath)
+	args := append([]string{}, rsyncTransferFlags...)
+	if b.useChecksum {
+		args = append(args, "-c")
+	}
+	args = append(args, u, dstPath)
+	_, err := b.rsyncRun(ctx, args...)
+	if stop != nil {
+		close(stop)
+	}
+	if err != nil {
+		Log.Add("rsync", "ERR", err.Error())
+	}
+	return err
+}
+
 func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	tmpDir, err := os.MkdirTemp("", "rsync-upload-*")
 	if err != nil {
@@ -347,7 +408,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 
 	dest := b.remoteURL(path.Dir(relPath)) + "/"
 	Log.Add("rsync", ">>>", "SEND "+relPath)
-	sendArgs := []string{"-t"}
+	sendArgs := append([]string{}, rsyncTransferFlags...)
 	if b.useChecksum {
 		sendArgs = append(sendArgs, "-c")
 	}
@@ -392,7 +453,7 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 
 	u := b.remoteURL(relPath)
 	Log.Add("rsync", ">>>", "RECV "+relPath)
-	recvArgs := []string{}
+	recvArgs := append([]string{}, rsyncTransferFlags...)
 	if b.useChecksum {
 		recvArgs = append(recvArgs, "-c")
 	}

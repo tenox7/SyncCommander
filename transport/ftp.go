@@ -267,6 +267,19 @@ func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, 
 	return err
 }
 
+func (b *FTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode, offset int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
+	fullPath := path.Join(b.base, relPath)
+	b.mkdirAllLocked(path.Dir(fullPath))
+	err := b.conn.StorFrom(fullPath, src, uint64(offset))
+	if err != nil {
+		Log.Add("ftp", "ERR", err.Error())
+	}
+	return err
+}
+
 func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -324,6 +337,18 @@ func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, err
 	b.mu.Lock()
 	Log.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
+	if err != nil {
+		b.mu.Unlock()
+		Log.Add("ftp", "ERR", err.Error())
+		return nil, err
+	}
+	return &lockedFTPReader{rc: resp, mu: &b.mu}, nil
+}
+
+func (b *FTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	b.mu.Lock()
+	Log.Add("ftp", ">>>", fmt.Sprintf("RETR %s @%d", relPath, offset))
+	resp, err := b.conn.RetrFrom(path.Join(b.base, relPath), uint64(offset))
 	if err != nil {
 		b.mu.Unlock()
 		Log.Add("ftp", "ERR", err.Error())

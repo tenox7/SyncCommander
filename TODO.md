@@ -2,9 +2,17 @@
 
 ## Features
 
-- support resume/continue/append and intelligent upload/downloads for rsync
-  especially if files are there but different sizes
-  if no file present on one side then always do a full copy
+- intelligent upload/downloads for rsync (use --append-verify or checksum)
+  for the case where files are there but different sizes
+  (basic resume-by-append already wired for local/sftp/scp/ftp/rsync+ssh;
+  rsync daemon uses delta-sync at protocol level via --no-whole-file)
+- gokrazy/rsync parses but does NOT honor --inplace and --partial; it always
+  goes through renameio (shadow file in dst dir + atomic rename). Patching
+  the lib fork to honor --inplace would let resume avoid rewriting the
+  full file on disk during delta-sync.
+- rsync ↔ non-local (sftp/ftp/scp): still uses tmp dir because rsync needs
+  a filesystem path and the non-local side has none. Could be avoided with
+  a FIFO bridge but rsync's renameio doesn't work on FIFOs.
 - support for retry upload on stale/conn drop etc, with retry counter
 - support multiple concurrent remote connections (configurable)
   - use to run cocurrent dir listings in differerent subdirectories

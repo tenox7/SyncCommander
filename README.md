@@ -7,6 +7,7 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Out of band verification and inspection of dir sync tree
 - Troubleshooting, debugging sync issues
 - Manual touch up and maintenance
+- Ad hoc downloads/uploads
 
 ## Supported protocols and checksums
 

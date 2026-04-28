@@ -168,6 +168,48 @@ func (b *SFTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader,
 	return nil
 }
 
+func (b *SFTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+	Log.Add("sftp", ">>>", fmt.Sprintf("APPEND %s @%d", relPath, offset))
+	fullPath := path.Join(b.base, relPath)
+	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	f, err := b.client.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE)
+	if err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	if err := b.client.Chmod(fullPath, mode); err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	return nil
+}
+
+func (b *SFTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	rc, err := b.client.Open(path.Join(b.base, relPath))
+	if err != nil {
+		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
+		return nil, err
+	}
+	if _, err := rc.Seek(offset, io.SeekStart); err != nil {
+		rc.Close()
+		Log.Add("sftp", "ERR", "SEEK "+relPath+": "+err.Error())
+		return nil, err
+	}
+	return rc, nil
+}
+
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	err := b.client.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
 	if err != nil {
