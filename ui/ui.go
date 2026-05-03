@@ -2,8 +2,10 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -774,26 +776,22 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				continue
 			}
 
+			attempt := 0
 			err := transport.Retry(fileCtx, "copy", "copy "+f.RelPath, func() error {
-				reader, err := src.Open(fileCtx, f.RelPath)
-				if err != nil {
-					return err
+				attempt++
+				if attempt > 1 {
+					offset := peekDstSize(fileCtx, dst, f.RelPath)
+					if offset > 0 && offset < srcEntry.Size {
+						err := resumeAttempt(fileCtx, src, dst, f.RelPath, srcEntry, offset, &progress.Bytes)
+						if err == nil {
+							return nil
+						}
+						if !errors.Is(err, transport.ErrResumeUnsupported) {
+							return err
+						}
+					}
 				}
-				defer reader.Close()
-				dstOwnsProgress := false
-				if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
-					dstOwnsProgress = true
-				}
-				var added atomic.Int64
-				var srcReader io.Reader = reader
-				if !transport.IsPreCounted(reader) && !dstOwnsProgress {
-					srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
-				}
-				if err := dst.CopyFrom(fileCtx, f.RelPath, srcReader, srcEntry.Mode); err != nil {
-					progress.Bytes.Add(-added.Load())
-					return err
-				}
-				return nil
+				return fullCopyAttempt(fileCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
 			})
 			if err == nil {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
@@ -910,6 +908,104 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 		return false
 	}
 	return true
+}
+
+// peekDstSize returns the current size of relPath on dst, or 0 if it can't be
+// determined. Used between retry attempts to find how many bytes of a partial
+// upload survived so the next attempt can resume rather than restart.
+func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
+	parent := model.DirOf(relPath)
+	entries, err := dst.List(ctx, parent)
+	if err != nil {
+		return 0
+	}
+	name := path.Base(relPath)
+	for i := range entries {
+		if entries[i].Name == name && !entries[i].IsDir {
+			return entries[i].Size
+		}
+	}
+	return 0
+}
+
+// resumeAttempt resumes a partial upload by appending bytes from offset onward.
+// Returns transport.ErrResumeUnsupported if dst can't append; on any other
+// error any progress credited during the attempt is rolled back.
+func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, counter *atomic.Int64) error {
+	var reader io.ReadCloser
+	if seeker, ok := src.(model.SeekableOpener); ok {
+		r, err := seeker.OpenAt(ctx, relPath, offset)
+		if err != nil {
+			if errors.Is(err, transport.ErrResumeUnsupported) {
+				ro, oerr := src.Open(ctx, relPath)
+				if oerr != nil {
+					return oerr
+				}
+				if _, derr := io.CopyN(io.Discard, ro, offset); derr != nil {
+					ro.Close()
+					return derr
+				}
+				reader = ro
+			} else {
+				return err
+			}
+		} else {
+			reader = r
+		}
+	} else {
+		r, err := src.Open(ctx, relPath)
+		if err != nil {
+			return err
+		}
+		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
+			r.Close()
+			return err
+		}
+		reader = r
+	}
+	defer reader.Close()
+
+	var srcReader io.Reader = reader
+	var added atomic.Int64
+	if !transport.IsPreCounted(reader) {
+		counter.Add(offset)
+		added.Store(offset)
+		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+	}
+	resumer, ok := dst.(model.Resumer)
+	if !ok {
+		counter.Add(-added.Load())
+		return transport.ErrResumeUnsupported
+	}
+	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
+		counter.Add(-added.Load())
+		return err
+	}
+	return nil
+}
+
+// fullCopyAttempt opens src from byte 0 and writes the whole file via CopyFrom.
+// On failure any progress credited during the attempt is rolled back.
+func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) error {
+	reader, err := src.Open(ctx, relPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	dstOwnsProgress := false
+	if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
+		dstOwnsProgress = true
+	}
+	var added atomic.Int64
+	var srcReader io.Reader = reader
+	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
+		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+	}
+	if err := dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode); err != nil {
+		counter.Add(-added.Load())
+		return err
+	}
+	return nil
 }
 
 type trackedReader struct {
