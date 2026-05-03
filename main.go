@@ -23,6 +23,7 @@ func main() {
 	subsec := flag.Bool("subsec", false, "sub-second time precision")
 	grace := flag.Bool("grace", true, "allow ±1s time grace")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
+	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh}://[user[:pass]@]host/path\n")
@@ -30,6 +31,8 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	transport.SetMaxRetries(*maxRetries)
 
 	var leftPath, rightPath string
 	switch flag.NArg() {

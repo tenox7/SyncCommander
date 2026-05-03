@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,148 +19,185 @@ var ErrResumeUnsupported = errors.New("resume not supported by this backend")
 type lazyBackend struct {
 	factory func() (model.Backend, error)
 	inner   model.Backend
-	once    sync.Once
-	err     error
+	mu      sync.Mutex
 	display string
+	proto   string
 }
 
-// NewLazyBackend returns a Backend that defers connection until first use.
 func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
-	return &lazyBackend{factory: factory, display: display}
+	proto := "remote"
+	if idx := strings.Index(display, "://"); idx > 0 {
+		proto = display[:idx]
+	}
+	return &lazyBackend{factory: factory, display: display, proto: proto}
 }
 
-func (b *lazyBackend) connect() {
-	b.once.Do(func() {
-		Log.Add("conn", ">>>", "connecting to "+b.display)
-		inner, err := b.factory()
-		if err != nil {
-			b.err = err
-			Log.Add("conn", "ERR", b.display+": "+err.Error())
-			return
-		}
-		b.inner = inner
-		Log.Add("conn", "<<<", "connected to "+b.display)
+func (b *lazyBackend) ensureConnected() (model.Backend, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inner != nil {
+		return b.inner, nil
+	}
+	Log.Add(b.proto, ">>>", "connecting to "+b.display)
+	var inner model.Backend
+	err := Retry(context.Background(), b.proto, "connect "+b.display, func() error {
+		var ferr error
+		inner, ferr = b.factory()
+		return ferr
 	})
+	if err != nil {
+		Log.Add(b.proto, "ERR", b.display+": "+err.Error())
+		return nil, err
+	}
+	b.inner = inner
+	Log.Add(b.proto, "<<<", "connected to "+b.display)
+	return inner, nil
 }
 
 func (b *lazyBackend) BasePath() string {
-	if b.inner != nil {
-		return b.inner.BasePath()
+	b.mu.Lock()
+	inner := b.inner
+	b.mu.Unlock()
+	if inner != nil {
+		return inner.BasePath()
 	}
 	return b.display
 }
 
 func (b *lazyBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	b.connect()
-	if b.err != nil {
-		return nil, b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return nil, err
 	}
-	return b.inner.List(ctx, relDir)
+	return RetryVal(ctx, b.proto, "list "+relDir, func() ([]model.FileEntry, error) {
+		return inner.List(ctx, relDir)
+	})
 }
 
 func (b *lazyBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	b.connect()
-	if b.err != nil {
-		return "", b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return "", err
 	}
-	return b.inner.Checksum(ctx, relPath)
+	return RetryVal(ctx, b.proto, "checksum "+relPath, func() (string, error) {
+		return inner.Checksum(ctx, relPath)
+	})
 }
 
 func (b *lazyBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	return b.inner.SetTimes(ctx, relPath, mtime, atime, btime)
+	return Retry(ctx, b.proto, "settimes "+relPath, func() error {
+		return inner.SetTimes(ctx, relPath, mtime, atime, btime)
+	})
 }
 
 func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	return b.inner.CopyFrom(ctx, relPath, src, mode)
+	return inner.CopyFrom(ctx, relPath, src, mode)
 }
 
 func (b *lazyBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	return b.inner.Rename(ctx, oldRelPath, newRelPath)
+	return Retry(ctx, b.proto, "rename "+oldRelPath, func() error {
+		return inner.Rename(ctx, oldRelPath, newRelPath)
+	})
 }
 
 func (b *lazyBackend) Remove(ctx context.Context, relPath string) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	return b.inner.Remove(ctx, relPath)
+	return Retry(ctx, b.proto, "remove "+relPath, func() error {
+		return inner.Remove(ctx, relPath)
+	})
 }
 
 func (b *lazyBackend) RemoveAll(ctx context.Context, relPath string) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	return b.inner.RemoveAll(ctx, relPath)
+	return Retry(ctx, b.proto, "removeall "+relPath, func() error {
+		return inner.RemoveAll(ctx, relPath)
+	})
 }
 
 func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	b.connect()
-	if b.err != nil {
-		return nil, b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return nil, err
 	}
-	return b.inner.Open(ctx, relPath)
+	return RetryVal(ctx, b.proto, "open "+relPath, func() (io.ReadCloser, error) {
+		return inner.Open(ctx, relPath)
+	})
 }
 
 func (b *lazyBackend) Close() error {
-	if b.inner == nil {
+	b.mu.Lock()
+	inner := b.inner
+	b.mu.Unlock()
+	if inner == nil {
 		return nil
 	}
-	if c, ok := b.inner.(interface{ Close() error }); ok {
+	if c, ok := inner.(interface{ Close() error }); ok {
 		return c.Close()
 	}
 	return nil
 }
 
 func (b *lazyBackend) ProbeChecksums() []string {
-	b.connect()
-	if b.err != nil {
+	inner, err := b.ensureConnected()
+	if err != nil {
 		return nil
 	}
-	if p, ok := b.inner.(model.ChecksumProber); ok {
+	if p, ok := inner.(model.ChecksumProber); ok {
 		return p.ProbeChecksums()
 	}
 	return nil
 }
 
 func (b *lazyBackend) SetChecksumAlgo(algo string) {
-	if b.inner == nil {
+	b.mu.Lock()
+	inner := b.inner
+	b.mu.Unlock()
+	if inner == nil {
 		return
 	}
-	if p, ok := b.inner.(model.ChecksumProber); ok {
+	if p, ok := inner.(model.ChecksumProber); ok {
 		p.SetChecksumAlgo(algo)
 	}
 }
 
 func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	if p, ok := b.inner.(model.ChecksumPrefetcher); ok {
+	p, ok := inner.(model.ChecksumPrefetcher)
+	if !ok {
+		return nil
+	}
+	return Retry(ctx, b.proto, "prefetch "+scope, func() error {
 		return p.PrefetchChecksums(ctx, scope, recursive)
-	}
-	return nil
+	})
 }
 
 func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	r, ok := b.inner.(model.Resumer)
+	r, ok := inner.(model.Resumer)
 	if !ok {
 		return ErrResumeUnsupported
 	}
@@ -167,37 +205,43 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Rea
 }
 
 func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	b.connect()
-	if b.err != nil {
-		return nil, b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return nil, err
 	}
-	o, ok := b.inner.(model.SeekableOpener)
+	o, ok := inner.(model.SeekableOpener)
 	if !ok {
 		return nil, ErrResumeUnsupported
 	}
-	return o.OpenAt(ctx, relPath, offset)
+	return RetryVal(ctx, b.proto, "openat "+relPath, func() (io.ReadCloser, error) {
+		return o.OpenAt(ctx, relPath, offset)
+	})
 }
 
 func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	s, ok := b.inner.(model.LocalSender)
+	s, ok := inner.(model.LocalSender)
 	if !ok {
 		return ErrResumeUnsupported
 	}
-	return s.SendLocalFile(ctx, srcPath, relPath, mode)
+	return Retry(ctx, b.proto, "send "+relPath, func() error {
+		return s.SendLocalFile(ctx, srcPath, relPath, mode)
+	})
 }
 
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	b.connect()
-	if b.err != nil {
-		return b.err
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
 	}
-	r, ok := b.inner.(model.LocalReceiver)
+	r, ok := inner.(model.LocalReceiver)
 	if !ok {
 		return ErrResumeUnsupported
 	}
-	return r.RecvToLocalFile(ctx, relPath, dstPath)
+	return Retry(ctx, b.proto, "recv "+relPath, func() error {
+		return r.RecvToLocalFile(ctx, relPath, dstPath)
+	})
 }

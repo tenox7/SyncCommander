@@ -43,19 +43,6 @@ type CopyProgress struct {
 	LeftToRight atomic.Bool
 }
 
-type countReader struct {
-	r io.Reader
-	n *atomic.Int64
-}
-
-func (c *countReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	if n > 0 {
-		c.n.Add(int64(n))
-	}
-	return n, err
-}
-
 type pendingCopyInfo struct {
 	node        *model.TreeNode
 	leftToRight bool
@@ -787,22 +774,30 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				continue
 			}
 
-			reader, err := src.Open(fileCtx, f.RelPath)
-			if err != nil {
-				progress.Done.Add(1)
-				continue
+			err := transport.Retry(fileCtx, "copy", "copy "+f.RelPath, func() error {
+				reader, err := src.Open(fileCtx, f.RelPath)
+				if err != nil {
+					return err
+				}
+				defer reader.Close()
+				dstOwnsProgress := false
+				if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
+					dstOwnsProgress = true
+				}
+				var added atomic.Int64
+				var srcReader io.Reader = reader
+				if !transport.IsPreCounted(reader) && !dstOwnsProgress {
+					srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
+				}
+				if err := dst.CopyFrom(fileCtx, f.RelPath, srcReader, srcEntry.Mode); err != nil {
+					progress.Bytes.Add(-added.Load())
+					return err
+				}
+				return nil
+			})
+			if err == nil {
+				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 			}
-			dstOwnsProgress := false
-			if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
-				dstOwnsProgress = true
-			}
-			var srcReader io.Reader = reader
-			if !transport.IsPreCounted(reader) && !dstOwnsProgress {
-				srcReader = &countReader{r: reader, n: &progress.Bytes}
-			}
-			_ = dst.CopyFrom(fileCtx, f.RelPath, srcReader, srcEntry.Mode)
-			reader.Close()
-			_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 			progress.Done.Add(1)
 		}
 
