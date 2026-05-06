@@ -1198,6 +1198,8 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 	info := StatusInfo{
 		Errors:       transport.Log.ErrCount(),
 		Retries:      transport.Log.RetryCount(),
+		Recovered:    transport.Log.RecoveredCount(),
+		Failed:       transport.Log.FailedCount(),
 		ChecksumAlgo: m.scanner.ChecksumAlgo(),
 	}
 	switch {
@@ -1291,7 +1293,9 @@ func (m Model) View() string {
 	leftTopBar := RenderPanelTopBar(stats, true, leftPrefix, m.leftPanel.width)
 	rightTopBar := RenderPanelTopBar(stats, false, rightPrefix, m.rightPanel.width)
 	topBar := leftTopBar + rightTopBar
-	bottomBar := RenderStatusBar(m.buildStatus(progress), m.width)
+	statusInfo := m.buildStatus(progress)
+	statusInfo.Spinner = spinner
+	bottomBar := RenderStatusBar(statusInfo, m.width)
 
 	if m.deleting || m.copying || m.checksumming {
 		m.leftPanel.spinner = spinner

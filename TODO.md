@@ -2,6 +2,11 @@
 
 ## Features
 
+- non recursive file listing with --top-level-only
+- remote log stop scrolling if not on top
+- sort files in folders and folders!
+- search with /
+
 - intelligent upload/downloads for rsync (use --append-verify or checksum)
   for the case where files are there but different sizes
   (basic resume-by-append already wired for local/sftp/scp/ftp/rsync+ssh;

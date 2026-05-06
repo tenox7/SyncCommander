@@ -159,7 +159,10 @@ type StatusInfo struct {
 	Elapsed       time.Duration
 	Errors        int
 	Retries       int
+	Recovered     int
+	Failed        int
 	ChecksumAlgo  string
+	Spinner       string
 }
 
 func crcLabel(algo string) string {
@@ -178,42 +181,41 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	if state == "" {
 		state = "IDLE"
 	}
-	left := state
+	details := state
 	switch info.State {
 	case "DIR SCAN":
-		left = fmt.Sprintf("DIR SCAN: %d/%d dirs, %d files", info.DirsListed, info.DirsTotal, info.FilesScanned)
+		details = fmt.Sprintf("DIR SCAN: %d/%d dirs, %d files", info.DirsListed, info.DirsTotal, info.FilesScanned)
 	case "CHECKSUM":
-		left = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
+		details = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
 	case "COPY":
 		rate := ""
 		if info.Elapsed > 0 && info.BytesCopied > 0 {
 			mbps := float64(info.BytesCopied) / info.Elapsed.Seconds() / (1 << 20)
 			rate = fmt.Sprintf(" %.1f MB/s", mbps)
 		}
-		left = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
+		details = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
 	case "READ":
-		left = fmt.Sprintf("READ: %s", model.FormatSize(info.BytesCopied))
+		details = fmt.Sprintf("READ: %s", model.FormatSize(info.BytesCopied))
 	case "DELETE":
-		left = "DELETE"
+		details = "DELETE"
 	case "IDLE":
 		if info.DirsListed > 0 || info.FilesScanned > 0 {
-			left = fmt.Sprintf("IDLE: %d dirs, %d files", info.DirsListed, info.FilesScanned)
+			details = fmt.Sprintf("IDLE: %d dirs, %d files", info.DirsListed, info.FilesScanned)
 		}
 	}
 
-	var counters strings.Builder
-	counters.WriteString("  ")
-	counters.WriteString(fmt.Sprintf("CRC:%s", crcLabel(info.ChecksumAlgo)))
-	if info.Errors > 0 {
-		counters.WriteString(fmt.Sprintf("  err:%d", info.Errors))
+	spin := info.Spinner
+	if spin == "" {
+		spin = "⠴"
 	}
-	if info.Retries > 0 {
-		counters.WriteString(fmt.Sprintf("  ret:%d", info.Retries))
-	}
+	left := spin + " STATUS: " + details
+
+	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d",
+		crcLabel(info.ChecksumAlgo), info.Errors, info.Retries, info.Recovered, info.Failed)
 
 	right := "?=help"
 
-	leftW := lipgloss.Width(left) + lipgloss.Width(counters.String())
+	leftW := lipgloss.Width(left) + lipgloss.Width(counters)
 	rightW := lipgloss.Width(right)
 	inner := width - 2
 	if inner < 0 {
@@ -223,6 +225,6 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	if gap < 1 {
 		gap = 1
 	}
-	content := left + counters.String() + strings.Repeat(" ", gap) + right
+	content := left + counters + strings.Repeat(" ", gap) + right
 	return styleBar.Width(width).Render(content)
 }

@@ -20,6 +20,13 @@ func MaxRetries() int {
 	return int(atomic.LoadInt32(&maxRetries))
 }
 
+func pluralRetries(n int) string {
+	if n == 1 {
+		return "retry"
+	}
+	return "retries"
+}
+
 func backoffDelay(attempt int) time.Duration {
 	d := time.Duration(500<<attempt) * time.Millisecond
 	if d > 10*time.Second {
@@ -61,6 +68,9 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		}
 		err = op()
 		if err == nil {
+			if attempt > 0 {
+				Log.Add(proto, "REC", fmt.Sprintf("%s: recovered after %d %s", what, attempt, pluralRetries(attempt)))
+			}
 			return nil
 		}
 		if ctxDone(ctx) {
@@ -74,6 +84,9 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		if serr := sleepCtx(ctx, d); serr != nil {
 			return serr
 		}
+	}
+	if err != nil {
+		Log.Add(proto, "FAIL", fmt.Sprintf("%s: gave up after %d attempts: %v", what, max+1, err))
 	}
 	return err
 }
