@@ -29,6 +29,7 @@ type Scanner struct {
 	right        Backend
 	concurrency  int
 	stallTimeout time.Duration
+	maxDepth     int
 	progress     atomic.Value
 	tree         *TreeNode
 	mu           sync.Mutex
@@ -41,17 +42,24 @@ type Scanner struct {
 	cksumRight   []string
 }
 
-func NewScanner(left, right Backend, concurrency int) *Scanner {
+func NewScanner(left, right Backend, concurrency int, deepScan bool) *Scanner {
 	if concurrency < 1 {
 		concurrency = 4
+	}
+	maxDepth := 0
+	if !deepScan {
+		maxDepth = 1
 	}
 	return &Scanner{
 		left:         left,
 		right:        right,
 		concurrency:  concurrency,
 		stallTimeout: 120 * time.Second,
+		maxDepth:     maxDepth,
 	}
 }
+
+func (s *Scanner) MaxDepth() int { return s.maxDepth }
 
 func (s *Scanner) Progress() ScanProgress {
 	v := s.progress.Load()
@@ -80,6 +88,8 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	s.mu.Lock()
 	s.tree = root
 	s.mu.Unlock()
+
+	preloadFired := false
 
 	var stats struct {
 		totalFiles, totalDirs                          atomic.Int64
@@ -137,17 +147,18 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		s.mu.Unlock()
 
 		stats.dirsListed.Add(1)
+		descend := s.maxDepth == 0 || job.depth+1 <= s.maxDepth
 		for _, child := range children {
 			if child.IsDir {
 				stats.totalDirs.Add(1)
 				stats.dirsTotal.Add(1)
-				ll := child.Compare.Presence != PresenceRightOnly
-				lr := child.Compare.Presence != PresenceLeftOnly
-				if ll {
-					leftPending++
-				}
-				if lr {
-					rightPending++
+				if descend {
+					if child.Compare.Presence != PresenceRightOnly {
+						leftPending++
+					}
+					if child.Compare.Presence != PresenceLeftOnly {
+						rightPending++
+					}
 				}
 				continue
 			}
@@ -166,18 +177,28 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 			}
 		}
 
-		for i := len(children) - 1; i >= 0; i-- {
-			child := children[i]
-			if !child.IsDir {
-				continue
+		if descend {
+			for i := len(children) - 1; i >= 0; i-- {
+				child := children[i]
+				if !child.IsDir {
+					continue
+				}
+				queue = append(queue, dirJob{
+					relDir:    child.RelPath,
+					parent:    child,
+					depth:     job.depth + 1,
+					listLeft:  child.Compare.Presence != PresenceRightOnly,
+					listRight: child.Compare.Presence != PresenceLeftOnly,
+				})
 			}
-			queue = append(queue, dirJob{
-				relDir:    child.RelPath,
-				parent:    child,
-				depth:     job.depth + 1,
-				listLeft:  child.Compare.Presence != PresenceRightOnly,
-				listRight: child.Compare.Presence != PresenceLeftOnly,
-			})
+		}
+
+		// After listing the root, kick off the recursive preload in the
+		// background so the user sees the top-level entries first while
+		// the deep listing fills the cache for subsequent dirs.
+		if !preloadFired && s.maxDepth == 0 {
+			s.preloadRecursive(ctx, "")
+			preloadFired = true
 		}
 
 		s.setProgress(progress("scanning..."))
@@ -234,10 +255,56 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 
 func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, s.maxDepth)
 		return
 	}
 	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace)
+}
+
+// DeepRescanNode rescans a node recursively regardless of the scanner's
+// maxDepth setting. Used by the explicit "deep scan" key.
+func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+	if node.IsDir {
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, 0)
+		return
+	}
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace)
+}
+
+// ListNode lists a single directory's immediate children without descending.
+// Used by the lazy-expand-on-Enter UI path when a dir was left unlisted by an
+// initial shallow scan.
+func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeGrace bool) {
+	if !node.IsDir {
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	setp := func(phase string) {
+		s.setProgress(ScanProgress{
+			Phase:       phase,
+			LeftActive:  phase != "done",
+			RightActive: phase != "done",
+		})
+	}
+	setp("scanning...")
+
+	listLeft := node.Compare.Presence != PresenceRightOnly
+	listRight := node.Compare.Presence != PresenceLeftOnly
+	leftEntries, rightEntries := s.listDir(ctx, node.RelPath, listLeft, listRight)
+
+	oldExpanded := make(map[string]bool)
+	for _, child := range node.Children {
+		collectExpanded(child, oldExpanded)
+	}
+	children := MergeChildren(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace)
+	restoreExpanded(children, oldExpanded)
+
+	s.mu.Lock()
+	node.Children = children
+	node.Listed = true
+	s.mu.Unlock()
+	setp("done")
 }
 
 func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
@@ -288,7 +355,8 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	setp("done")
 }
 
-func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool, depthLimit int) {
+	preloadFired := false
 	var dirsListed, totalFiles, ckTotal int64
 	var ckDone atomic.Int64
 	setp := func(phase string) {
@@ -359,18 +427,29 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		}
 		setp("scanning...")
 
-		for i := len(children) - 1; i >= 0; i-- {
-			child := children[i]
-			if !child.IsDir {
-				continue
+		descend := depthLimit == 0 || job.depth+1 <= depthLimit
+		if descend {
+			for i := len(children) - 1; i >= 0; i-- {
+				child := children[i]
+				if !child.IsDir {
+					continue
+				}
+				queue = append(queue, dirJob{
+					relDir:    child.RelPath,
+					parent:    child,
+					depth:     job.depth + 1,
+					listLeft:  child.Compare.Presence != PresenceRightOnly,
+					listRight: child.Compare.Presence != PresenceLeftOnly,
+				})
 			}
-			queue = append(queue, dirJob{
-				relDir:    child.RelPath,
-				parent:    child,
-				depth:     job.depth + 1,
-				listLeft:  child.Compare.Presence != PresenceRightOnly,
-				listRight: child.Compare.Presence != PresenceLeftOnly,
-			})
+		}
+
+		// After listing the rescan root, kick off the recursive preload in
+		// the background so the user sees this dir's entries first while
+		// the deep listing fills the cache for the rest of the subtree.
+		if !preloadFired && depthLimit == 0 {
+			s.preloadRecursive(ctx, node.RelPath)
+			preloadFired = true
 		}
 	}
 
@@ -459,6 +538,15 @@ func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive
 	}
 	if p, ok := s.right.(ChecksumPrefetcher); ok {
 		p.PrefetchChecksums(ctx, scope, recursive)
+	}
+}
+
+func (s *Scanner) preloadRecursive(ctx context.Context, scope string) {
+	if p, ok := s.left.(RecursivePreloader); ok {
+		p.PreloadRecursive(ctx, scope)
+	}
+	if p, ok := s.right.(RecursivePreloader); ok {
+		p.PreloadRecursive(ctx, scope)
 	}
 }
 

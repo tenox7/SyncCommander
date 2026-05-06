@@ -80,3 +80,14 @@ type LocalSender interface {
 type LocalReceiver interface {
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
 }
+
+// RecursivePreloader is implemented by backends where one recursive listing
+// call is dramatically cheaper than per-directory List calls (e.g. rsync over
+// the network). When triggered, the backend kicks off a single recursive list
+// in the background and progressively populates an internal cache. Subsequent
+// List calls for any directory under scope are served from the cache as the
+// stream arrives. scope is a relPath under the backend's base; "" means whole
+// base. Returns immediately; the preload runs asynchronously.
+type RecursivePreloader interface {
+	PreloadRecursive(ctx context.Context, scope string) error
+}

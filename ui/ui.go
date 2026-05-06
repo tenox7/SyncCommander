@@ -77,9 +77,10 @@ type Model struct {
 	pendingCopy   *pendingCopyInfo
 	openDlg       *OpenDialog
 	insecure      bool
+	deepScan      bool
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure bool) Model {
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool) Model {
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
@@ -88,9 +89,10 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure bo
 		rightPanel:   rp,
 		left:         left,
 		right:        right,
-		scanner:      model.NewScanner(left, right, 4),
+		scanner:      model.NewScanner(left, right, 4, deepScan),
 		activeLeft:   true,
 		cmpOpts:      cmpOpts,
+		deepScan:     deepScan,
 		settings:     NewSettingsDialog(),
 		input:        NewInputDialog(),
 		confirm:      NewConfirmDialog(),
@@ -256,6 +258,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.activePanel().PageDown()
 		m.syncPanels()
 	case "enter", "right", "l":
+		node := m.activePanel().CursorNode()
+		if node != nil && node.IsDir && !node.Listed && !m.scanning {
+			m.scanning = true
+			node.Expanded = true
+			return m, m.listNode(node)
+		}
 		m.activePanel().Toggle()
 		m.refreshTree()
 	case "left", "h":
@@ -304,6 +312,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.rescanNode(node)
 		}
 		return m, m.startScan()
+	case "R":
+		node := m.activePanel().CursorNode()
+		if node != nil && node.IsAttr {
+			break
+		}
+		if node == nil {
+			break
+		}
+		m.scanning = true
+		return m, m.deepRescanNode(node)
 	case "c":
 		if m.checksumming {
 			break
@@ -556,7 +574,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 		m.right = newRight
 	}
 
-	m.scanner = model.NewScanner(m.left, m.right, 4)
+	m.scanner = model.NewScanner(m.left, m.right, 4, m.deepScan)
 	m.leftPanel.title = m.left.BasePath()
 	m.rightPanel.title = m.right.BasePath()
 	m.leftPanel.SetNodes(nil)
@@ -1114,7 +1132,9 @@ func (m *Model) startScan() tea.Cmd {
 	timeGrace := m.cmpOpts.TimeGrace
 	scanner := m.scanner
 	return func() tea.Msg {
-		scanner.Scan(context.Background(), checksum, subSecond, timeGrace)
+		timeScan("dir scan", "/", func() {
+			scanner.Scan(context.Background(), checksum, subSecond, timeGrace)
+		})
 		return scanDoneMsg{}
 	}
 }
@@ -1132,10 +1152,54 @@ func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
 	scanner := m.scanner
+	target := scanTargetLabel(node)
 	return func() tea.Msg {
-		scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace)
+		timeScan("rescan", target, func() {
+			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace)
+		})
 		return rescanDoneMsg{}
 	}
+}
+
+func (m *Model) deepRescanNode(node *model.TreeNode) tea.Cmd {
+	checksum := m.cmpOpts.Checksum
+	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
+	scanner := m.scanner
+	target := scanTargetLabel(node)
+	return func() tea.Msg {
+		timeScan("deep scan", target, func() {
+			scanner.DeepRescanNode(context.Background(), node, checksum, subSecond, timeGrace)
+		})
+		return rescanDoneMsg{}
+	}
+}
+
+func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
+	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
+	scanner := m.scanner
+	target := scanTargetLabel(node)
+	return func() tea.Msg {
+		timeScan("list", target, func() {
+			scanner.ListNode(context.Background(), node, subSecond, timeGrace)
+		})
+		return rescanDoneMsg{}
+	}
+}
+
+func scanTargetLabel(node *model.TreeNode) string {
+	if node == nil || node.RelPath == "" {
+		return "/"
+	}
+	return node.RelPath
+}
+
+func timeScan(op, target string, fn func()) {
+	transport.Log.Add("scan", ">>>", fmt.Sprintf("%s start: %s", op, target))
+	t0 := time.Now()
+	fn()
+	transport.Log.Add("scan", "<<<", fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
 }
 
 func (m *Model) refreshTree() {

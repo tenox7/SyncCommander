@@ -40,6 +40,99 @@ type RsyncBackend struct {
 	cksumAlgo   string
 	md4mu       sync.Mutex
 	md4cache    map[string]string
+	listCache   *rsyncListCache
+}
+
+// rsyncListCache stores per-directory entries populated by an in-flight
+// recursive listing call. List() consults this cache and waits for the dir
+// to land before falling back to a live per-dir listing. preloadCtx is the
+// outer scan context used by await, so per-call stall timeouts on List()
+// don't prematurely abandon the cache when the remote is slow.
+type rsyncListCache struct {
+	mu         sync.Mutex
+	cond       *sync.Cond
+	entries    map[string][]model.FileEntry
+	scope      string
+	active     bool
+	done       bool
+	preloadCtx context.Context
+}
+
+func newRsyncListCache() *rsyncListCache {
+	c := &rsyncListCache{entries: make(map[string][]model.FileEntry)}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
+
+func (c *rsyncListCache) reset(ctx context.Context, scope string) {
+	c.mu.Lock()
+	c.entries = make(map[string][]model.FileEntry)
+	c.scope = scope
+	c.active = true
+	c.done = false
+	c.preloadCtx = ctx
+	c.mu.Unlock()
+}
+
+// emit appends entries for parent. We deliberately do NOT broadcast here:
+// rsync's recursive output revisits the same parent multiple times (e.g.
+// after descending into bin/, it returns to the top level for contrib/),
+// so any single emit can be a partial view. Only finish() broadcasts; List
+// awaiters block until the full listing is in.
+func (c *rsyncListCache) emit(parent string, entries []model.FileEntry) {
+	c.mu.Lock()
+	c.entries[parent] = append(c.entries[parent], entries...)
+	c.mu.Unlock()
+}
+
+func (c *rsyncListCache) finish() {
+	c.mu.Lock()
+	c.done = true
+	c.cond.Broadcast()
+	c.mu.Unlock()
+}
+
+func (c *rsyncListCache) lookup(relDir string) (entries []model.FileEntry, hit, active, done bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entries, hit = c.entries[relDir]
+	active = c.active
+	done = c.done
+	return
+}
+
+// await blocks until the preload finishes (or the preload context is
+// canceled), then returns whatever is in the cache for relDir. We do NOT
+// return on first cache hit because rsync's recursive output interleaves
+// entries from different parents — a partial cache view is unsafe to act
+// on. Intentionally ignores the caller's per-call ctx: that ctx typically
+// carries a per-list stall timeout (~120s) which is unsuited to a slow
+// remote where one recursive listing legitimately takes minutes.
+func (c *rsyncListCache) await(relDir string) ([]model.FileEntry, bool) {
+	c.mu.Lock()
+	pctx := c.preloadCtx
+	c.mu.Unlock()
+
+	notify := make(chan struct{})
+	if pctx != nil {
+		go func() {
+			select {
+			case <-pctx.Done():
+				c.mu.Lock()
+				c.cond.Broadcast()
+				c.mu.Unlock()
+			case <-notify:
+			}
+		}()
+	}
+	c.mu.Lock()
+	for !c.done && (pctx == nil || pctx.Err() == nil) {
+		c.cond.Wait()
+	}
+	entries, ok := c.entries[relDir]
+	c.mu.Unlock()
+	close(notify)
+	return entries, ok
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -56,7 +149,7 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 	}
 	base := ""
 	if len(parts) > 1 {
-		base = parts[1]
+		base = strings.Trim(parts[1], "/")
 	}
 
 	displayHost := host
@@ -118,6 +211,21 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 }
 
 func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	if b.listCache != nil {
+		entries, hit, active, done := b.listCache.lookup(relDir)
+		if hit {
+			return entries, nil
+		}
+		if active && !done {
+			if e, ok := b.listCache.await(relDir); ok {
+				return e, nil
+			}
+		}
+	}
+	return b.liveList(ctx, relDir)
+}
+
+func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	u := b.remoteURL(relDir) + "/"
 	Log.Add("rsync", ">>>", "LIST "+u)
 	args := []string{}
@@ -145,6 +253,176 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 	}
 	Log.Add("rsync", "<<<", fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
+}
+
+// PreloadRecursive fires a single rsync -r listing in the background,
+// streaming entries into the cache. Returns immediately. Subsequent List
+// calls under scope hit or wait on the cache. A second preload while one is
+// in flight is a no-op.
+func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	if b.listCache == nil {
+		b.listCache = newRsyncListCache()
+	}
+	c := b.listCache
+	c.mu.Lock()
+	if c.active && !c.done {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	c.reset(ctx, scope)
+
+	go func() {
+		_ = b.runRecursiveList(ctx, scope, c.emit)
+		c.finish()
+	}()
+	return nil
+}
+
+func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+	u := b.remoteURL(scope) + "/"
+	Log.Add("rsync", ">>>", "RLIST "+u)
+
+	var current string
+	var haveCurrent bool
+	var batch []model.FileEntry
+	var seenDirs []string
+	flush := func() {
+		if !haveCurrent {
+			return
+		}
+		emit(current, batch)
+		batch = nil
+		haveCurrent = false
+	}
+
+	lw := newLineWriter(func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return
+		}
+		parent, entry, ok := parseRsyncRecursiveLine(line, scope)
+		if !ok {
+			return
+		}
+		if !haveCurrent || parent != current {
+			flush()
+			current = parent
+			haveCurrent = true
+		}
+		batch = append(batch, entry)
+		if entry.IsDir {
+			seenDirs = append(seenDirs, entry.RelPath)
+		}
+	})
+
+	args := []string{"-r"}
+	if b.useChecksum {
+		args = append(args, "-c")
+	}
+	args = append(args, u)
+	cmd := rsynccmd.Command("rsync", args...)
+	var stderr bytes.Buffer
+	cmd.Stdout = lw
+	cmd.Stderr = &stderr
+	_, err := cmd.Run(ctx)
+	lw.flush()
+	flush()
+	// Touch every dir we saw so the cache reports a hit (with no children)
+	// instead of falling through to a per-dir live LIST. Without this,
+	// every empty leaf dir costs a fresh TCP+handshake round trip.
+	for _, d := range seenDirs {
+		emit(d, nil)
+	}
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			err = fmt.Errorf("%v: %s", err, msg)
+		}
+		Log.Add("rsync", "ERR", "RLIST: "+err.Error())
+		return err
+	}
+	Log.Add("rsync", "<<<", "RLIST done")
+	return nil
+}
+
+// lineWriter buffers stdout bytes and invokes cb for each complete '\n'-
+// terminated line. Used to stream-parse rsync recursive listings as they
+// arrive instead of buffering the full output.
+type lineWriter struct {
+	buf []byte
+	cb  func(string)
+}
+
+func newLineWriter(cb func(string)) *lineWriter {
+	return &lineWriter{cb: cb}
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.cb(string(w.buf[:i]))
+		w.buf = w.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+func (w *lineWriter) flush() {
+	if len(w.buf) > 0 {
+		w.cb(string(w.buf))
+		w.buf = nil
+	}
+}
+
+// parseRsyncRecursiveLine parses one line of `rsync -r URL/scope/` output.
+// Each entry's path is relative to scope; we return the parent dir relative
+// to the backend's base (i.e. path.Join(scope, path.Dir(name))).
+func parseRsyncRecursiveLine(line, scope string) (parentRel string, entry model.FileEntry, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 5 {
+		return "", model.FileEntry{}, false
+	}
+	modeStr := fields[0]
+	if len(modeStr) > 0 && modeStr[0] == 'l' {
+		return "", model.FileEntry{}, false
+	}
+	size, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return "", model.FileEntry{}, false
+	}
+	modTime, err := time.ParseInLocation("2006/01/02 15:04:05", fields[2]+" "+fields[3], time.Local)
+	if err != nil {
+		return "", model.FileEntry{}, false
+	}
+	nameIdx := strings.Index(line, fields[3]) + len(fields[3])
+	if nameIdx >= len(line) {
+		return "", model.FileEntry{}, false
+	}
+	full := strings.TrimLeft(line[nameIdx:], " ")
+	if full == "." || full == ".." {
+		return "", model.FileEntry{}, false
+	}
+	parent := path.Dir(full)
+	if parent == "." {
+		parent = ""
+	}
+	base := path.Base(full)
+	isDir := len(modeStr) > 0 && modeStr[0] == 'd'
+
+	parentRel = path.Join(scope, parent)
+
+	return parentRel, model.FileEntry{
+		RelPath: path.Join(scope, full),
+		Name:    base,
+		Size:    size,
+		ModTime: modTime,
+		IsDir:   isDir,
+		Mode:    parseRsyncMode(modeStr),
+	}, true
 }
 
 func parseRsyncListLine(line, relDir string) (model.FileEntry, bool) {

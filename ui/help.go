@@ -20,7 +20,8 @@ func (d *HelpDialog) IsOpen() bool { return d.visible }
 
 var helpKeys = []struct{ key, desc string }{
 	{"O", "Open file diff / hex view"},
-	{"R", "Rescan file or directory"},
+	{"r", "Rescan (respects --deep-scan)"},
+	{"R", "Deep scan recursively (override)"},
 	{"C", "Compute checksum (CRC)"},
 	{"T", "Touch — update timestamps"},
 	{"E", "Rename file or directory"},

@@ -203,6 +203,9 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		if node.Expanded {
 			arrow = "▼"
 		}
+		if node.IsDir && !node.Listed {
+			arrow = "▶…"
+		}
 		left = chrome + styleChrome.Render(arrow) + " " + name
 	}
 

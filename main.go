@@ -24,6 +24,7 @@ func main() {
 	grace := flag.Bool("grace", true, "allow ±1s time grace")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
+	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh}://[user[:pass]@]host/path\n")
@@ -68,7 +69,7 @@ func main() {
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
 
-	mdl := ui.NewModel(left, right, opts, *insecure)
+	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan)
 	p := tea.NewProgram(mdl, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

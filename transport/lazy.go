@@ -232,6 +232,18 @@ func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string
 	})
 }
 
+func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
+	}
+	p, ok := inner.(model.RecursivePreloader)
+	if !ok {
+		return nil
+	}
+	return p.PreloadRecursive(ctx, scope)
+}
+
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
 	inner, err := b.ensureConnected()
 	if err != nil {
