@@ -35,6 +35,8 @@ type copyDoneMsg struct {
 	rescanRoot *model.TreeNode
 }
 
+type cancelFn struct{ f context.CancelFunc }
+
 type CopyProgress struct {
 	Total       atomic.Int64
 	Done        atomic.Int64
@@ -43,6 +45,7 @@ type CopyProgress struct {
 	Start       atomic.Int64
 	File        atomic.Value
 	LeftToRight atomic.Bool
+	Cancel      atomic.Pointer[cancelFn]
 }
 
 type pendingCopyInfo struct {
@@ -171,6 +174,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case copyDoneMsg:
 		m.copying = false
+		if c := m.copyProgress.Cancel.Swap(nil); c != nil {
+			c.f()
+		}
 		m.refreshTree()
 		if msg.rescanRoot != nil {
 			m.scanning = true
@@ -237,8 +243,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.settings.IsOpen() {
 		return m.handleSettingsKey(msg)
 	}
+	if m.copying {
+		switch msg.String() {
+		case "x", "X", "ctrl+c":
+			if c := m.copyProgress.Cancel.Load(); c != nil {
+				c.f()
+			}
+		}
+		return m, nil
+	}
 	switch msg.String() {
-	case "q", "esc", "ctrl+c":
+	case "q", "ctrl+c":
 		m.scanner.Cancel()
 		return m, tea.Quit
 	case "tab":
@@ -734,8 +749,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	scanner := m.scanner
 	opts := *m.cmpOpts
 	progress := m.copyProgress
+	baseCtx, cancel := context.WithCancel(context.Background())
+	progress.Cancel.Store(&cancelFn{f: cancel})
 	return func() tea.Msg {
-		ctx := transport.ContextWithProgress(context.Background(), &progress.Bytes)
+		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
 
 		var files []*model.TreeNode
 		if node.IsDir {

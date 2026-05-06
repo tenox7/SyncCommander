@@ -628,3 +628,16 @@ func FormatSize(b int64) string {
 		return fmt.Sprintf("%dB", b)
 	}
 }
+
+func FormatRate(bytesPerSec float64) string {
+	switch {
+	case bytesPerSec >= 1<<30:
+		return fmt.Sprintf("%.1f GB/s", bytesPerSec/float64(1<<30))
+	case bytesPerSec >= 1<<20:
+		return fmt.Sprintf("%.1f MB/s", bytesPerSec/float64(1<<20))
+	case bytesPerSec >= 1<<10:
+		return fmt.Sprintf("%.1f KB/s", bytesPerSec/float64(1<<10))
+	default:
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+}

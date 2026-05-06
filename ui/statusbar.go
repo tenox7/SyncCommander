@@ -33,8 +33,7 @@ func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalByt
 	}
 	rate := ""
 	if elapsed > 0 && bytes > 0 {
-		mbps := float64(bytes) / elapsed.Seconds() / (1 << 20)
-		rate = fmt.Sprintf("  %.1f MB/s", mbps)
+		rate = "  " + model.FormatRate(float64(bytes)/elapsed.Seconds())
 	}
 	name := file
 	if name == "" {
@@ -51,6 +50,7 @@ func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalByt
 	line1 := fmt.Sprintf("COPY  %d/%d files  %s/%s%s", done, total, model.FormatSize(bytes), model.FormatSize(totalBytes), rate)
 	line2 := name
 	line3 := fmt.Sprintf("%s %s%s", arrow, progressBar(bytes, totalBytes, barWidth), pctStr)
+	line4 := "X=cancel"
 
 	pad := func(s string) string {
 		w := lipgloss.Width(s)
@@ -59,7 +59,7 @@ func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalByt
 		}
 		return s + strings.Repeat(" ", inner-w)
 	}
-	body := pad(line1) + "\n" + pad(line2) + "\n" + pad(line3)
+	body := pad(line1) + "\n" + pad(line2) + "\n" + pad(line3) + "\n" + pad(line4)
 	return styleCopyPopup.Width(width).Render(body)
 }
 
@@ -190,8 +190,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	case "COPY":
 		rate := ""
 		if info.Elapsed > 0 && info.BytesCopied > 0 {
-			mbps := float64(info.BytesCopied) / info.Elapsed.Seconds() / (1 << 20)
-			rate = fmt.Sprintf(" %.1f MB/s", mbps)
+			rate = " " + model.FormatRate(float64(info.BytesCopied)/info.Elapsed.Seconds())
 		}
 		details = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
 	case "READ":

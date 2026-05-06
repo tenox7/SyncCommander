@@ -41,7 +41,8 @@ var helpKeys = []struct{ key, desc string }{
 	{"=", "Settings"},
 	{"W", "Toggle line wrap"},
 	{"Ctrl+L", "Redraw screen"},
-	{"Q / Esc", "Quit"},
+	{"Q", "Quit"},
+	{"X", "Cancel in-progress copy"},
 }
 
 func (d *HelpDialog) View(width, height int) string {
