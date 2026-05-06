@@ -25,9 +25,10 @@ import (
 // rsyncTransferFlags are passed to every rsync invocation that moves file
 // data. -t preserves mtime; --inplace writes directly to the destination so
 // resume works at the rsync protocol level; --partial keeps interrupted files
-// for the next run; --no-whole-file forces delta-sync (the default for remote
-// transfers, but explicit for clarity).
-var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "--no-whole-file"}
+// for the next run. Delta-sync is the default for remote transfers; we don't
+// pass --no-whole-file because the gokrazy fork's client option table has it
+// disabled.
+var rsyncTransferFlags = []string{"-t", "--inplace", "--partial"}
 
 type RsyncBackend struct {
 	host        string
