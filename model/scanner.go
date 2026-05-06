@@ -183,12 +183,19 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 				if !child.IsDir {
 					continue
 				}
+				leftIsDir := child.Left != nil && child.Left.IsDir
+				rightIsDir := child.Right != nil && child.Right.IsDir
+				listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
+				listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
+				if !listLeft && !listRight {
+					continue
+				}
 				queue = append(queue, dirJob{
 					relDir:    child.RelPath,
 					parent:    child,
 					depth:     job.depth + 1,
-					listLeft:  child.Compare.Presence != PresenceRightOnly,
-					listRight: child.Compare.Presence != PresenceLeftOnly,
+					listLeft:  listLeft,
+					listRight: listRight,
 				})
 			}
 		}
@@ -289,8 +296,10 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	}
 	setp("scanning...")
 
-	listLeft := node.Compare.Presence != PresenceRightOnly
-	listRight := node.Compare.Presence != PresenceLeftOnly
+	leftIsDir := node.Left != nil && node.Left.IsDir
+	rightIsDir := node.Right != nil && node.Right.IsDir
+	listLeft := leftIsDir && node.Compare.Presence != PresenceRightOnly
+	listRight := rightIsDir && node.Compare.Presence != PresenceLeftOnly
 	leftEntries, rightEntries := s.listDir(ctx, node.RelPath, listLeft, listRight)
 
 	oldExpanded := make(map[string]bool)
@@ -401,7 +410,13 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		collectExpanded(child, oldExpanded)
 	}
 
-	queue := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: true, listRight: true}}
+	rootListLeft := true
+	rootListRight := true
+	if node.RelPath != "" {
+		rootListLeft = node.Left != nil && node.Left.IsDir
+		rootListRight = node.Right != nil && node.Right.IsDir
+	}
+	queue := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: rootListLeft, listRight: rootListRight}}
 
 	for len(queue) > 0 {
 		if ctx.Err() != nil {
@@ -434,12 +449,19 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 				if !child.IsDir {
 					continue
 				}
+				leftIsDir := child.Left != nil && child.Left.IsDir
+				rightIsDir := child.Right != nil && child.Right.IsDir
+				listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
+				listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
+				if !listLeft && !listRight {
+					continue
+				}
 				queue = append(queue, dirJob{
 					relDir:    child.RelPath,
 					parent:    child,
 					depth:     job.depth + 1,
-					listLeft:  child.Compare.Presence != PresenceRightOnly,
-					listRight: child.Compare.Presence != PresenceLeftOnly,
+					listLeft:  listLeft,
+					listRight: listRight,
 				})
 			}
 		}
@@ -796,6 +818,9 @@ type dirJob struct {
 }
 
 func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRight bool) ([]FileEntry, []FileEntry) {
+	if !listLeft && !listRight {
+		return nil, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, s.stallTimeout)
 	defer cancel()
 	if !listLeft {

@@ -249,6 +249,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if c := m.copyProgress.Cancel.Load(); c != nil {
 				c.f()
 			}
+		case "~", "`":
+			m.logView.Open()
 		}
 		return m, nil
 	}
@@ -753,6 +755,27 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	progress.Cancel.Store(&cancelFn{f: cancel})
 	return func() tea.Msg {
 		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
+
+		var dstBackend model.Backend
+		if leftToRight {
+			dstBackend = right
+		} else {
+			dstBackend = left
+		}
+		for _, c := range model.CollectTypeCollisions(node, leftToRight) {
+			dstEntry := c.Right
+			if !leftToRight {
+				dstEntry = c.Left
+			}
+			if dstEntry == nil {
+				continue
+			}
+			if dstEntry.IsDir {
+				_ = dstBackend.RemoveAll(ctx, c.RelPath)
+			} else {
+				_ = dstBackend.Remove(ctx, c.RelPath)
+			}
+		}
 
 		var files []*model.TreeNode
 		if node.IsDir {

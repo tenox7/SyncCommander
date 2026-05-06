@@ -203,11 +203,10 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		}
 	}
 
-	spin := info.Spinner
-	if spin == "" {
-		spin = "⠴"
+	left := "STATUS: " + details
+	if info.Spinner != "" {
+		left = info.Spinner + " " + left
 	}
-	left := spin + " STATUS: " + details
 
 	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d",
 		crcLabel(info.ChecksumAlgo), info.Errors, info.Retries, info.Recovered, info.Failed)

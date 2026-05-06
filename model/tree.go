@@ -491,10 +491,16 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 	if node.IsAttr {
 		return
 	}
-	if !node.IsDir {
+	src, dst := node.Left, node.Right
+	if !leftToRight {
+		src, dst = node.Right, node.Left
+	}
+	srcIsDir := src != nil && src.IsDir
+	if !srcIsDir {
 		switch node.Compare.Presence {
 		case PresenceBoth:
-			if nodeStatus(node, opts) != AttrEqual {
+			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
+			if collision || nodeStatus(node, opts) != AttrEqual {
 				*result = append(*result, node)
 			}
 		case PresenceLeftOnly:
@@ -510,6 +516,30 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 	}
 	for _, child := range node.Children {
 		collectCopyFilesRec(child, opts, leftToRight, result)
+	}
+}
+
+// CollectTypeCollisions returns nodes where both sides have an entry by the
+// same name but disagree on type (one is a directory, the other is a file).
+// The destination side must be removed before a copy can succeed.
+func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
+	var result []*TreeNode
+	collectTypeCollisionsRec(node, leftToRight, &result)
+	return result
+}
+
+func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, result *[]*TreeNode) {
+	if node.IsAttr {
+		return
+	}
+	if node.Left != nil && node.Right != nil && node.Left.IsDir != node.Right.IsDir {
+		*result = append(*result, node)
+		return
+	}
+	if node.IsDir {
+		for _, child := range node.Children {
+			collectTypeCollisionsRec(child, leftToRight, result)
+		}
 	}
 }
 
