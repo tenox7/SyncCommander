@@ -11,6 +11,7 @@ import (
 
 type progressKey struct{}
 type fileSizeKey struct{}
+type wholeFileKey struct{}
 
 func ContextWithProgress(ctx context.Context, counter *atomic.Int64) context.Context {
 	if counter == nil {
@@ -33,6 +34,18 @@ func ContextWithFileSize(ctx context.Context, size int64) context.Context {
 func fileSizeFromContext(ctx context.Context) int64 {
 	s, _ := ctx.Value(fileSizeKey{}).(int64)
 	return s
+}
+
+// ContextWithWholeFile signals that the destination has no existing file to
+// delta against, so rsync should send the whole file (-W) and skip the
+// receiver-side checksum scan.
+func ContextWithWholeFile(ctx context.Context) context.Context {
+	return context.WithValue(ctx, wholeFileKey{}, true)
+}
+
+func wholeFileFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(wholeFileKey{}).(bool)
+	return v
 }
 
 type PreCounted interface {

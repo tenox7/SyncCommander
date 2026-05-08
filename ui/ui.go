@@ -821,6 +821,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			progress.File.Store(f.RelPath)
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
+			if dstEntry == nil {
+				fileCtx = transport.ContextWithWholeFile(fileCtx)
+			}
 
 			if tryDirectTransfer(fileCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes) {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)

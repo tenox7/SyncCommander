@@ -10,7 +10,7 @@
 - intelligent upload/downloads for rsync (use --append-verify or checksum)
   for the case where files are there but different sizes
   (basic resume-by-append already wired for local/sftp/scp/ftp/rsync+ssh;
-  rsync daemon uses delta-sync at protocol level via --no-whole-file)
+  rsync daemon uses delta-sync when both sides have the file, -W when dst absent)
 - gokrazy/rsync parses but does NOT honor --inplace and --partial; it always
   goes through renameio (shadow file in dst dir + atomic rename). Patching
   the lib fork to honor --inplace would let resume avoid rewriting the

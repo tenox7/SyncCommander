@@ -25,10 +25,20 @@ import (
 // rsyncTransferFlags are passed to every rsync invocation that moves file
 // data. -t preserves mtime; --inplace writes directly to the destination so
 // resume works at the rsync protocol level; --partial keeps interrupted files
-// for the next run. Delta-sync is the default for remote transfers; we don't
-// pass --no-whole-file because the gokrazy fork's client option table has it
-// disabled.
+// for the next run. Delta-sync is the default for remote transfers. Callers
+// that know the destination has no file to delta against can attach
+// ContextWithWholeFile to the ctx, which adds -W per call.
 var rsyncTransferFlags = []string{"-t", "--inplace", "--partial"}
+
+// rsyncFlagsForCtx returns rsyncTransferFlags plus -W if the ctx carries the
+// whole-file hint. Returns a fresh slice; safe to append to.
+func rsyncFlagsForCtx(ctx context.Context) []string {
+	args := append([]string{}, rsyncTransferFlags...)
+	if wholeFileFromContext(ctx) {
+		args = append(args, "-W")
+	}
+	return args
+}
 
 type RsyncBackend struct {
 	host        string
@@ -611,12 +621,12 @@ func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) 
 // sync against any partial data already at dst.
 func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
 	dest := b.remoteURL(path.Dir(relPath)) + "/"
-	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath)
-	args := append([]string{}, rsyncTransferFlags...)
+	args := rsyncFlagsForCtx(ctx)
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
 	args = append(args, srcPath, dest)
+	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err := b.rsyncRun(ctx, args...)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
@@ -644,12 +654,12 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 	}
 
 	u := b.remoteURL(relPath)
-	Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath)
-	args := append([]string{}, rsyncTransferFlags...)
+	args := rsyncFlagsForCtx(ctx)
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
 	args = append(args, u, dstPath)
+	Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err := b.rsyncRun(ctx, args...)
 	if stop != nil {
 		close(stop)
@@ -686,12 +696,12 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	f.Close()
 
 	dest := b.remoteURL(path.Dir(relPath)) + "/"
-	Log.Add("rsync", ">>>", "SEND "+relPath)
-	sendArgs := append([]string{}, rsyncTransferFlags...)
+	sendArgs := rsyncFlagsForCtx(ctx)
 	if b.useChecksum {
 		sendArgs = append(sendArgs, "-c")
 	}
 	sendArgs = append(sendArgs, tmpFile, dest)
+	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, sendArgs...)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
@@ -731,12 +741,12 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 	}
 
 	u := b.remoteURL(relPath)
-	Log.Add("rsync", ">>>", "RECV "+relPath)
-	recvArgs := append([]string{}, rsyncTransferFlags...)
+	recvArgs := rsyncFlagsForCtx(ctx)
 	if b.useChecksum {
 		recvArgs = append(recvArgs, "-c")
 	}
 	recvArgs = append(recvArgs, u, tmpDir+"/")
+	Log.Add("rsync", ">>>", "RECV "+relPath+" ["+strings.Join(recvArgs[:len(recvArgs)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, recvArgs...)
 	if stop != nil {
 		close(stop)

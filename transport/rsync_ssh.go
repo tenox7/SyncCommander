@@ -285,7 +285,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	}
 
 	remotePath := path.Join(b.base, relPath)
-	client, err := rsyncclient.New(rsyncTransferFlags, rsyncclient.WithStderr(io.Discard))
+	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
 		if stop != nil {
 			close(stop)
@@ -356,7 +356,7 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 	remoteDest := path.Join(b.base, path.Dir(relPath))
 	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
 
-	client, err := rsyncclient.New(rsyncTransferFlags, rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
+	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
 		return err
 	}
@@ -408,7 +408,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	}
 
 	remotePath := path.Join(b.base, relPath)
-	client, err := rsyncclient.New(rsyncTransferFlags, rsyncclient.WithStderr(io.Discard))
+	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
 		if stop != nil {
 			close(stop)
@@ -526,7 +526,7 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	remoteDest := path.Join(b.base, path.Dir(relPath))
 	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
 
-	client, err := rsyncclient.New(rsyncTransferFlags, rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
+	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
 		return err
 	}
