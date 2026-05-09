@@ -522,6 +522,19 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 		}
 		return
 	}
+	if node.Listed && len(node.Children) == 0 {
+		switch node.Compare.Presence {
+		case PresenceLeftOnly:
+			if leftToRight {
+				*result = append(*result, node)
+			}
+		case PresenceRightOnly:
+			if !leftToRight {
+				*result = append(*result, node)
+			}
+		}
+		return
+	}
 	for _, child := range node.Children {
 		collectCopyFilesRec(child, opts, leftToRight, result)
 	}

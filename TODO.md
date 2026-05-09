@@ -2,7 +2,7 @@
 
 ## Features
 
-- non recursive file listing with --top-level-only
+- detect renames via CRC on and rename files (no rsync)
 - remote log stop scrolling if not on top
 - sort files in folders and folders!
 - search with /

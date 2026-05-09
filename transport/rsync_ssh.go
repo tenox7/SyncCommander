@@ -250,6 +250,17 @@ func (b *RsyncSSHBackend) SetTimes(_ context.Context, relPath string, mtime, ati
 	return err
 }
 
+func (b *RsyncSSHBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+	fullPath := path.Join(b.base, relPath)
+	cmd := fmt.Sprintf("mkdir -p %s", shellQuote(fullPath))
+	if mode != 0 {
+		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
+	}
+	Log.Add("rsync-ssh", ">>>", cmd)
+	_, err := b.sshRun(cmd)
+	return err
+}
+
 func (b *RsyncSSHBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	_, err := b.sshRun(fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),

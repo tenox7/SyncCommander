@@ -25,6 +25,7 @@ type Backend interface {
 	Checksum(ctx context.Context, relPath string) (string, error)
 	SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error
 	CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error
+	Mkdir(ctx context.Context, relPath string, mode os.FileMode) error
 	Rename(ctx context.Context, oldRelPath, newRelPath string) error
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error

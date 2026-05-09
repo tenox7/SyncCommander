@@ -166,6 +166,13 @@ func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64)
 	return f, nil
 }
 
+func (b *LocalBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
+	if mode == 0 {
+		mode = 0755
+	}
+	return os.MkdirAll(filepath.Join(b.base, relPath), mode.Perm())
+}
+
 func (b *LocalBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
 	return os.Rename(filepath.Join(b.base, oldRelPath), filepath.Join(b.base, newRelPath))
 }

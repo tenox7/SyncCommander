@@ -210,6 +210,19 @@ func (b *SFTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (i
 	return rc, nil
 }
 
+func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+	fullPath := path.Join(b.base, relPath)
+	Log.Add("sftp", ">>>", "MKDIR "+relPath)
+	if err := b.client.MkdirAll(fullPath); err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	if mode != 0 {
+		_ = b.client.Chmod(fullPath, mode.Perm())
+	}
+	return nil
+}
+
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	err := b.client.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
 	if err != nil {

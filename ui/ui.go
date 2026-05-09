@@ -841,6 +841,16 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				progress.Done.Add(1)
 				continue
 			}
+			if srcEntry.IsDir {
+				progress.File.Store(f.RelPath)
+				if err := dst.Mkdir(ctx, f.RelPath, srcEntry.Mode); err != nil {
+					transport.Log.Add("copy", "ERR", "mkdir "+f.RelPath+": "+err.Error())
+				} else {
+					transport.Log.Add("copy", "<<<", "mkdir "+f.RelPath)
+				}
+				progress.Done.Add(1)
+				continue
+			}
 			if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
 				var clearErr error
 				if dstEntry.IsDir {

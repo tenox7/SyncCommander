@@ -614,12 +614,29 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecon
 	if parent == nil {
 		return
 	}
-	oldExpanded := make(map[string]bool)
+	nodeKey := func(name string, isDir bool) string {
+		if isDir {
+			return name + "/"
+		}
+		return name
+	}
+	oldByKey := make(map[string]*TreeNode)
 	for _, child := range parent.Children {
-		collectExpanded(child, oldExpanded)
+		oldByKey[nodeKey(child.Name, child.IsDir)] = child
 	}
 	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond, timeGrace)
-	restoreExpanded(children, oldExpanded)
+	for _, c := range children {
+		old, ok := oldByKey[nodeKey(c.Name, c.IsDir)]
+		if !ok {
+			continue
+		}
+		c.Listed = old.Listed
+		c.Expanded = old.Expanded
+		c.Children = old.Children
+		for _, gc := range old.Children {
+			gc.Parent = c
+		}
+	}
 	s.mu.Lock()
 	parent.Children = children
 	parent.Listed = true

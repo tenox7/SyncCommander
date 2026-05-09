@@ -725,6 +725,40 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	return nil
 }
 
+func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
+	clean := strings.Trim(path.Clean(relPath), "/")
+	if clean == "" || clean == "." {
+		return nil
+	}
+	tmpDir, err := os.MkdirTemp("", "rsync-mkdir-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dirMode := mode.Perm()
+	if dirMode == 0 {
+		dirMode = 0755
+	}
+	stageLeaf := filepath.Join(tmpDir, filepath.FromSlash(clean))
+	if err := os.MkdirAll(stageLeaf, dirMode); err != nil {
+		return err
+	}
+
+	topLeaf := strings.SplitN(clean, "/", 2)[0]
+	stageTop := filepath.Join(tmpDir, topLeaf)
+	dest := b.remoteURL("") + "/"
+	args := []string{"-r", "-t", stageTop, dest}
+	Log.Add("rsync", ">>>", "MKDIR "+clean+" ["+strings.Join(args[:len(args)-2], " ")+"]")
+	_, err = b.rsyncRun(ctx, args...)
+	if err != nil {
+		Log.Add("rsync", "ERR", err.Error())
+	} else {
+		Log.Add("rsync", "<<<", "MKDIR "+clean+" OK")
+	}
+	return err
+}
+
 func (b *RsyncBackend) Rename(_ context.Context, _, _ string) error {
 	return fmt.Errorf("rsync: rename not supported")
 }

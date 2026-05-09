@@ -280,6 +280,15 @@ func (b *FTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader
 	return err
 }
 
+func (b *FTPBackend) Mkdir(_ context.Context, relPath string, _ os.FileMode) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	fullPath := path.Join(b.base, relPath)
+	Log.Add("ftp", ">>>", "MKDIR "+fullPath)
+	b.mkdirAllLocked(fullPath)
+	return nil
+}
+
 func (b *FTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

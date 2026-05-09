@@ -178,6 +178,17 @@ func (b *SCPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io
 	return &sshReadCloser{session: session, Reader: rd}, nil
 }
 
+func (b *SCPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+	fullPath := path.Join(b.base, relPath)
+	cmd := fmt.Sprintf("mkdir -p %s", shellQuote(fullPath))
+	if mode != 0 {
+		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
+	}
+	Log.Add("scp", ">>>", cmd)
+	_, err := b.sshRun(cmd)
+	return err
+}
+
 func (b *SCPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	_, err := b.sshRun(fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),

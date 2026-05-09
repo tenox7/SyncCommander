@@ -102,6 +102,16 @@ func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	return inner.CopyFrom(ctx, relPath, src, mode)
 }
 
+func (b *lazyBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
+	}
+	return Retry(ctx, b.proto, "mkdir "+relPath, func() error {
+		return inner.Mkdir(ctx, relPath, mode)
+	})
+}
+
 func (b *lazyBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
 	inner, err := b.ensureConnected()
 	if err != nil {
