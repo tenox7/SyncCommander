@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"hash"
 	"io"
 	"os"
@@ -121,6 +122,9 @@ func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return fmt.Errorf("local: refuse to overwrite existing directory %s", path)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
@@ -134,6 +138,9 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src io.Re
 	path := filepath.Join(b.base, relPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
+	}
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return fmt.Errorf("local: refuse to append into existing directory %s", path)
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, mode)
 	if err != nil {
@@ -168,7 +175,14 @@ func (b *LocalBackend) Remove(ctx context.Context, relPath string) error {
 }
 
 func (b *LocalBackend) RemoveAll(ctx context.Context, relPath string) error {
-	return os.RemoveAll(filepath.Join(b.base, relPath))
+	full := filepath.Join(b.base, relPath)
+	if err := os.RemoveAll(full); err != nil {
+		return err
+	}
+	if fi, err := os.Stat(full); err == nil {
+		return fmt.Errorf("local: RemoveAll lied — path still exists after removal (%s, isDir=%v)", full, fi.IsDir())
+	}
+	return nil
 }
 
 func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {

@@ -377,17 +377,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceRightOnly {
 			break
 		}
+		collisions := len(model.CollectTypeCollisions(node, true))
+		var delFiles, delDirs int
 		if node.IsDir {
-			delFiles, delDirs := model.CountMirrorDeletes(node, true)
-			if delFiles > 0 || delDirs > 0 {
-				m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: true}
-				m.confirm.Open(
-					"\u26a0 COPY LEFT \u2192 RIGHT",
-					[]string{"", node.Name + "/", fmt.Sprintf("Will also delete %d files, %d folders", delFiles, delDirs), "that only exist on right"},
-					true,
-				)
-				break
+			delFiles, delDirs = model.CountMirrorDeletes(node, true)
+		}
+		if collisions > 0 || delFiles > 0 || delDirs > 0 {
+			lines := []string{"", node.Name}
+			if node.IsDir {
+				lines[1] += "/"
 			}
+			if collisions > 0 {
+				lines = append(lines, fmt.Sprintf("Will replace %d type conflicts (file\u2194dir) on right", collisions))
+			}
+			if delFiles > 0 || delDirs > 0 {
+				lines = append(lines, fmt.Sprintf("Will also delete %d files, %d folders", delFiles, delDirs), "that only exist on right")
+			}
+			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: true}
+			m.confirm.Open("\u26a0 COPY LEFT \u2192 RIGHT", lines, true)
+			break
 		}
 		m.copying = true
 		return m, m.copyNode(node, true, false)
@@ -399,17 +407,25 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceLeftOnly {
 			break
 		}
+		collisions := len(model.CollectTypeCollisions(node, false))
+		var delFiles, delDirs int
 		if node.IsDir {
-			delFiles, delDirs := model.CountMirrorDeletes(node, false)
-			if delFiles > 0 || delDirs > 0 {
-				m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: false}
-				m.confirm.Open(
-					"\u26a0 COPY RIGHT \u2192 LEFT",
-					[]string{"", node.Name + "/", fmt.Sprintf("Will also delete %d files, %d folders", delFiles, delDirs), "that only exist on left"},
-					true,
-				)
-				break
+			delFiles, delDirs = model.CountMirrorDeletes(node, false)
+		}
+		if collisions > 0 || delFiles > 0 || delDirs > 0 {
+			lines := []string{"", node.Name}
+			if node.IsDir {
+				lines[1] += "/"
 			}
+			if collisions > 0 {
+				lines = append(lines, fmt.Sprintf("Will replace %d type conflicts (file\u2194dir) on left", collisions))
+			}
+			if delFiles > 0 || delDirs > 0 {
+				lines = append(lines, fmt.Sprintf("Will also delete %d files, %d folders", delFiles, delDirs), "that only exist on left")
+			}
+			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: false}
+			m.confirm.Open("\u26a0 COPY RIGHT \u2192 LEFT", lines, true)
+			break
 		}
 		m.copying = true
 		return m, m.copyNode(node, false, false)
@@ -770,10 +786,16 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			if dstEntry == nil {
 				continue
 			}
+			var err error
 			if dstEntry.IsDir {
-				_ = dstBackend.RemoveAll(ctx, c.RelPath)
+				err = dstBackend.RemoveAll(ctx, c.RelPath)
 			} else {
-				_ = dstBackend.Remove(ctx, c.RelPath)
+				err = dstBackend.Remove(ctx, c.RelPath)
+			}
+			if err != nil {
+				transport.Log.Add("copy", "ERR", "type-collision cleanup "+c.RelPath+": "+err.Error())
+			} else {
+				transport.Log.Add("copy", "<<<", "type-collision cleanup "+c.RelPath)
 			}
 		}
 
@@ -818,6 +840,21 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			if srcEntry == nil {
 				progress.Done.Add(1)
 				continue
+			}
+			if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
+				var clearErr error
+				if dstEntry.IsDir {
+					clearErr = dst.RemoveAll(ctx, f.RelPath)
+				} else {
+					clearErr = dst.Remove(ctx, f.RelPath)
+				}
+				if clearErr != nil {
+					transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.RelPath+": "+clearErr.Error())
+					progress.Done.Add(1)
+					continue
+				}
+				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.RelPath)
+				dstEntry = nil
 			}
 			progress.File.Store(f.RelPath)
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)

@@ -204,7 +204,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		// background so the user sees the top-level entries first while
 		// the deep listing fills the cache for subsequent dirs.
 		if !preloadFired && s.maxDepth == 0 {
-			s.preloadRecursive(ctx, "")
+			s.preloadRecursive(ctx, "", true, true)
 			preloadFired = true
 		}
 
@@ -228,7 +228,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	p.ChecksumFiles = checksumTotal
 	s.setProgress(p)
 
-	s.prefetchChecksums(ctx, "", true)
+	s.prefetchChecksums(ctx, "", true, true, true)
 
 	sem := make(chan struct{}, s.concurrency)
 	var wg sync.WaitGroup
@@ -470,7 +470,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		// the background so the user sees this dir's entries first while
 		// the deep listing fills the cache for the rest of the subtree.
 		if !preloadFired && depthLimit == 0 {
-			s.preloadRecursive(ctx, node.RelPath)
+			s.preloadRecursive(ctx, node.RelPath, rootListLeft, rootListRight)
 			preloadFired = true
 		}
 	}
@@ -479,7 +479,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		setp("done")
 		return
 	}
-	s.prefetchChecksums(ctx, node.RelPath, true)
+	s.prefetchChecksums(ctx, node.RelPath, true, rootListLeft, rootListRight)
 	var files []*TreeNode
 	collectFiles(node, &files)
 	ckTotal = int64(len(files))
@@ -510,7 +510,9 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	}
 	var files []*TreeNode
 	if node.IsDir {
-		s.prefetchChecksums(ctx, node.RelPath, true)
+		leftIsDir := node.Left != nil && node.Left.IsDir
+		rightIsDir := node.Right != nil && node.Right.IsDir
+		s.prefetchChecksums(ctx, node.RelPath, true, leftIsDir, rightIsDir)
 		collectFiles(node, &files)
 	} else if node.Compare.Presence == PresenceBoth {
 		files = []*TreeNode{node}
@@ -554,21 +556,29 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	s.setProgress(p)
 }
 
-func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive bool) {
-	if p, ok := s.left.(ChecksumPrefetcher); ok {
-		p.PrefetchChecksums(ctx, scope, recursive)
+func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive, leftIsDir, rightIsDir bool) {
+	if leftIsDir {
+		if p, ok := s.left.(ChecksumPrefetcher); ok {
+			p.PrefetchChecksums(ctx, scope, recursive)
+		}
 	}
-	if p, ok := s.right.(ChecksumPrefetcher); ok {
-		p.PrefetchChecksums(ctx, scope, recursive)
+	if rightIsDir {
+		if p, ok := s.right.(ChecksumPrefetcher); ok {
+			p.PrefetchChecksums(ctx, scope, recursive)
+		}
 	}
 }
 
-func (s *Scanner) preloadRecursive(ctx context.Context, scope string) {
-	if p, ok := s.left.(RecursivePreloader); ok {
-		p.PreloadRecursive(ctx, scope)
+func (s *Scanner) preloadRecursive(ctx context.Context, scope string, leftIsDir, rightIsDir bool) {
+	if leftIsDir {
+		if p, ok := s.left.(RecursivePreloader); ok {
+			p.PreloadRecursive(ctx, scope)
+		}
 	}
-	if p, ok := s.right.(RecursivePreloader); ok {
-		p.PreloadRecursive(ctx, scope)
+	if rightIsDir {
+		if p, ok := s.right.(RecursivePreloader); ok {
+			p.PreloadRecursive(ctx, scope)
+		}
 	}
 }
 

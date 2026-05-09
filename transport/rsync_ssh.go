@@ -392,8 +392,12 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 // RecvToLocalFile downloads via rsync-over-SSH directly to dstPath. Any
 // existing prefix is reused for delta-sync resume.
 func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+	parent := filepath.Dir(dstPath)
+	if err := os.MkdirAll(parent, 0755); err != nil {
 		return err
+	}
+	if fi, err := os.Stat(dstPath); err == nil && fi.IsDir() {
+		return fmt.Errorf("rsync+ssh: refuse to receive into existing directory %s", dstPath)
 	}
 
 	counter := progressFromContext(ctx)
@@ -404,7 +408,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 			size = 1 << 62
 		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, filepath.Dir(dstPath), filepath.Base(dstPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size))
 	}
 
 	remotePath := path.Join(b.base, relPath)
@@ -443,7 +447,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 		return err
 	}
 
-	_, err = client.Run(ctx, rw, []string{dstPath})
+	_, err = client.Run(ctx, rw, []string{parent + "/"})
 	session.Close()
 	if stop != nil {
 		close(stop)
@@ -452,7 +456,15 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
 	}
-	Log.Add("rsync+ssh", "<<<", "OK")
+	if fi, statErr := os.Stat(dstPath); statErr != nil {
+		Log.Add("rsync+ssh", "ERR", "RECV "+relPath+": dst missing after rsync: "+statErr.Error())
+		return fmt.Errorf("rsync+ssh: dst missing after recv: %w", statErr)
+	} else if fi.IsDir() {
+		Log.Add("rsync+ssh", "ERR", "RECV "+relPath+": dst is a directory after rsync")
+		return fmt.Errorf("rsync+ssh: dst became a directory after recv: %s", dstPath)
+	} else {
+		Log.Add("rsync+ssh", "<<<", fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
+	}
 	return nil
 }
 

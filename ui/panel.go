@@ -178,8 +178,14 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		return p.renderAttrRow(node)
 	}
 
+	entry := node.Left
+	if !p.isLeft {
+		entry = node.Right
+	}
+	sideIsDir := entry != nil && entry.IsDir
+
 	name := node.Name
-	if node.IsDir {
+	if sideIsDir {
 		name = p.dirStyle(node).Render(name + "/")
 	} else {
 		name = p.nodeStyle(node).Render(name)
@@ -203,7 +209,7 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		if node.Expanded {
 			arrow = "▼"
 		}
-		if node.IsDir && !node.Listed {
+		if sideIsDir && !node.Listed {
 			arrow = "▶…"
 		}
 		left = chrome + styleChrome.Render(arrow) + " " + name
@@ -280,7 +286,11 @@ func (p *Panel) renderAttrRow(node *model.TreeNode) string {
 }
 
 func (p *Panel) inlineInfo(node *model.TreeNode) string {
-	if node.IsDir {
+	entry := node.Left
+	if !p.isLeft {
+		entry = node.Right
+	}
+	if entry != nil && entry.IsDir {
 		var dirs, files int
 		var size int64
 		if p.isLeft {
@@ -296,12 +306,6 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 			return ""
 		}
 		return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", dirs, files, model.FormatSize(size)))
-	}
-	var entry *model.FileEntry
-	if p.isLeft {
-		entry = node.Left
-	} else {
-		entry = node.Right
 	}
 	if entry == nil {
 		return ""

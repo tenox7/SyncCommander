@@ -54,6 +54,7 @@ type TreeNode struct {
 	IsDir    bool
 	Left     *FileEntry
 	Right    *FileEntry
+	Parent   *TreeNode
 	Compare  CompareResult
 	Children []*TreeNode
 	Expanded bool
@@ -107,43 +108,50 @@ func NewRootNode() *TreeNode {
 }
 
 func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace bool) []*TreeNode {
-	byName := make(map[string]*TreeNode)
+	keyFor := func(name string, isDir bool) string {
+		if isDir {
+			return name + "/"
+		}
+		return name
+	}
+	byKey := make(map[string]*TreeNode)
 
 	for i := range leftEntries {
 		e := &leftEntries[i]
-		node := byName[e.Name]
+		key := keyFor(e.Name, e.IsDir)
+		node := byKey[key]
 		if node == nil {
 			node = &TreeNode{
 				RelPath: e.RelPath,
 				Name:    e.Name,
 				IsDir:   e.IsDir,
 				Depth:   depth,
+				Parent:  parent,
 			}
-			byName[e.Name] = node
+			byKey[key] = node
 		}
 		node.Left = e
 	}
 
 	for i := range rightEntries {
 		e := &rightEntries[i]
-		node := byName[e.Name]
+		key := keyFor(e.Name, e.IsDir)
+		node := byKey[key]
 		if node == nil {
 			node = &TreeNode{
 				RelPath: e.RelPath,
 				Name:    e.Name,
 				IsDir:   e.IsDir,
 				Depth:   depth,
+				Parent:  parent,
 			}
-			byName[e.Name] = node
+			byKey[key] = node
 		}
 		node.Right = e
-		if e.IsDir {
-			node.IsDir = true
-		}
 	}
 
-	nodes := make([]*TreeNode, 0, len(byName))
-	for _, n := range byName {
+	nodes := make([]*TreeNode, 0, len(byKey))
+	for _, n := range byKey {
 		compareNode(n, subSecond, timeGrace)
 		nodes = append(nodes, n)
 	}
@@ -519,26 +527,66 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 	}
 }
 
-// CollectTypeCollisions returns nodes where both sides have an entry by the
-// same name but disagree on type (one is a directory, the other is a file).
-// The destination side must be removed before a copy can succeed.
+// CollectTypeCollisions returns dst-side nodes that have a same-name twin on the
+// src side with the opposite type (file vs directory). These twins must be
+// removed on dst before a copy can succeed. Walks the input node's subtree and
+// also checks the input node's own siblings (so single-file copies work).
 func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 	var result []*TreeNode
-	collectTypeCollisionsRec(node, leftToRight, &result)
+	seen := make(map[*TreeNode]bool)
+	if node.Parent != nil {
+		findTwinPairs(node.Parent.Children, leftToRight, seen, &result)
+	}
+	collectTypeCollisionsRec(node, leftToRight, seen, &result)
 	return result
 }
 
-func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, result *[]*TreeNode) {
+func findTwinPairs(children []*TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
+	byName := make(map[string][]*TreeNode)
+	for _, c := range children {
+		if c.IsAttr {
+			continue
+		}
+		byName[c.Name] = append(byName[c.Name], c)
+	}
+	for _, group := range byName {
+		if len(group) < 2 {
+			continue
+		}
+		for _, a := range group {
+			srcEntry := a.Left
+			if !leftToRight {
+				srcEntry = a.Right
+			}
+			if srcEntry == nil {
+				continue
+			}
+			for _, b := range group {
+				if a == b || a.IsDir == b.IsDir {
+					continue
+				}
+				dstEntry := b.Right
+				if !leftToRight {
+					dstEntry = b.Left
+				}
+				if dstEntry == nil || seen[b] {
+					continue
+				}
+				seen[b] = true
+				*result = append(*result, b)
+			}
+		}
+	}
+}
+
+func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
 	if node.IsAttr {
 		return
 	}
-	if node.Left != nil && node.Right != nil && node.Left.IsDir != node.Right.IsDir {
-		*result = append(*result, node)
-		return
-	}
-	if node.IsDir {
-		for _, child := range node.Children {
-			collectTypeCollisionsRec(child, leftToRight, result)
+	findTwinPairs(node.Children, leftToRight, seen, result)
+	for _, child := range node.Children {
+		if child.IsDir {
+			collectTypeCollisionsRec(child, leftToRight, seen, result)
 		}
 	}
 }
@@ -551,6 +599,9 @@ func CollectMirrorDeletes(node *TreeNode, leftToRight bool) []*TreeNode {
 	}
 	for _, child := range node.Children {
 		if child.Compare.Presence == destOnly {
+			if hasTwinWithSrc(node, child, leftToRight) {
+				continue
+			}
 			result = append(result, child)
 			continue
 		}
@@ -568,6 +619,9 @@ func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 	}
 	for _, child := range node.Children {
 		if child.Compare.Presence == destOnly {
+			if hasTwinWithSrc(node, child, leftToRight) {
+				continue
+			}
 			if child.IsDir {
 				dirs++
 				cf, cd, _ := CountDescendants(child)
@@ -585,6 +639,30 @@ func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 		}
 	}
 	return
+}
+
+// hasTwinWithSrc reports whether child has a sibling with the same Name but
+// opposite IsDir, where that sibling has a src-side entry. Used to exclude
+// type-collision twins from mirror-delete logic — they're cleaned up by
+// CollectTypeCollisions and would otherwise be double-processed (and risk
+// removing the just-copied file at the same path).
+func hasTwinWithSrc(parent, child *TreeNode, leftToRight bool) bool {
+	for _, sibling := range parent.Children {
+		if sibling == child || sibling.IsAttr {
+			continue
+		}
+		if sibling.Name != child.Name || sibling.IsDir == child.IsDir {
+			continue
+		}
+		srcEntry := sibling.Left
+		if !leftToRight {
+			srcEntry = sibling.Right
+		}
+		if srcEntry != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {

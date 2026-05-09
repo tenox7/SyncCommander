@@ -638,8 +638,12 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 // path, no tmp dir. With --inplace any existing prefix at dstPath is reused
 // for delta sync (resume).
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+	parent := filepath.Dir(dstPath)
+	if err := os.MkdirAll(parent, 0755); err != nil {
 		return err
+	}
+	if fi, err := os.Stat(dstPath); err == nil && fi.IsDir() {
+		return fmt.Errorf("rsync: refuse to receive into existing directory %s", dstPath)
 	}
 
 	counter := progressFromContext(ctx)
@@ -650,7 +654,7 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 			size = 1 << 62
 		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, filepath.Dir(dstPath), filepath.Base(dstPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size))
 	}
 
 	u := b.remoteURL(relPath)
@@ -658,7 +662,7 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
-	args = append(args, u, dstPath)
+	args = append(args, u, parent+"/")
 	Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err := b.rsyncRun(ctx, args...)
 	if stop != nil {
@@ -666,8 +670,18 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 	}
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
+		return err
 	}
-	return err
+	if fi, statErr := os.Stat(dstPath); statErr != nil {
+		Log.Add("rsync", "ERR", "RECV "+relPath+": dst missing after rsync: "+statErr.Error())
+		return fmt.Errorf("rsync: dst missing after recv: %w", statErr)
+	} else if fi.IsDir() {
+		Log.Add("rsync", "ERR", "RECV "+relPath+": dst is a directory after rsync (rsync misbehavior)")
+		return fmt.Errorf("rsync: dst became a directory after recv: %s", dstPath)
+	} else {
+		Log.Add("rsync", "<<<", fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
+	}
+	return nil
 }
 
 func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
