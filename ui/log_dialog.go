@@ -24,7 +24,7 @@ func NewLogDialog() *LogDialog {
 	return &LogDialog{follow: true}
 }
 
-func (d *LogDialog) Open()  { d.visible = true; d.follow = true }
+func (d *LogDialog) Open() { d.visible = true; d.follow = true }
 func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()

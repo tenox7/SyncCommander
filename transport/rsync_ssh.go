@@ -67,7 +67,7 @@ func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
 func (b *RsyncSSHBackend) BasePath() string { return b.display }
 
 func (b *RsyncSSHBackend) OwnsCopyProgress() bool { return true }
-func (b *RsyncSSHBackend) Close() error     { return b.client.Close() }
+func (b *RsyncSSHBackend) Close() error           { return b.client.Close() }
 
 func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))

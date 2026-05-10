@@ -19,9 +19,10 @@ func main() {
 	ctime := flag.Bool("ctime", false, "compare change time")
 	btime := flag.Bool("btime", false, "compare birth time")
 	mode := flag.Bool("mode", false, "compare permissions")
-	cksum := flag.Bool("cksum", false, "compare checksums")
+	cksum := flag.Bool("checksum", false, "compare checksums")
 	subsec := flag.Bool("subsec", false, "sub-second time precision")
 	grace := flag.Bool("grace", true, "allow ±1s time grace")
+	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences (hour-modulo)")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
@@ -53,15 +54,16 @@ func main() {
 	}
 
 	opts := &model.CompareOpts{
-		Size:      *size,
-		ModTime:   *modtime,
-		ATime:     *atime,
-		CTime:     *ctime,
-		BTime:     *btime,
-		Mode:      *mode,
-		Checksum:  *cksum,
-		SubSecond: *subsec,
-		TimeGrace: *grace,
+		Size:        *size,
+		ModTime:     *modtime,
+		ATime:       *atime,
+		CTime:       *ctime,
+		BTime:       *btime,
+		Mode:        *mode,
+		Checksum:    *cksum,
+		SubSecond:   *subsec,
+		TimeGrace:   *grace,
+		IgnoreTZDST: *tzdst,
 	}
 
 	left := transport.OpenBackendLazy(leftPath, *insecure)

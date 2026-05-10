@@ -201,7 +201,7 @@ type CountingReadWriter struct {
 	Adder *CappedAdder
 }
 
-func (c *CountingReadWriter) Read(p []byte) (int, error)  { return c.RW.Read(p) }
+func (c *CountingReadWriter) Read(p []byte) (int, error) { return c.RW.Read(p) }
 func (c *CountingReadWriter) Write(p []byte) (int, error) {
 	n, err := c.RW.Write(p)
 	if n > 0 {

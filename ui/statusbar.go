@@ -318,13 +318,17 @@ type StatusInfo struct {
 	Retries       int
 	Recovered     int
 	Failed        int
-	ChecksumAlgo  string
-	Spinner       string
+	ChecksumAlgo    string
+	ChecksumEnabled bool
+	Spinner         string
 }
 
-func crcLabel(algo string) string {
+func crcLabel(algo string, enabled bool) string {
 	switch algo {
 	case "":
+		if enabled {
+			return "WAIT"
+		}
 		return "NO"
 	case "sha1", "sha256":
 		return "SHA"
@@ -370,7 +374,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	}
 
 	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d",
-		crcLabel(info.ChecksumAlgo), info.Errors, info.Retries, info.Recovered, info.Failed)
+		crcLabel(info.ChecksumAlgo, info.ChecksumEnabled), info.Errors, info.Retries, info.Recovered, info.Failed)
 
 	right := "?=help"
 

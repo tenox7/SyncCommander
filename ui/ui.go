@@ -76,34 +76,34 @@ type pendingCopyInfo struct {
 }
 
 type Model struct {
-	leftPanel     *Panel
-	rightPanel    *Panel
-	left          model.Backend
-	right         model.Backend
-	scanner       *model.Scanner
-	activeLeft    bool
-	scanning      bool
-	deleting      bool
-	copying       bool
-	checksumming  bool
-	copyProgress    *CopyProgress
-	deleteProgress  *DeleteProgress
-	cmpOpts         *model.CompareOpts
-	width         int
-	height        int
-	spinFrame     int
-	settings      *SettingsDialog
-	input         *InputDialog
-	confirm       *ConfirmDialog
-	help          *HelpDialog
-	info          *InfoDialog
-	logView       *LogDialog
-	diffView      *DiffView
-	pendingDelete *model.TreeNode
-	pendingCopy   *pendingCopyInfo
-	openDlg       *OpenDialog
-	insecure      bool
-	deepScan      bool
+	leftPanel      *Panel
+	rightPanel     *Panel
+	left           model.Backend
+	right          model.Backend
+	scanner        *model.Scanner
+	activeLeft     bool
+	scanning       bool
+	deleting       bool
+	copying        bool
+	checksumming   bool
+	copyProgress   *CopyProgress
+	deleteProgress *DeleteProgress
+	cmpOpts        *model.CompareOpts
+	width          int
+	height         int
+	spinFrame      int
+	settings       *SettingsDialog
+	input          *InputDialog
+	confirm        *ConfirmDialog
+	help           *HelpDialog
+	info           *InfoDialog
+	logView        *LogDialog
+	diffView       *DiffView
+	pendingDelete  *model.TreeNode
+	pendingCopy    *pendingCopyInfo
+	openDlg        *OpenDialog
+	insecure       bool
+	deepScan       bool
 }
 
 func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool) Model {
@@ -111,22 +111,22 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
 	m := Model{
-		leftPanel:    lp,
-		rightPanel:   rp,
-		left:         left,
-		right:        right,
-		scanner:      model.NewScanner(left, right, 4, deepScan),
-		activeLeft:   true,
-		cmpOpts:      cmpOpts,
-		deepScan:     deepScan,
-		settings:     NewSettingsDialog(),
-		input:        NewInputDialog(),
-		confirm:      NewConfirmDialog(),
-		help:         NewHelpDialog(),
-		info:         NewInfoDialog(),
-		logView:      NewLogDialog(),
-		diffView:     NewDiffView(),
-		openDlg:      NewOpenDialog(),
+		leftPanel:      lp,
+		rightPanel:     rp,
+		left:           left,
+		right:          right,
+		scanner:        model.NewScanner(left, right, 4, deepScan),
+		activeLeft:     true,
+		cmpOpts:        cmpOpts,
+		deepScan:       deepScan,
+		settings:       NewSettingsDialog(),
+		input:          NewInputDialog(),
+		confirm:        NewConfirmDialog(),
+		help:           NewHelpDialog(),
+		info:           NewInfoDialog(),
+		logView:        NewLogDialog(),
+		diffView:       NewDiffView(),
+		openDlg:        NewOpenDialog(),
 		copyProgress:   &CopyProgress{},
 		deleteProgress: &DeleteProgress{},
 		insecure:       insecure,
@@ -143,6 +143,7 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		{Label: "Checksum", Value: &m.cmpOpts.Checksum},
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},
 		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
+		{Label: "Ignore TZ/DST (hour-modulo)", Value: &m.cmpOpts.IgnoreTZDST},
 	})
 	return m
 }
@@ -842,13 +843,13 @@ func countOps(e deleteEntry) int64 {
 	return n
 }
 
-
 func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	isDir := node.IsDir
 	relPath := node.RelPath
 	progress := m.deleteProgress
@@ -926,7 +927,7 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 		refreshCtx := context.Background()
 		parentDir := model.DirOf(relPath)
 		le, re := scanner.ListBothDir(refreshCtx, parentDir)
-		scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace)
+		scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace, ignoreTZDST)
 		return deleteDoneMsg{}
 	}
 }
@@ -1396,6 +1397,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	scanner := m.scanner
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	return func() tea.Msg {
 		ctx := context.Background()
 		l, r := node.Left, node.Right
@@ -1411,7 +1413,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		_ = olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime)
 		parentDir := model.DirOf(node.RelPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
-		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace)
+		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace, ignoreTZDST)
 		return touchDoneMsg{}
 	}
 }
@@ -1452,10 +1454,11 @@ func (m *Model) startScan() tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	scanner := m.scanner
 	return func() tea.Msg {
 		timeScan("dir scan", "/", func() {
-			scanner.Scan(context.Background(), checksum, subSecond, timeGrace)
+			scanner.Scan(context.Background(), checksum, subSecond, timeGrace, ignoreTZDST)
 		})
 		return scanDoneMsg{}
 	}
@@ -1473,11 +1476,12 @@ func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
-			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace)
+			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
 		})
 		return rescanDoneMsg{}
 	}
@@ -1487,11 +1491,12 @@ func (m *Model) deepRescanNode(node *model.TreeNode) tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("deep scan", target, func() {
-			scanner.DeepRescanNode(context.Background(), node, checksum, subSecond, timeGrace)
+			scanner.DeepRescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
 		})
 		return rescanDoneMsg{}
 	}
@@ -1500,11 +1505,12 @@ func (m *Model) deepRescanNode(node *model.TreeNode) tea.Cmd {
 func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("list", target, func() {
-			scanner.ListNode(context.Background(), node, subSecond, timeGrace)
+			scanner.ListNode(context.Background(), node, subSecond, timeGrace, ignoreTZDST)
 		})
 		return rescanDoneMsg{}
 	}
@@ -1582,11 +1588,12 @@ func swapTreeData(node *model.TreeNode) {
 
 func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 	info := StatusInfo{
-		Errors:       transport.Log.ErrCount(),
-		Retries:      transport.Log.RetryCount(),
-		Recovered:    transport.Log.RecoveredCount(),
-		Failed:       transport.Log.FailedCount(),
-		ChecksumAlgo: m.scanner.ChecksumAlgo(),
+		Errors:          transport.Log.ErrCount(),
+		Retries:         transport.Log.RetryCount(),
+		Recovered:       transport.Log.RecoveredCount(),
+		Failed:          transport.Log.FailedCount(),
+		ChecksumAlgo:    m.scanner.ChecksumAlgo(),
+		ChecksumEnabled: m.cmpOpts.Checksum,
 	}
 	switch {
 	case m.copying:

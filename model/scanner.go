@@ -81,7 +81,7 @@ func (s *Scanner) Cancel() {
 	}
 }
 
-func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGrace bool) {
+func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	root := NewRootNode()
@@ -92,9 +92,9 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	preloadFired := false
 
 	var stats struct {
-		totalFiles, totalDirs                          atomic.Int64
-		dirsListed, dirsTotal                          atomic.Int64
-		filesEqual, filesDiff, filesLeft, filesRight   atomic.Int64
+		totalFiles, totalDirs                        atomic.Int64
+		dirsListed, dirsTotal                        atomic.Int64
+		filesEqual, filesDiff, filesLeft, filesRight atomic.Int64
 	}
 
 	queue := []dirJob{{relDir: "", parent: root, depth: 1, listLeft: true, listRight: true}}
@@ -139,7 +139,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 			rightPending--
 		}
 
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace)
+		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
 
 		s.mu.Lock()
 		job.parent.Children = children
@@ -260,28 +260,28 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	s.setProgress(p)
 }
 
-func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, s.maxDepth)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, s.maxDepth)
 		return
 	}
-	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace)
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST)
 }
 
 // DeepRescanNode rescans a node recursively regardless of the scanner's
 // maxDepth setting. Used by the explicit "deep scan" key.
-func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, 0)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, 0)
 		return
 	}
-	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace)
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST)
 }
 
 // ListNode lists a single directory's immediate children without descending.
 // Used by the lazy-expand-on-Enter UI path when a dir was left unlisted by an
 // initial shallow scan.
-func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeGrace bool) {
+func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
 	if !node.IsDir {
 		return
 	}
@@ -306,7 +306,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
 	}
-	children := MergeChildren(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace)
+	children := MergeChildren(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	restoreExpanded(children, oldExpanded)
 
 	s.mu.Lock()
@@ -316,7 +316,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	setp("done")
 }
 
-func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool) {
+func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
 	var totalFiles, ckFiles, ckDone int64
 	setp := func(phase string) {
 		s.setProgress(ScanProgress{
@@ -349,7 +349,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	s.mu.Lock()
 	node.Left = le
 	node.Right = re
-	compareNode(node, subSecond, timeGrace)
+	compareNode(node, subSecond, timeGrace, ignoreTZDST)
 	s.mu.Unlock()
 
 	totalFiles = 1
@@ -364,7 +364,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	setp("done")
 }
 
-func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace bool, depthLimit int) {
+func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, depthLimit int) {
 	preloadFired := false
 	var dirsListed, totalFiles, ckTotal int64
 	var ckDone atomic.Int64
@@ -401,7 +401,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		s.mu.Lock()
 		node.Left = le
 		node.Right = re
-		compareNode(node, subSecond, timeGrace)
+		compareNode(node, subSecond, timeGrace, ignoreTZDST)
 		s.mu.Unlock()
 	}
 
@@ -426,7 +426,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		queue = queue[:len(queue)-1]
 
 		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace)
+		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
 		restoreExpanded(children, oldExpanded)
 
 		s.mu.Lock()
@@ -605,7 +605,7 @@ func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNod
 	return tree // root as fallback
 }
 
-func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond, timeGrace bool) {
+func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond, timeGrace, ignoreTZDST bool) {
 	tree := s.Tree()
 	if tree == nil {
 		return
@@ -624,7 +624,7 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecon
 	for _, child := range parent.Children {
 		oldByKey[nodeKey(child.Name, child.IsDir)] = child
 	}
-	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond, timeGrace)
+	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	for _, c := range children {
 		old, ok := oldByKey[nodeKey(c.Name, c.IsDir)]
 		if !ok {

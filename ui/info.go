@@ -10,12 +10,12 @@ import (
 )
 
 type TreeStats struct {
-	LeftFiles, RightFiles   int
-	LeftDirs, RightDirs     int
-	LeftSize, RightSize     int64
-	FilesEqual, FilesDiff   int
-	FilesLeftOnly           int
-	FilesRightOnly          int
+	LeftFiles, RightFiles int
+	LeftDirs, RightDirs   int
+	LeftSize, RightSize   int64
+	FilesEqual, FilesDiff int
+	FilesLeftOnly         int
+	FilesRightOnly        int
 }
 
 func computeTreeStats(root *model.TreeNode) TreeStats {

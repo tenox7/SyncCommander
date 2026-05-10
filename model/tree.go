@@ -8,15 +8,16 @@ import (
 
 // CompareOpts controls which file attributes are compared.
 type CompareOpts struct {
-	Size      bool
-	ModTime   bool
-	ATime     bool
-	CTime     bool
-	BTime     bool
-	Mode      bool
-	Checksum  bool
-	SubSecond bool
-	TimeGrace bool
+	Size        bool
+	ModTime     bool
+	ATime       bool
+	CTime       bool
+	BTime       bool
+	Mode        bool
+	Checksum    bool
+	SubSecond   bool
+	TimeGrace   bool
+	IgnoreTZDST bool
 }
 
 type AttrStatus int
@@ -49,39 +50,39 @@ type CompareResult struct {
 }
 
 type TreeNode struct {
-	RelPath  string
-	Name     string
-	IsDir    bool
-	Left     *FileEntry
-	Right    *FileEntry
-	Parent   *TreeNode
-	Compare  CompareResult
-	Children []*TreeNode
-	Expanded bool
-	Listed   bool
-	SubtreePending bool
-	Depth    int
-	ChildStatus    AttrStatus
-	LeftChecksum   string
-	RightChecksum  string
+	RelPath         string
+	Name            string
+	IsDir           bool
+	Left            *FileEntry
+	Right           *FileEntry
+	Parent          *TreeNode
+	Compare         CompareResult
+	Children        []*TreeNode
+	Expanded        bool
+	Listed          bool
+	SubtreePending  bool
+	Depth           int
+	ChildStatus     AttrStatus
+	LeftChecksum    string
+	RightChecksum   string
 	LeftTotalSize   int64
 	RightTotalSize  int64
 	LeftTotalFiles  int
 	RightTotalFiles int
 	LeftTotalDirs   int
 	RightTotalDirs  int
-	Guides       []bool
-	IsLast       bool
-	IsAttr       bool
-	AttrLabel    string
-	AttrLeftVal  string
-	AttrRightVal string
-	AttrLeftRaw  string
-	AttrRightRaw string
-	AttrStatus   AttrStatus
-	AttrInactive bool
-	AttrWinner   int
-	AttrPresence Presence
+	Guides          []bool
+	IsLast          bool
+	IsAttr          bool
+	AttrLabel       string
+	AttrLeftVal     string
+	AttrRightVal    string
+	AttrLeftRaw     string
+	AttrRightRaw    string
+	AttrStatus      AttrStatus
+	AttrInactive    bool
+	AttrWinner      int
+	AttrPresence    Presence
 }
 
 func (n *TreeNode) OverallStatus() AttrStatus {
@@ -108,7 +109,7 @@ func NewRootNode() *TreeNode {
 	return &TreeNode{Name: "/", IsDir: true, Expanded: true, Listed: true}
 }
 
-func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace bool) []*TreeNode {
+func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
 	keyFor := func(name string, isDir bool) string {
 		if isDir {
 			return name + "/"
@@ -153,7 +154,7 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 
 	nodes := make([]*TreeNode, 0, len(byKey))
 	for _, n := range byKey {
-		compareNode(n, subSecond, timeGrace)
+		compareNode(n, subSecond, timeGrace, ignoreTZDST)
 		nodes = append(nodes, n)
 	}
 
@@ -168,7 +169,7 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 	return nodes
 }
 
-func compareNode(n *TreeNode, subSecond, timeGrace bool) {
+func compareNode(n *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
 	n.Compare.Presence = PresenceBoth
 	if n.Left == nil {
 		n.Compare.Presence = PresenceRightOnly
@@ -189,26 +190,32 @@ func compareNode(n *TreeNode, subSecond, timeGrace bool) {
 		return
 	}
 	n.Compare.Size = cmpAttr(n.Left.Size == n.Right.Size)
-	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, subSecond, timeGrace)
-	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, subSecond, timeGrace)
-	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, subSecond, timeGrace)
-	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, subSecond, timeGrace)
+	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, subSecond, timeGrace, ignoreTZDST)
+	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, subSecond, timeGrace, ignoreTZDST)
+	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, subSecond, timeGrace, ignoreTZDST)
+	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, subSecond, timeGrace, ignoreTZDST)
 	n.Compare.Mode = cmpAttr(n.Left.Mode == n.Right.Mode)
 }
 
-func cmpTime(a, b time.Time, subSecond, timeGrace bool) AttrStatus {
+func cmpTime(a, b time.Time, subSecond, timeGrace, ignoreTZDST bool) AttrStatus {
 	if !subSecond {
 		a = a.Truncate(time.Second)
 		b = b.Truncate(time.Second)
 	}
-	if timeGrace {
-		diff := a.Sub(b)
-		if diff < 0 {
-			diff = -diff
+	diff := a.Sub(b)
+	if diff < 0 {
+		diff = -diff
+	}
+	if ignoreTZDST {
+		diff %= time.Hour
+		if diff > 30*time.Minute {
+			diff = time.Hour - diff
 		}
+	}
+	if timeGrace {
 		return cmpAttr(diff <= time.Second)
 	}
-	return cmpAttr(a.Equal(b))
+	return cmpAttr(diff == 0)
 }
 
 func cmpAttr(equal bool) AttrStatus {
@@ -383,9 +390,9 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 		winner   int
 	}
 
-	tf := "2006-01-02 15:04:05"
+	tf := "2006-01-02 15:04:05 MST"
 	if opts != nil && opts.SubSecond {
-		tf = "2006-01-02 15:04:05.000000000"
+		tf = "2006-01-02 15:04:05.000000000 MST"
 	}
 	l, r := node.Left, node.Right
 	val := func(get func(*FileEntry) string) (string, string) {
@@ -706,7 +713,6 @@ func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	}
 	return
 }
-
 
 func SetExpandedAll(node *TreeNode, expanded bool) {
 	if node.IsDir {

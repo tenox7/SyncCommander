@@ -27,10 +27,10 @@ const (
 )
 
 type diffLine struct {
-	kind       diffLineKind
-	leftText   string
-	rightText  string
-	leftLineNo int
+	kind        diffLineKind
+	leftText    string
+	rightText   string
+	leftLineNo  int
 	rightLineNo int
 }
 
@@ -42,14 +42,14 @@ type hexDiffRow struct {
 }
 
 type DiffView struct {
-	visible    bool
-	mode       diffMode
-	title      string
-	offset     int
-	width      int
-	height     int
-	loading    bool
-	err        string
+	visible bool
+	mode    diffMode
+	title   string
+	offset  int
+	width   int
+	height  int
+	loading bool
+	err     string
 
 	// text mode
 	lines    []diffLine
@@ -455,7 +455,7 @@ func (d *DiffView) View(width, height int) string {
 func (d *DiffView) viewText(width, height int) string {
 	vh := d.viewHeight()
 	panelWidth := width / 2
-	gutterWidth := 6 // line number gutter
+	gutterWidth := 6                             // line number gutter
 	contentWidth := panelWidth - gutterWidth - 3 // gutter + space + border
 	if contentWidth < 10 {
 		contentWidth = 10
