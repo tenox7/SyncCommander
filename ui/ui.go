@@ -1493,10 +1493,6 @@ func (m Model) View() string {
 	operation := ""
 	if m.deleting {
 		operation = spinner + " deleting..."
-	} else if m.copying {
-		done := m.copyProgress.Done.Load()
-		total := m.copyProgress.Total.Load()
-		operation = fmt.Sprintf("%s copying... %s %d/%d", spinner, progressBar(done, total, 20), done, total)
 	} else if m.checksumming {
 		operation = spinner + " checksumming..."
 	}
