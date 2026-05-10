@@ -2,6 +2,7 @@
 
 ## Features
 
+- select multiple files with tab or something and copy all at once
 - detect renames via CRC on and rename files (no rsync)
 - remote log stop scrolling if not on top
 - sort files in folders and folders!

@@ -18,7 +18,12 @@ var styleCopyPopup = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
-func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalBytes int64, elapsed time.Duration, width int) string {
+func RenderCopyPopup(file string, leftToRight bool,
+	doneFiles, totalFiles int64,
+	fileBytes, fileSize int64,
+	bytesCopied, totalBytes int64,
+	fileElapsed, totalElapsed time.Duration,
+	width int) string {
 	arrow := ">"
 	if !leftToRight {
 		arrow = "<"
@@ -27,14 +32,32 @@ func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalByt
 	if inner < 20 {
 		inner = 20
 	}
-	pct := 0
+
+	if fileBytes < 0 {
+		fileBytes = 0
+	}
+	if fileSize > 0 && fileBytes > fileSize {
+		fileBytes = fileSize
+	}
+
+	filePct := 0
+	if fileSize > 0 {
+		filePct = int(fileBytes * 100 / fileSize)
+	}
+	totalPct := 0
 	if totalBytes > 0 {
-		pct = int(bytes * 100 / totalBytes)
+		totalPct = int(bytesCopied * 100 / totalBytes)
 	}
-	rate := ""
-	if elapsed > 0 && bytes > 0 {
-		rate = "  " + model.FormatRate(float64(bytes)/elapsed.Seconds())
+
+	fileRate := 0.0
+	if fileElapsed >= 100*time.Millisecond && fileBytes > 0 {
+		fileRate = float64(fileBytes) / fileElapsed.Seconds()
 	}
+	totalRate := 0.0
+	if totalElapsed >= 100*time.Millisecond && bytesCopied > 0 {
+		totalRate = float64(bytesCopied) / totalElapsed.Seconds()
+	}
+
 	name := file
 	if name == "" {
 		name = "—"
@@ -42,25 +65,65 @@ func RenderCopyPopup(file string, leftToRight bool, done, total, bytes, totalByt
 	if lipgloss.Width(name) > inner {
 		name = ansi.Truncate(name, inner, "…")
 	}
-	pctStr := fmt.Sprintf(" %3d%%", pct)
-	barWidth := inner - lipgloss.Width(arrow) - lipgloss.Width(pctStr) - 1
+
+	barIndent := "  " + arrow + " "
+	pctStrLen := 5
+	barWidth := inner - lipgloss.Width(barIndent) - pctStrLen
 	if barWidth < 5 {
 		barWidth = 5
 	}
-	line1 := fmt.Sprintf("COPY  %d/%d files  %s/%s%s", done, total, model.FormatSize(bytes), model.FormatSize(totalBytes), rate)
+
+	line1 := fmt.Sprintf("COPY  %d/%d files", doneFiles, totalFiles)
 	line2 := name
-	line3 := fmt.Sprintf("%s %s%s", arrow, progressBar(bytes, totalBytes, barWidth), pctStr)
-	line4 := "X=cancel"
+	line3 := fmt.Sprintf("File:  %s/%s  %s  ETA %s",
+		model.FormatSize(fileBytes), model.FormatSize(fileSize),
+		formatRateOrDash(fileRate), formatETA(fileSize-fileBytes, fileRate))
+	line4 := fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, barWidth), filePct)
+	line5 := fmt.Sprintf("Total: %s/%s  %s  ETA %s",
+		model.FormatSize(bytesCopied), model.FormatSize(totalBytes),
+		formatRateOrDash(totalRate), formatETA(totalBytes-bytesCopied, totalRate))
+	line6 := fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(bytesCopied, totalBytes, barWidth), totalPct)
+	line7 := "X=cancel"
 
 	pad := func(s string) string {
+		if lipgloss.Width(s) > inner {
+			s = ansi.Truncate(s, inner, "…")
+		}
 		w := lipgloss.Width(s)
 		if w >= inner {
 			return s
 		}
 		return s + strings.Repeat(" ", inner-w)
 	}
-	body := pad(line1) + "\n" + pad(line2) + "\n" + pad(line3) + "\n" + pad(line4)
+	body := pad(line1) + "\n" + pad(line2) + "\n" +
+		pad(line3) + "\n" + pad(line4) + "\n" +
+		pad(line5) + "\n" + pad(line6) + "\n" +
+		pad(line7)
 	return styleCopyPopup.Width(width).Render(body)
+}
+
+func formatRateOrDash(rate float64) string {
+	if rate <= 0 {
+		return "— B/s"
+	}
+	return model.FormatRate(rate)
+}
+
+func formatETA(remaining int64, rate float64) string {
+	if remaining <= 0 || rate <= 0 {
+		return "--:--"
+	}
+	secs := int64(float64(remaining)/rate + 0.5)
+	if secs < 0 {
+		return "--:--"
+	}
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
 }
 
 func overlayString(base, popup string, x, y int) string {

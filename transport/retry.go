@@ -2,7 +2,10 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +28,17 @@ func pluralRetries(n int) string {
 		return "retry"
 	}
 	return "retries"
+}
+
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted")
 }
 
 func backoffDelay(attempt int) time.Duration {
@@ -75,6 +89,10 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		}
 		if ctxDone(ctx) {
 			return ctx.Err()
+		}
+		if isPermissionError(err) {
+			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v (permission error, not retrying)", what, err))
+			return err
 		}
 		if attempt == max {
 			break

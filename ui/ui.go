@@ -38,14 +38,23 @@ type copyDoneMsg struct {
 type cancelFn struct{ f context.CancelFunc }
 
 type CopyProgress struct {
-	Total       atomic.Int64
-	Done        atomic.Int64
-	Bytes       atomic.Int64
-	TotalBytes  atomic.Int64
-	Start       atomic.Int64
-	File        atomic.Value
-	LeftToRight atomic.Bool
-	Cancel      atomic.Pointer[cancelFn]
+	Total          atomic.Int64
+	Done           atomic.Int64
+	Bytes          atomic.Int64
+	TotalBytes     atomic.Int64
+	Start          atomic.Int64
+	File           atomic.Value
+	FileSize       atomic.Int64
+	FileStart      atomic.Int64
+	FileStartBytes atomic.Int64
+	LeftToRight    atomic.Bool
+	Cancel         atomic.Pointer[cancelFn]
+}
+
+func (p *CopyProgress) BeginFile(size int64) {
+	p.FileSize.Store(size)
+	p.FileStartBytes.Store(p.Bytes.Load())
+	p.FileStart.Store(time.Now().UnixNano())
 }
 
 type pendingCopyInfo struct {
@@ -823,6 +832,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.Start.Store(time.Now().UnixNano())
 		progress.LeftToRight.Store(leftToRight)
 		progress.File.Store("")
+		progress.FileSize.Store(0)
+		progress.FileStartBytes.Store(0)
+		progress.FileStart.Store(0)
 
 		for _, f := range files {
 			if ctx.Err() != nil {
@@ -843,6 +855,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			if srcEntry.IsDir {
 				progress.File.Store(f.RelPath)
+				progress.BeginFile(0)
 				if err := dst.Mkdir(ctx, f.RelPath, srcEntry.Mode); err != nil {
 					transport.Log.Add("copy", "ERR", "mkdir "+f.RelPath+": "+err.Error())
 				} else {
@@ -867,6 +880,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				dstEntry = nil
 			}
 			progress.File.Store(f.RelPath)
+			progress.BeginFile(srcEntry.Size)
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
 			if dstEntry == nil {
 				fileCtx = transport.ContextWithWholeFile(fileCtx)
@@ -1484,11 +1498,17 @@ func (m Model) View() string {
 		total := m.copyProgress.Total.Load()
 		bytes := m.copyProgress.Bytes.Load()
 		totalBytes := m.copyProgress.TotalBytes.Load()
+		fileSize := m.copyProgress.FileSize.Load()
+		fileBytes := bytes - m.copyProgress.FileStartBytes.Load()
 		var elapsed time.Duration
 		if start := m.copyProgress.Start.Load(); start > 0 {
 			elapsed = time.Since(time.Unix(0, start))
 		}
-		popup := RenderCopyPopup(file, ltr, done, total, bytes, totalBytes, elapsed, popupW)
+		var fileElapsed time.Duration
+		if fStart := m.copyProgress.FileStart.Load(); fStart > 0 {
+			fileElapsed = time.Since(time.Unix(0, fStart))
+		}
+		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, bytes, totalBytes, fileElapsed, elapsed, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {
