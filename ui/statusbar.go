@@ -18,6 +18,89 @@ var styleCopyPopup = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
+var styleDeletePopup = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("1")).
+	Background(lipgloss.Color("0")).
+	Foreground(lipgloss.Color("15")).
+	Padding(0, 1)
+
+func RenderDeletePopup(file, side string, done, total int64, enumerating bool, elapsed time.Duration, width int) string {
+	inner := width - 4
+	if inner < 20 {
+		inner = 20
+	}
+
+	pct := 0
+	if total > 0 {
+		if done > total {
+			done = total
+		}
+		pct = int(done * 100 / total)
+	}
+
+	name := file
+	if name == "" {
+		name = "—"
+	}
+	if lipgloss.Width(name) > inner {
+		name = ansi.Truncate(name, inner, "…")
+	}
+
+	barIndent := "  ✗ "
+	pctStrLen := 5
+	barWidth := inner - lipgloss.Width(barIndent) - pctStrLen
+	if barWidth < 5 {
+		barWidth = 5
+	}
+
+	header := fmt.Sprintf("DELETE %s", side)
+	var line1 string
+	if enumerating {
+		line1 = fmt.Sprintf("%s  enumerating… %d found", header, total)
+	} else {
+		line1 = fmt.Sprintf("%s  %d/%d items", header, done, total)
+	}
+	line2 := name
+	var line3 string
+	if enumerating {
+		line3 = fmt.Sprintf("%s%s   --%%", barIndent, strings.Repeat("░", barWidth))
+	} else {
+		line3 = fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(done, total, barWidth), pct)
+	}
+	line4 := fmt.Sprintf("Elapsed: %s", formatElapsed(elapsed))
+	line5 := "X=cancel"
+
+	pad := func(s string) string {
+		if lipgloss.Width(s) > inner {
+			s = ansi.Truncate(s, inner, "…")
+		}
+		w := lipgloss.Width(s)
+		if w >= inner {
+			return s
+		}
+		return s + strings.Repeat(" ", inner-w)
+	}
+	body := pad(line1) + "\n" + pad(line2) + "\n" +
+		pad(line3) + "\n" + pad(line4) + "\n" +
+		pad(line5)
+	return styleDeletePopup.Width(width).Render(body)
+}
+
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	secs := int64(d.Seconds())
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
 func RenderCopyPopup(file string, leftToRight bool,
 	doneFiles, totalFiles int64,
 	fileBytes, fileSize, fileBaseBytes int64,
@@ -223,6 +306,7 @@ type StatusInfo struct {
 	DirsListed    int64
 	DirsTotal     int64
 	FilesScanned  int64
+	TotalSize     int64
 	ChecksumDone  int64
 	ChecksumTotal int64
 	FilesDone     int64
@@ -257,7 +341,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	details := state
 	switch info.State {
 	case "DIR SCAN":
-		details = fmt.Sprintf("DIR SCAN: %d/%d dirs, %d files", info.DirsListed, info.DirsTotal, info.FilesScanned)
+		details = fmt.Sprintf("DIR SCAN  Progress: %d/%d dirs, %d files, %s", info.DirsListed, info.DirsTotal, info.FilesScanned, formatSizeLong(info.TotalSize))
 	case "CHECKSUM":
 		details = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
 	case "COPY":
@@ -273,10 +357,10 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	case "READ":
 		details = fmt.Sprintf("READ: %s", model.FormatSize(info.BytesCopied))
 	case "DELETE":
-		details = "DELETE"
+		details = fmt.Sprintf("DELETE: %d/%d items", info.FilesDone, info.FilesTotal)
 	case "IDLE":
 		if info.DirsListed > 0 || info.FilesScanned > 0 {
-			details = fmt.Sprintf("IDLE: %d dirs, %d files", info.DirsListed, info.FilesScanned)
+			details = fmt.Sprintf("IDLE  Totals: %d dirs, %d files, %s", info.DirsListed, info.FilesScanned, formatSizeLong(info.TotalSize))
 		}
 	}
 
