@@ -285,14 +285,19 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	}
 
 	counter := progressFromContext(ctx)
+	base := baseProgressFromContext(ctx)
 	var stop chan struct{}
 	if counter != nil {
 		size := fileSizeFromContext(ctx)
 		if size <= 0 {
 			size = 1 << 62
 		}
+		var baseAdder *CappedAdder
+		if base != nil {
+			baseAdder = NewCappedAdder(base, size)
+		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size), baseAdder)
 	}
 
 	remotePath := path.Join(b.base, relPath)
@@ -412,14 +417,19 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	}
 
 	counter := progressFromContext(ctx)
+	base := baseProgressFromContext(ctx)
 	var stop chan struct{}
 	if counter != nil {
 		size := fileSizeFromContext(ctx)
 		if size <= 0 {
 			size = 1 << 62
 		}
+		var baseAdder *CappedAdder
+		if base != nil {
+			baseAdder = NewCappedAdder(base, size)
+		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size), baseAdder)
 	}
 
 	remotePath := path.Join(b.base, relPath)
@@ -604,11 +614,18 @@ func (b *RsyncSSHBackend) sessionReadWriter(session *ssh.Session) (io.ReadWriter
 	if err != nil {
 		return nil, err
 	}
-	return struct {
-		io.Reader
-		io.Writer
-	}{stdout, stdin}, nil
+	return &sessionRW{r: stdout, w: stdin, session: session}, nil
 }
+
+type sessionRW struct {
+	r       io.Reader
+	w       io.Writer
+	session *ssh.Session
+}
+
+func (s *sessionRW) Read(p []byte) (int, error)  { return s.r.Read(p) }
+func (s *sessionRW) Write(p []byte) (int, error) { return s.w.Write(p) }
+func (s *sessionRW) Close() error                { return s.session.Close() }
 
 func (b *RsyncSSHBackend) sshRun(cmd string) (string, error) {
 	Log.Add("rsync+ssh", ">>>", cmd)

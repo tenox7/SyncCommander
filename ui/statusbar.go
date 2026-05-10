@@ -20,8 +20,8 @@ var styleCopyPopup = lipgloss.NewStyle().
 
 func RenderCopyPopup(file string, leftToRight bool,
 	doneFiles, totalFiles int64,
-	fileBytes, fileSize int64,
-	bytesCopied, totalBytes int64,
+	fileBytes, fileSize, fileBaseBytes int64,
+	bytesCopied, totalBytes, baseBytes int64,
 	fileElapsed, totalElapsed time.Duration,
 	width int) string {
 	arrow := ">"
@@ -49,13 +49,22 @@ func RenderCopyPopup(file string, leftToRight bool,
 		totalPct = int(bytesCopied * 100 / totalBytes)
 	}
 
+	fileRealBytes := fileBytes - fileBaseBytes
+	if fileRealBytes < 0 {
+		fileRealBytes = 0
+	}
+	totalRealBytes := bytesCopied - baseBytes
+	if totalRealBytes < 0 {
+		totalRealBytes = 0
+	}
+
 	fileRate := 0.0
-	if fileElapsed >= 100*time.Millisecond && fileBytes > 0 {
-		fileRate = float64(fileBytes) / fileElapsed.Seconds()
+	if fileElapsed >= 100*time.Millisecond && fileRealBytes > 0 {
+		fileRate = float64(fileRealBytes) / fileElapsed.Seconds()
 	}
 	totalRate := 0.0
-	if totalElapsed >= 100*time.Millisecond && bytesCopied > 0 {
-		totalRate = float64(bytesCopied) / totalElapsed.Seconds()
+	if totalElapsed >= 100*time.Millisecond && totalRealBytes > 0 {
+		totalRate = float64(totalRealBytes) / totalElapsed.Seconds()
 	}
 
 	name := file
@@ -219,6 +228,7 @@ type StatusInfo struct {
 	FilesDone     int64
 	FilesTotal    int64
 	BytesCopied   int64
+	BaseBytes     int64
 	Elapsed       time.Duration
 	Errors        int
 	Retries       int
@@ -252,8 +262,12 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		details = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
 	case "COPY":
 		rate := ""
-		if info.Elapsed > 0 && info.BytesCopied > 0 {
-			rate = " " + model.FormatRate(float64(info.BytesCopied)/info.Elapsed.Seconds())
+		realBytes := info.BytesCopied - info.BaseBytes
+		if realBytes < 0 {
+			realBytes = 0
+		}
+		if info.Elapsed > 0 && realBytes > 0 {
+			rate = " " + model.FormatRate(float64(realBytes)/info.Elapsed.Seconds())
 		}
 		details = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
 	case "READ":

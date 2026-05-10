@@ -38,22 +38,25 @@ type copyDoneMsg struct {
 type cancelFn struct{ f context.CancelFunc }
 
 type CopyProgress struct {
-	Total          atomic.Int64
-	Done           atomic.Int64
-	Bytes          atomic.Int64
-	TotalBytes     atomic.Int64
-	Start          atomic.Int64
-	File           atomic.Value
-	FileSize       atomic.Int64
-	FileStart      atomic.Int64
-	FileStartBytes atomic.Int64
-	LeftToRight    atomic.Bool
-	Cancel         atomic.Pointer[cancelFn]
+	Total              atomic.Int64
+	Done               atomic.Int64
+	Bytes              atomic.Int64
+	BaseBytes          atomic.Int64
+	TotalBytes         atomic.Int64
+	Start              atomic.Int64
+	File               atomic.Value
+	FileSize           atomic.Int64
+	FileStart          atomic.Int64
+	FileStartBytes     atomic.Int64
+	FileStartBaseBytes atomic.Int64
+	LeftToRight        atomic.Bool
+	Cancel             atomic.Pointer[cancelFn]
 }
 
 func (p *CopyProgress) BeginFile(size int64) {
 	p.FileSize.Store(size)
 	p.FileStartBytes.Store(p.Bytes.Load())
+	p.FileStartBaseBytes.Store(p.BaseBytes.Load())
 	p.FileStart.Store(time.Now().UnixNano())
 }
 
@@ -780,6 +783,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	progress.Cancel.Store(&cancelFn{f: cancel})
 	return func() tea.Msg {
 		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
+		ctx = transport.ContextWithBaseProgress(ctx, &progress.BaseBytes)
 
 		var dstBackend model.Backend
 		if leftToRight {
@@ -829,11 +833,13 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.TotalBytes.Store(totalBytes)
 		progress.Done.Store(0)
 		progress.Bytes.Store(0)
+		progress.BaseBytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
 		progress.LeftToRight.Store(leftToRight)
 		progress.File.Store("")
 		progress.FileSize.Store(0)
 		progress.FileStartBytes.Store(0)
+		progress.FileStartBaseBytes.Store(0)
 		progress.FileStart.Store(0)
 
 		for _, f := range files {
@@ -892,7 +898,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				continue
 			}
 
-			if tryResumeCopy(fileCtx, src, dst, f.RelPath, srcEntry, dstEntry, &progress.Bytes) {
+			if tryResumeCopy(fileCtx, src, dst, f.RelPath, srcEntry, dstEntry, progress) {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 				progress.Done.Add(1)
 				continue
@@ -904,7 +910,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				if attempt > 1 {
 					offset := peekDstSize(fileCtx, dst, f.RelPath)
 					if offset > 0 && offset < srcEntry.Size {
-						err := resumeAttempt(fileCtx, src, dst, f.RelPath, srcEntry, offset, &progress.Bytes)
+						err := resumeAttempt(fileCtx, src, dst, f.RelPath, srcEntry, offset, progress)
 						if err == nil {
 							return nil
 						}
@@ -982,10 +988,12 @@ func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath stri
 // success; false if resume is not applicable, not supported by either backend,
 // or if any step fails (caller should fall back to a full overwrite copy).
 //
-// On success the global counter ends up offset+(src.Size-offset) higher; on
-// failure any progress credited along the way is rolled back so a fallback
-// CopyFrom can re-credit the full source size without double-counting.
-func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, counter *atomic.Int64) bool {
+// On success the global Bytes counter ends up offset+(src.Size-offset) higher;
+// the offset portion is also tracked in BaseBytes so it doesn't inflate the
+// transfer-rate calculation. On failure any progress credited along the way is
+// rolled back so a fallback CopyFrom can re-credit the full source size
+// without double-counting.
+func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, progress *CopyProgress) bool {
 	if dstEntry == nil || dstEntry.IsDir {
 		return false
 	}
@@ -1017,16 +1025,23 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 		reader = r
 	}
 	defer reader.Close()
+	defer startCancelCloser(ctx, reader)()
 
 	var srcReader io.Reader = reader
 	var added atomic.Int64
-	if !transport.IsPreCounted(reader) {
-		counter.Add(offset)
+	preCounted := transport.IsPreCounted(reader)
+	if !preCounted {
+		progress.Bytes.Add(offset)
+		progress.BaseBytes.Add(offset)
 		added.Store(offset)
-		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+		srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
 	}
+	srcReader = &cancelReader{r: srcReader, ctx: ctx}
 	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
-		counter.Add(-added.Load())
+		progress.Bytes.Add(-added.Load())
+		if !preCounted {
+			progress.BaseBytes.Add(-offset)
+		}
 		return false
 	}
 	return true
@@ -1052,8 +1067,10 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 
 // resumeAttempt resumes a partial upload by appending bytes from offset onward.
 // Returns transport.ErrResumeUnsupported if dst can't append; on any other
-// error any progress credited during the attempt is rolled back.
-func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, counter *atomic.Int64) error {
+// error any progress credited during the attempt is rolled back. The offset
+// portion is also tracked in BaseBytes so it doesn't inflate the transfer-rate
+// calculation.
+func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, progress *CopyProgress) error {
 	var reader io.ReadCloser
 	if seeker, ok := src.(model.SeekableOpener); ok {
 		r, err := seeker.OpenAt(ctx, relPath, offset)
@@ -1086,21 +1103,31 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		reader = r
 	}
 	defer reader.Close()
+	defer startCancelCloser(ctx, reader)()
 
 	var srcReader io.Reader = reader
 	var added atomic.Int64
-	if !transport.IsPreCounted(reader) {
-		counter.Add(offset)
+	preCounted := transport.IsPreCounted(reader)
+	if !preCounted {
+		progress.Bytes.Add(offset)
+		progress.BaseBytes.Add(offset)
 		added.Store(offset)
-		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+		srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
 	}
+	srcReader = &cancelReader{r: srcReader, ctx: ctx}
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
-		counter.Add(-added.Load())
+		progress.Bytes.Add(-added.Load())
+		if !preCounted {
+			progress.BaseBytes.Add(-offset)
+		}
 		return transport.ErrResumeUnsupported
 	}
 	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
-		counter.Add(-added.Load())
+		progress.Bytes.Add(-added.Load())
+		if !preCounted {
+			progress.BaseBytes.Add(-offset)
+		}
 		return err
 	}
 	return nil
@@ -1114,6 +1141,7 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 		return err
 	}
 	defer reader.Close()
+	defer startCancelCloser(ctx, reader)()
 	dstOwnsProgress := false
 	if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
 		dstOwnsProgress = true
@@ -1123,6 +1151,7 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
 		srcReader = &trackedReader{r: reader, target: counter, added: &added}
 	}
+	srcReader = &cancelReader{r: srcReader, ctx: ctx}
 	if err := dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode); err != nil {
 		counter.Add(-added.Load())
 		return err
@@ -1143,6 +1172,30 @@ func (t *trackedReader) Read(p []byte) (int, error) {
 		t.added.Add(int64(n))
 	}
 	return n, err
+}
+
+type cancelReader struct {
+	r   io.Reader
+	ctx context.Context
+}
+
+func (c *cancelReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+func startCancelCloser(ctx context.Context, c io.Closer) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 func (m *Model) openRename(node *model.TreeNode) {
@@ -1376,6 +1429,7 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		info.FilesDone = m.copyProgress.Done.Load()
 		info.FilesTotal = m.copyProgress.Total.Load()
 		info.BytesCopied = m.copyProgress.Bytes.Load()
+		info.BaseBytes = m.copyProgress.BaseBytes.Load()
 		if start := m.copyProgress.Start.Load(); start > 0 {
 			info.Elapsed = time.Since(time.Unix(0, start))
 		}
@@ -1497,9 +1551,11 @@ func (m Model) View() string {
 		done := m.copyProgress.Done.Load()
 		total := m.copyProgress.Total.Load()
 		bytes := m.copyProgress.Bytes.Load()
+		baseBytes := m.copyProgress.BaseBytes.Load()
 		totalBytes := m.copyProgress.TotalBytes.Load()
 		fileSize := m.copyProgress.FileSize.Load()
 		fileBytes := bytes - m.copyProgress.FileStartBytes.Load()
+		fileBaseBytes := baseBytes - m.copyProgress.FileStartBaseBytes.Load()
 		var elapsed time.Duration
 		if start := m.copyProgress.Start.Load(); start > 0 {
 			elapsed = time.Since(time.Unix(0, start))
@@ -1508,7 +1564,7 @@ func (m Model) View() string {
 		if fStart := m.copyProgress.FileStart.Load(); fStart > 0 {
 			fileElapsed = time.Since(time.Unix(0, fStart))
 		}
-		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, bytes, totalBytes, fileElapsed, elapsed, popupW)
+		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {

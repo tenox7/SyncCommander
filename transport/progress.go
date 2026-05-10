@@ -10,6 +10,7 @@ import (
 )
 
 type progressKey struct{}
+type baseProgressKey struct{}
 type fileSizeKey struct{}
 type wholeFileKey struct{}
 
@@ -23,6 +24,22 @@ func ContextWithProgress(ctx context.Context, counter *atomic.Int64) context.Con
 func progressFromContext(ctx context.Context) *atomic.Int64 {
 	c, _ := ctx.Value(progressKey{}).(*atomic.Int64)
 	return c
+}
+
+// ContextWithBaseProgress attaches a counter that tracks bytes which were
+// pre-credited to the regular progress counter as "already at the destination"
+// (resume offsets). Subtracting BaseBytes from Bytes yields the bytes actually
+// transferred during this session — used for honest rate/ETA calculations.
+func ContextWithBaseProgress(ctx context.Context, base *atomic.Int64) context.Context {
+	if base == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, baseProgressKey{}, base)
+}
+
+func baseProgressFromContext(ctx context.Context) *atomic.Int64 {
+	b, _ := ctx.Value(baseProgressKey{}).(*atomic.Int64)
+	return b
 }
 
 // ContextWithFileSize attaches the size of the file currently being copied so
@@ -109,8 +126,11 @@ func (c *CappedAdder) Add(delta int64) {
 // tailDirSize polls dir for the largest in-progress file size matching the
 // final basename, gorsync's renameio temp prefix (".<basename><random>"), or
 // gorsync's Windows pattern ("temp-rsync-*"), and pushes incremental size
-// deltas to adder. Stop the goroutine by closing stop.
-func tailDirSize(stop <-chan struct{}, dir, basename string, adder *CappedAdder) {
+// deltas to adder. If the destination already has a partial file at start
+// (rsync --inplace --partial resume), its initial size is credited to both
+// adder and base so it shows up in display totals without inflating the
+// transfer-rate calculation. Stop the goroutine by closing stop.
+func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *CappedAdder) {
 	if adder == nil {
 		return
 	}
@@ -120,6 +140,15 @@ func tailDirSize(stop <-chan struct{}, dir, basename string, adder *CappedAdder)
 		filepath.Join(dir, "temp-rsync-*"),
 	}
 	var last int64
+	if fi, err := os.Stat(finalPath); err == nil {
+		last = fi.Size()
+	}
+	if last > 0 {
+		adder.Add(last)
+		if base != nil {
+			base.Add(last)
+		}
+	}
 	update := func() {
 		var size int64
 		if fi, err := os.Stat(finalPath); err == nil {

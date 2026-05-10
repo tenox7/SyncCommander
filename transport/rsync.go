@@ -647,14 +647,19 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 	}
 
 	counter := progressFromContext(ctx)
+	base := baseProgressFromContext(ctx)
 	var stop chan struct{}
 	if counter != nil {
 		size := fileSizeFromContext(ctx)
 		if size <= 0 {
 			size = 1 << 62
 		}
+		var baseAdder *CappedAdder
+		if base != nil {
+			baseAdder = NewCappedAdder(base, size)
+		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size), baseAdder)
 	}
 
 	u := b.remoteURL(relPath)
@@ -778,14 +783,19 @@ func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 	}
 
 	counter := progressFromContext(ctx)
+	base := baseProgressFromContext(ctx)
 	var stop chan struct{}
 	if counter != nil {
 		size := fileSizeFromContext(ctx)
 		if size <= 0 {
 			size = 1 << 62
 		}
+		var baseAdder *CappedAdder
+		if base != nil {
+			baseAdder = NewCappedAdder(base, size)
+		}
 		stop = make(chan struct{})
-		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size))
+		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size), baseAdder)
 	}
 
 	u := b.remoteURL(relPath)
