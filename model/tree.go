@@ -59,6 +59,7 @@ type TreeNode struct {
 	Children []*TreeNode
 	Expanded bool
 	Listed   bool
+	SubtreePending bool
 	Depth    int
 	ChildStatus    AttrStatus
 	LeftChecksum   string
@@ -236,6 +237,7 @@ func FlattenTree(root *TreeNode, opts *CompareOpts) []*TreeNode {
 
 func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	if !node.IsDir {
+		node.SubtreePending = false
 		return nodeStatus(node, opts)
 	}
 	if !node.Listed {
@@ -246,17 +248,22 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		node.RightTotalFiles = 0
 		node.LeftTotalDirs = 0
 		node.RightTotalDirs = 0
+		node.SubtreePending = true
 		return AttrUnknown
 	}
 	result := AttrEqual
 	var lt, rt int64
 	var lf, rf, ld, rd int
+	pending := false
 	for _, child := range node.Children {
 		s := propagateStatus(child, opts)
 		if s == AttrDifferent {
 			result = AttrDifferent
 		} else if s == AttrUnknown && result != AttrDifferent {
 			result = AttrUnknown
+		}
+		if child.IsDir && child.SubtreePending {
+			pending = true
 		}
 		if child.IsDir {
 			lt += child.LeftTotalSize
@@ -288,6 +295,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	node.RightTotalFiles = rf
 	node.LeftTotalDirs = ld
 	node.RightTotalDirs = rd
+	node.SubtreePending = pending
 	if node.Compare.Presence != PresenceBoth {
 		node.ChildStatus = AttrDifferent
 		return AttrDifferent
@@ -739,6 +747,10 @@ func TimeAgo(t time.Time) string {
 
 func FormatSize(b int64) string {
 	switch {
+	case b >= 1<<50:
+		return fmt.Sprintf("%.1fP", float64(b)/float64(1<<50))
+	case b >= 1<<40:
+		return fmt.Sprintf("%.1fT", float64(b)/float64(1<<40))
 	case b >= 1<<30:
 		return fmt.Sprintf("%.1fG", float64(b)/float64(1<<30))
 	case b >= 1<<20:
@@ -752,6 +764,10 @@ func FormatSize(b int64) string {
 
 func FormatRate(bytesPerSec float64) string {
 	switch {
+	case bytesPerSec >= 1<<50:
+		return fmt.Sprintf("%.1f PB/s", bytesPerSec/float64(1<<50))
+	case bytesPerSec >= 1<<40:
+		return fmt.Sprintf("%.1f TB/s", bytesPerSec/float64(1<<40))
 	case bytesPerSec >= 1<<30:
 		return fmt.Sprintf("%.1f GB/s", bytesPerSec/float64(1<<30))
 	case bytesPerSec >= 1<<20:

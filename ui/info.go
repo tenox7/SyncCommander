@@ -168,6 +168,8 @@ func (d *InfoDialog) View(width, height int) string {
 
 func formatSizeLong(b int64) string {
 	switch {
+	case b >= 1<<50:
+		return fmt.Sprintf("%.1f PB", float64(b)/float64(1<<50))
 	case b >= 1<<40:
 		return fmt.Sprintf("%.1f TB", float64(b)/float64(1<<40))
 	case b >= 1<<30:

@@ -211,6 +211,8 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		}
 		if sideIsDir && !node.Listed {
 			arrow = "▶…"
+		} else if sideIsDir && node.SubtreePending && p.spinner != "" {
+			arrow = arrow + p.spinner
 		}
 		left = chrome + styleChrome.Render(arrow) + " " + name
 	}
