@@ -171,11 +171,11 @@ func (p *Panel) isHidden(node *model.TreeNode) bool {
 
 func (p *Panel) renderNode(node *model.TreeNode) string {
 	if p.isHidden(node) {
-		return renderGuidesOnly(node)
+		return p.eqPrefix(node) + renderGuidesOnly(node)
 	}
 
 	if node.IsAttr {
-		return p.renderAttrRow(node)
+		return p.eqPrefix(node) + p.renderAttrRow(node)
 	}
 
 	entry := node.Left
@@ -202,7 +202,7 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		if p.spinner != "" {
 			spin = " " + p.spinner
 		}
-		left = styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(p.title)
+		left = p.eqPrefix(node) + styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(p.title)
 	} else {
 		chrome := renderGuides(node)
 		arrow := "▶"
@@ -229,7 +229,7 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		case sideIsDir && node.SubtreePending && p.spinner != "":
 			arrow = arrow + p.spinner
 		}
-		left = chrome + styleChrome.Render(arrow) + " " + name
+		left = p.eqPrefix(node) + chrome + styleChrome.Render(arrow) + " " + name
 	}
 
 	if info == "" {
@@ -247,6 +247,30 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + info
+}
+
+func (p *Panel) eqPrefix(node *model.TreeNode) string {
+	if p.isLeft {
+		return ""
+	}
+	if node.Depth == 0 || node.IsAttr {
+		return " "
+	}
+	entry := node.Right
+	if entry == nil || !entry.IsDir {
+		return " "
+	}
+	if node.Compare.Presence != model.PresenceBoth {
+		return styleDifferent.Render("≠")
+	}
+	switch node.ChildStatus {
+	case model.AttrEqual:
+		return styleEqual.Render("=")
+	case model.AttrDifferent:
+		return styleDifferent.Render("≠")
+	default:
+		return " "
+	}
 }
 
 func (p *Panel) renderAttrRow(node *model.TreeNode) string {
