@@ -723,6 +723,56 @@ func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	return
 }
 
+// FindNextDiff walks the tree in DFS order starting after `after` and returns
+// the next node that represents a "diff leaf" — a file whose compared
+// attributes differ, or any item present on only one side. Directories present
+// on both sides aren't leaves; the search drills into them. If `after` is
+// itself a diff leaf, its subtree is skipped (the dir's existence is the
+// diff). Returns nil if no further diff is found.
+func FindNextDiff(root, after *TreeNode, opts *CompareOpts) *TreeNode {
+	if root == nil {
+		return nil
+	}
+	started := after == nil
+	var visit func(n *TreeNode) *TreeNode
+	visit = func(n *TreeNode) *TreeNode {
+		if n.IsAttr {
+			return nil
+		}
+		if started && isDiffLeaf(n, opts) {
+			return n
+		}
+		if n == after {
+			started = true
+			if isDiffLeaf(n, opts) {
+				return nil
+			}
+		}
+		if n.IsDir {
+			for _, child := range n.Children {
+				if r := visit(child); r != nil {
+					return r
+				}
+			}
+		}
+		return nil
+	}
+	return visit(root)
+}
+
+func isDiffLeaf(n *TreeNode, opts *CompareOpts) bool {
+	if n.IsAttr {
+		return false
+	}
+	if n.Compare.Presence != PresenceBoth {
+		return true
+	}
+	if !n.IsDir {
+		return nodeStatus(n, opts) == AttrDifferent
+	}
+	return false
+}
+
 func SetExpandedAll(node *TreeNode, expanded bool) {
 	if node.IsDir {
 		node.Expanded = expanded

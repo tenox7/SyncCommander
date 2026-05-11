@@ -345,6 +345,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case "n":
+		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
+			m.jumpToNextDiff()
+		}
 	case "}":
 		tree := m.scanner.Tree()
 		if tree != nil {
@@ -1429,6 +1433,38 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace, ignoreTZDST)
 		return touchDoneMsg{}
 	}
+}
+
+func (m *Model) jumpToNextDiff() {
+	tree := m.scanner.Tree()
+	if tree == nil {
+		return
+	}
+	p := m.activePanel()
+	var after *model.TreeNode
+	for i := p.cursor; i >= 0 && i < len(p.nodes); i-- {
+		if !p.nodes[i].IsAttr {
+			after = p.nodes[i]
+			break
+		}
+	}
+	target := model.FindNextDiff(tree, after, m.cmpOpts)
+	if target == nil {
+		return
+	}
+	for n := target.Parent; n != nil; n = n.Parent {
+		n.Expanded = true
+	}
+	target.Expanded = true
+	m.refreshTree()
+	for i, n := range p.nodes {
+		if n == target {
+			p.cursor = i
+			p.clampOffset()
+			break
+		}
+	}
+	m.syncPanels()
 }
 
 func (m *Model) parentFileNode() *model.TreeNode {

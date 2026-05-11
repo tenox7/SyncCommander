@@ -4,8 +4,7 @@
 
 - select multiple files with tab or something and copy all at once
 - detect renames via CRC on and rename files (no rsync)
-- remote log stop scrolling if not on top
-- sort files in folders and folders!
+- sort 
 - search with /
 
 - rsync ↔ non-local (sftp/ftp/scp): still uses tmp dir because rsync needs
@@ -15,7 +14,6 @@
   - use to run cocurrent dir listings in differerent subdirectories
   - concurrent file uploads
   - concurrent uploads within one file (subparts) if protocol supports
-- select multiple files / folders and copy a batch
 
 - support remote move with relative and absolute paths, ask for path
 - export to csv/xls
