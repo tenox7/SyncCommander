@@ -257,20 +257,70 @@ func (p *Panel) eqPrefix(node *model.TreeNode) string {
 		return " "
 	}
 	entry := node.Right
-	if entry == nil || !entry.IsDir {
+	if entry == nil {
+		return " "
+	}
+	if !entry.IsDir {
+		if node.Compare.Presence != model.PresenceBoth {
+			return " "
+		}
+		switch node.Compare.Checksum {
+		case model.AttrDifferent:
+			return styleDifferent.Render("≢")
+		case model.AttrEqual:
+			if fileOtherAttrsDiffer(node, p.cmpOpts) {
+				return styleDifferent.Render("≢")
+			}
+			return styleEqual.Render("≡")
+		}
 		return " "
 	}
 	if node.Compare.Presence != model.PresenceBoth {
 		return styleDifferent.Render("≠")
 	}
+	scanned := node.SubtreeChecksumScanned()
 	switch node.ChildStatus {
 	case model.AttrEqual:
+		if scanned {
+			if node.SubtreeChecksumAnyDiff {
+				return styleDifferent.Render("≢")
+			}
+			return styleEqual.Render("≡")
+		}
 		return styleEqual.Render("=")
 	case model.AttrDifferent:
+		if scanned {
+			return styleDifferent.Render("≢")
+		}
 		return styleDifferent.Render("≠")
 	default:
 		return " "
 	}
+}
+
+func fileOtherAttrsDiffer(n *model.TreeNode, opts *model.CompareOpts) bool {
+	if opts == nil {
+		return false
+	}
+	if opts.Size && n.Compare.Size == model.AttrDifferent {
+		return true
+	}
+	if opts.ModTime && n.Compare.ModTime == model.AttrDifferent {
+		return true
+	}
+	if opts.ATime && n.Compare.ATime == model.AttrDifferent {
+		return true
+	}
+	if opts.CTime && n.Compare.CTime == model.AttrDifferent {
+		return true
+	}
+	if opts.BTime && n.Compare.BirthTime == model.AttrDifferent {
+		return true
+	}
+	if opts.Mode && n.Compare.Mode == model.AttrDifferent {
+		return true
+	}
+	return false
 }
 
 func (p *Panel) renderAttrRow(node *model.TreeNode) string {

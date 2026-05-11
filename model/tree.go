@@ -59,18 +59,21 @@ type TreeNode struct {
 	Parent          *TreeNode
 	Compare         CompareResult
 	Children        []*TreeNode
-	Expanded             bool
-	Listed               bool
-	SubtreePending       bool
-	ChecksumPendingLeft  bool
-	ChecksumPendingRight bool
-	ChecksumActiveLeft   bool
-	ChecksumActiveRight  bool
-	LeftChecksumDone     bool
-	RightChecksumDone    bool
-	LeftChecksumErr      bool
-	RightChecksumErr     bool
-	ChecksumCountedDone  bool
+	Expanded               bool
+	Listed                 bool
+	SubtreePending         bool
+	ChecksumPendingLeft    bool
+	ChecksumPendingRight   bool
+	ChecksumActiveLeft     bool
+	ChecksumActiveRight    bool
+	LeftChecksumDone       bool
+	RightChecksumDone      bool
+	LeftChecksumErr        bool
+	RightChecksumErr       bool
+	ChecksumCountedDone    bool
+	SubtreeBothFiles       int
+	SubtreeChecksumPending int
+	SubtreeChecksumAnyDiff bool
 	Depth           int
 	ChildStatus     AttrStatus
 	LeftChecksum    string
@@ -93,6 +96,13 @@ type TreeNode struct {
 	AttrInactive    bool
 	AttrWinner      int
 	AttrPresence    Presence
+}
+
+// SubtreeChecksumScanned reports whether every PresenceBoth file in n's
+// subtree has had its checksum computed (success or mismatch). False for
+// subtrees with no Both files or with unlisted dirs underneath.
+func (n *TreeNode) SubtreeChecksumScanned() bool {
+	return !n.SubtreePending && n.SubtreeBothFiles > 0 && n.SubtreeChecksumPending == 0
 }
 
 func (n *TreeNode) OverallStatus() AttrStatus {
@@ -255,6 +265,19 @@ func FlattenTree(root *TreeNode, opts *CompareOpts) []*TreeNode {
 func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	if !node.IsDir {
 		node.SubtreePending = false
+		node.SubtreeBothFiles = 0
+		node.SubtreeChecksumPending = 0
+		node.SubtreeChecksumAnyDiff = false
+		if node.Compare.Presence == PresenceBoth {
+			node.SubtreeBothFiles = 1
+			switch node.Compare.Checksum {
+			case AttrEqual:
+			case AttrDifferent:
+				node.SubtreeChecksumAnyDiff = true
+			default:
+				node.SubtreeChecksumPending = 1
+			}
+		}
 		return nodeStatus(node, opts)
 	}
 	if !node.Listed {
@@ -266,12 +289,18 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		node.LeftTotalDirs = 0
 		node.RightTotalDirs = 0
 		node.SubtreePending = true
+		node.SubtreeBothFiles = 0
+		node.SubtreeChecksumPending = 0
+		node.SubtreeChecksumAnyDiff = false
 		return AttrUnknown
 	}
 	result := AttrEqual
 	var lt, rt int64
 	var lf, rf, ld, rd int
 	pending := false
+	bothFiles := 0
+	cksumPending := 0
+	anyDiff := false
 	for _, child := range node.Children {
 		s := propagateStatus(child, opts)
 		if s == AttrDifferent {
@@ -281,6 +310,11 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		}
 		if child.IsDir && child.SubtreePending {
 			pending = true
+		}
+		bothFiles += child.SubtreeBothFiles
+		cksumPending += child.SubtreeChecksumPending
+		if child.SubtreeChecksumAnyDiff {
+			anyDiff = true
 		}
 		if child.IsDir {
 			lt += child.LeftTotalSize
@@ -313,6 +347,9 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	node.LeftTotalDirs = ld
 	node.RightTotalDirs = rd
 	node.SubtreePending = pending
+	node.SubtreeBothFiles = bothFiles
+	node.SubtreeChecksumPending = cksumPending
+	node.SubtreeChecksumAnyDiff = anyDiff
 	if node.Compare.Presence != PresenceBoth {
 		node.ChildStatus = AttrDifferent
 		return AttrDifferent
