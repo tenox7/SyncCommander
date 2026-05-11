@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/gokrazy/rsync v0.3.3
+	github.com/gokrazy/rsync v0.3.4-0.20260213163329-f85bc9b98cdd
 	github.com/jlaffaye/ftp v0.2.0
 	github.com/mmcloughlin/md4 v0.1.2
 	github.com/pkg/sftp v1.13.10
@@ -45,4 +45,4 @@ require (
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.78 // indirect
 )
 
-replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260511004345-f6e1c5fe4186 // branch: main
+replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260511041215-3efba87cfc72 // branch: main

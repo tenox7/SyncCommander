@@ -30,7 +30,7 @@ func pluralRetries(n int) string {
 	return "retries"
 }
 
-func isPermissionError(err error) bool {
+func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -38,7 +38,10 @@ func isPermissionError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted")
+	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted") {
+		return true
+	}
+	return strings.Contains(msg, "not supported")
 }
 
 func backoffDelay(attempt int) time.Duration {
@@ -90,8 +93,8 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		if ctxDone(ctx) {
 			return ctx.Err()
 		}
-		if isPermissionError(err) {
-			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v (permission error, not retrying)", what, err))
+		if isPermanentError(err) {
+			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v (permanent error, not retrying)", what, err))
 			return err
 		}
 		if attempt == max {

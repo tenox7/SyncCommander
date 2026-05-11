@@ -772,12 +772,50 @@ func (b *RsyncBackend) Rename(_ context.Context, _, _ string) error {
 	return fmt.Errorf("rsync: rename not supported")
 }
 
-func (b *RsyncBackend) Remove(_ context.Context, _ string) error {
-	return fmt.Errorf("rsync: remove not supported")
+func (b *RsyncBackend) Remove(ctx context.Context, relPath string) error {
+	return b.remove(ctx, relPath, false)
 }
 
-func (b *RsyncBackend) RemoveAll(_ context.Context, _ string) error {
-	return fmt.Errorf("rsync: remove not supported")
+func (b *RsyncBackend) RemoveAll(ctx context.Context, relPath string) error {
+	return b.remove(ctx, relPath, true)
+}
+
+func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive bool) error {
+	clean := strings.Trim(path.Clean(relPath), "/")
+	if clean == "" || clean == "." {
+		return fmt.Errorf("rsync: refusing to remove module root")
+	}
+	parent := path.Dir(clean)
+	base := path.Base(clean)
+	if parent == "." {
+		parent = ""
+	}
+
+	tmpDir, err := os.MkdirTemp("", "rsync-remove-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dest := b.remoteURL(parent) + "/"
+	args := []string{"-r", "--delete", "--include=/" + base}
+	if recursive {
+		args = append(args, "--include=/"+base+"/***")
+	}
+	args = append(args, "--exclude=*", tmpDir+"/", dest)
+
+	op := "REMOVE"
+	if recursive {
+		op = "REMOVEALL"
+	}
+	Log.Add("rsync", ">>>", op+" "+clean)
+	_, err = b.rsyncRun(ctx, args...)
+	if err != nil {
+		Log.Add("rsync", "ERR", op+" "+clean+": "+err.Error())
+		return err
+	}
+	Log.Add("rsync", "<<<", op+" "+clean+" OK")
+	return nil
 }
 
 func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
