@@ -27,8 +27,6 @@ var helpNavigation = []helpEntry{
 	{"{", "Collapse all"},
 	{"Tab", "Switch panel"},
 	{"PgUp/Dn", "Page up / down"},
-	{"B", "Set base to dir"},
-	{"U", "Change directory / URL"},
 	{"I", "Info / statistics"},
 	{"~", "Remote protocol log"},
 	{"=", "Settings"},
@@ -38,6 +36,9 @@ var helpNavigation = []helpEntry{
 }
 
 var helpOperations = []helpEntry{
+	{"B", "Set base to dir"},
+	{"U", "Set base to parent dir"},
+	{"Y", "Change directory / URL"},
 	{"O", "Open file diff / hex view"},
 	{"r", "Rescan"},
 	{"R", "Deep scan recursively"},

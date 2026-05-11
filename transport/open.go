@@ -3,6 +3,8 @@ package transport
 import (
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"sc/model"
@@ -92,6 +94,32 @@ func TryOpenBackend(arg string, insecure bool) (model.Backend, error) {
 	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
 		return OpenBackend(arg, insecure)
 	}), nil
+}
+
+func ParentPath(p string) string {
+	if idx := strings.Index(p, "://"); idx >= 0 {
+		rest := p[idx+3:]
+		si := strings.IndexByte(rest, '/')
+		if si < 0 {
+			return p
+		}
+		authority := rest[:si]
+		pathPart := rest[si:]
+		parent := path.Dir(pathPart)
+		if parent == pathPart {
+			return p
+		}
+		return p[:idx+3] + authority + parent
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = p
+	}
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		return abs
+	}
+	return parent
 }
 
 func CloseBackend(b model.Backend) {

@@ -489,11 +489,24 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cl, cr := m.scanner.ChecksumInfo()
 			m.info.Open(computeTreeStats(tree), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
 		}
-	case "u":
+	case "y":
 		if m.copying || m.deleting {
 			break
 		}
 		m.openDlg.Open(m.left.BasePath(), m.right.BasePath())
+	case "u":
+		if m.copying || m.deleting {
+			break
+		}
+		leftPath := transport.ParentPath(m.left.BasePath())
+		rightPath := transport.ParentPath(m.right.BasePath())
+		if leftPath == m.left.BasePath() && rightPath == m.right.BasePath() {
+			break
+		}
+		cmd, _ := m.reopenBackends(leftPath, rightPath)
+		if cmd != nil {
+			return m, cmd
+		}
 	case "o":
 		node := m.activePanel().CursorNode()
 		if node != nil && node.IsAttr {
