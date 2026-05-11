@@ -538,11 +538,15 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 	}
 	defer os.RemoveAll(tmpDir)
 
-	args := []string{"-c"}
+	// -n (--dry-run): the sender computes MD4 of each file as part of
+	// filelist generation when -c is set and includes it in the FileList
+	// we read below. Without -n, rsync still downloads every file body to
+	// tmpDir — wasteful gigabytes for "just give me the checksums".
+	args := []string{"-c", "-n"}
 	if recursive {
 		args = append(args, "-r")
 	}
-	client, err := rsyncclient.New(args, rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
+	client, err := rsyncclient.New(args, rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
 	if err != nil {
 		return nil, err
 	}

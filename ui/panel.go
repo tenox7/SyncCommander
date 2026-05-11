@@ -209,9 +209,24 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		if node.Expanded {
 			arrow = "▼"
 		}
-		if sideIsDir && !node.Listed {
+		var pendingCksum, activeCksum bool
+		if sideIsDir {
+			if p.isLeft {
+				pendingCksum = node.ChecksumPendingLeft
+				activeCksum = node.ChecksumActiveLeft
+			} else {
+				pendingCksum = node.ChecksumPendingRight
+				activeCksum = node.ChecksumActiveRight
+			}
+		}
+		switch {
+		case sideIsDir && !node.Listed:
 			arrow = "▶…"
-		} else if sideIsDir && node.SubtreePending && p.spinner != "" {
+		case activeCksum && p.spinner != "":
+			arrow = arrow + p.spinner
+		case pendingCksum:
+			arrow = arrow + "≈"
+		case sideIsDir && node.SubtreePending && p.spinner != "":
 			arrow = arrow + p.spinner
 		}
 		left = chrome + styleChrome.Render(arrow) + " " + name

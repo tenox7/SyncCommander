@@ -217,9 +217,12 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		return
 	}
 
-	var files []*TreeNode
-	collectFiles(root, &files)
-	checksumTotal := int64(len(files))
+	groups := groupFilesByTopLevel(root)
+	var checksumTotal int64
+	for _, g := range groups {
+		checksumTotal += int64(len(g.files))
+	}
+	s.resetChecksumPhase(groups)
 	var checksumDone atomic.Int64
 
 	p := progress("checksumming...")
@@ -228,31 +231,16 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	p.ChecksumFiles = checksumTotal
 	s.setProgress(p)
 
-	s.prefetchChecksums(ctx, "", true, true, true)
-
-	sem := make(chan struct{}, s.concurrency)
-	var wg sync.WaitGroup
-
-	for _, node := range files {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(n *TreeNode) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			s.checksumNode(ctx, n)
-			done := checksumDone.Add(1)
-			p := progress("checksumming...")
-			p.LeftActive = true
-			p.RightActive = true
-			p.ChecksumFiles = checksumTotal
-			p.ChecksumDone = done
-			s.setProgress(p)
-		}(node)
+	onCount := func() {
+		done := checksumDone.Add(1)
+		p := progress("checksumming...")
+		p.LeftActive = true
+		p.RightActive = true
+		p.ChecksumFiles = checksumTotal
+		p.ChecksumDone = done
+		s.setProgress(p)
 	}
-	wg.Wait()
+	s.runChecksumSides(ctx, groups, onCount)
 
 	p = progress("done")
 	p.ChecksumFiles = checksumTotal
@@ -479,28 +467,16 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		setp("done")
 		return
 	}
-	s.prefetchChecksums(ctx, node.RelPath, true, rootListLeft, rootListRight)
-	var files []*TreeNode
-	collectFiles(node, &files)
-	ckTotal = int64(len(files))
-	setp("checksumming...")
-	sem := make(chan struct{}, s.concurrency)
-	var wg sync.WaitGroup
-	for _, f := range files {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(n *TreeNode) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			s.checksumNode(ctx, n)
-			ckDone.Add(1)
-			setp("checksumming...")
-		}(f)
+	groups := groupFilesByTopLevel(node)
+	for _, g := range groups {
+		ckTotal += int64(len(g.files))
 	}
-	wg.Wait()
+	s.resetChecksumPhase(groups)
+	setp("checksumming...")
+	s.runChecksumSides(ctx, groups, func() {
+		ckDone.Add(1)
+		setp("checksumming...")
+	})
 	setp("done")
 }
 
@@ -508,17 +484,19 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	if !s.negotiateChecksum() {
 		return
 	}
-	var files []*TreeNode
+	var groups []checksumGroup
 	if node.IsDir {
-		leftIsDir := node.Left != nil && node.Left.IsDir
-		rightIsDir := node.Right != nil && node.Right.IsDir
-		s.prefetchChecksums(ctx, node.RelPath, true, leftIsDir, rightIsDir)
-		collectFiles(node, &files)
+		groups = groupFilesByTopLevel(node)
 	} else if node.Compare.Presence == PresenceBoth {
-		files = []*TreeNode{node}
+		groups = []checksumGroup{{dir: nil, files: []*TreeNode{node}}}
 	}
 
-	total := int64(len(files))
+	var total int64
+	for _, g := range groups {
+		total += int64(len(g.files))
+	}
+	s.resetChecksumPhase(groups)
+
 	var done atomic.Int64
 	update := func() {
 		p := s.Progress()
@@ -531,42 +509,16 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	}
 	update()
 
-	sem := make(chan struct{}, s.concurrency)
-	var wg sync.WaitGroup
-	for _, f := range files {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(n *TreeNode) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			s.checksumNode(ctx, n)
-			done.Add(1)
-			update()
-		}(f)
-	}
-	wg.Wait()
+	s.runChecksumSides(ctx, groups, func() {
+		done.Add(1)
+		update()
+	})
 
 	p := s.Progress()
 	p.Phase = "done"
 	p.LeftActive = false
 	p.RightActive = false
 	s.setProgress(p)
-}
-
-func (s *Scanner) prefetchChecksums(ctx context.Context, scope string, recursive, leftIsDir, rightIsDir bool) {
-	if leftIsDir {
-		if p, ok := s.left.(ChecksumPrefetcher); ok {
-			p.PrefetchChecksums(ctx, scope, recursive)
-		}
-	}
-	if rightIsDir {
-		if p, ok := s.right.(ChecksumPrefetcher); ok {
-			p.PrefetchChecksums(ctx, scope, recursive)
-		}
-	}
 }
 
 func (s *Scanner) preloadRecursive(ctx context.Context, scope string, leftIsDir, rightIsDir bool) {
@@ -766,70 +718,183 @@ func DirOf(relPath string) string {
 	return ""
 }
 
+// checksumNode synchronously runs both sides for one node and combines.
+// Used by rescanFile for single-file checksum.
 func (s *Scanner) checksumNode(ctx context.Context, node *TreeNode) {
+	s.resetChecksumPhase([]checksumGroup{{dir: nil, files: []*TreeNode{node}}})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, true) }()
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, false) }()
+	wg.Wait()
+}
+
+// resetChecksumPhase clears transient per-file done flags and (re)marks the
+// per-dir pending flags so the UI shows ≈ on each top-level dir that still
+// has work scheduled for that side.
+func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 	s.mu.Lock()
-	node.Compare.Checksum = AttrScanning
-	s.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(ctx, s.stallTimeout)
-	defer cancel()
-
-	type result struct {
-		sum  string
-		err  error
-		side int
+	defer s.mu.Unlock()
+	for _, g := range groups {
+		for _, f := range g.files {
+			f.LeftChecksum = ""
+			f.RightChecksum = ""
+			f.LeftChecksumDone = false
+			f.RightChecksumDone = false
+			f.LeftChecksumErr = false
+			f.RightChecksumErr = false
+			f.ChecksumCountedDone = false
+			f.Compare.Checksum = AttrScanning
+		}
+		if g.dir == nil || len(g.files) == 0 {
+			continue
+		}
+		if g.dir.Left != nil && g.dir.Left.IsDir {
+			g.dir.ChecksumPendingLeft = true
+		}
+		if g.dir.Right != nil && g.dir.Right.IsDir {
+			g.dir.ChecksumPendingRight = true
+		}
 	}
-	ch := make(chan result, 2)
-	expected := 0
+}
 
-	if node.Left != nil {
-		expected++
-		go func() {
-			sum, err := s.left.Checksum(ctx, node.RelPath)
-			ch <- result{sum, err, 0}
-		}()
-	}
-	if node.Right != nil {
-		expected++
-		go func() {
-			sum, err := s.right.Checksum(ctx, node.RelPath)
-			ch <- result{sum, err, 1}
-		}()
-	}
+// runChecksumSides launches two goroutines — one per side — that march
+// through groups independently. Each side does its own prefetch (if its
+// backend supports it) and then per-file Checksum calls, up to s.concurrency
+// in parallel. The faster side pipelines ahead, so the spinner on the left
+// panel can be on a different dir than the right panel.
+func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, onPairDone func()) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, true, onPairDone) }()
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, false, onPairDone) }()
+	wg.Wait()
+}
 
-	var leftSum, rightSum string
-	var leftErr, rightErr error
-	for i := 0; i < expected; i++ {
-		select {
-		case <-ctx.Done():
-			leftErr = ctx.Err()
-			i = expected
-		case r := <-ch:
-			if r.side == 0 {
-				leftSum, leftErr = r.sum, r.err
+func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, isLeft bool, onPairDone func()) {
+	backend := s.right
+	if isLeft {
+		backend = s.left
+	}
+	prefetcher, _ := backend.(ChecksumPrefetcher)
+	sem := make(chan struct{}, s.concurrency)
+
+	for _, g := range groups {
+		if ctx.Err() != nil {
+			return
+		}
+		if len(g.files) == 0 {
+			continue
+		}
+		if g.dir != nil {
+			s.mu.Lock()
+			if isLeft {
+				g.dir.ChecksumActiveLeft = true
 			} else {
-				rightSum, rightErr = r.sum, r.err
+				g.dir.ChecksumActiveRight = true
+			}
+			s.mu.Unlock()
+		}
+
+		if prefetcher != nil && g.dir != nil {
+			sideEntry := g.dir.Right
+			if isLeft {
+				sideEntry = g.dir.Left
+			}
+			if sideEntry != nil && sideEntry.IsDir {
+				_ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, true)
 			}
 		}
+
+		var wg sync.WaitGroup
+		for _, f := range g.files {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(n *TreeNode) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				justCompletedPair := s.checksumSideFile(ctx, n, isLeft)
+				if justCompletedPair && onPairDone != nil {
+					onPairDone()
+				}
+			}(f)
+		}
+		wg.Wait()
+
+		if g.dir != nil {
+			s.mu.Lock()
+			if isLeft {
+				g.dir.ChecksumActiveLeft = false
+				g.dir.ChecksumPendingLeft = false
+			} else {
+				g.dir.ChecksumActiveRight = false
+				g.dir.ChecksumPendingRight = false
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+// checksumSideFile runs one side's Checksum for node and stores the result.
+// Returns true if this call completed the pair (both sides done) — caller
+// uses that to increment the file-count progress exactly once per pair.
+func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft bool) bool {
+	entry := node.Right
+	backend := s.right
+	if isLeft {
+		entry = node.Left
+		backend = s.left
+	}
+	var sum string
+	var err error
+	if entry != nil {
+		callCtx, cancel := context.WithTimeout(ctx, s.stallTimeout)
+		sum, err = backend.Checksum(callCtx, node.RelPath)
+		cancel()
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if leftErr != nil || rightErr != nil {
-		node.Compare.Checksum = AttrUnknown
-		return
-	}
-	if node.Left == nil || node.Right == nil {
-		node.Compare.Checksum = AttrNA
-		return
-	}
-	node.LeftChecksum = leftSum
-	node.RightChecksum = rightSum
-	if leftSum == rightSum {
-		node.Compare.Checksum = AttrEqual
+	if isLeft {
+		if entry == nil {
+			// nothing to do
+		} else if err != nil {
+			node.LeftChecksumErr = true
+		} else {
+			node.LeftChecksum = sum
+		}
+		node.LeftChecksumDone = true
 	} else {
+		if entry == nil {
+			// nothing to do
+		} else if err != nil {
+			node.RightChecksumErr = true
+		} else {
+			node.RightChecksum = sum
+		}
+		node.RightChecksumDone = true
+	}
+	if !node.LeftChecksumDone || !node.RightChecksumDone {
+		return false
+	}
+	switch {
+	case node.LeftChecksumErr || node.RightChecksumErr:
+		node.Compare.Checksum = AttrUnknown
+	case node.Left == nil || node.Right == nil:
+		node.Compare.Checksum = AttrNA
+	case node.LeftChecksum == node.RightChecksum:
+		node.Compare.Checksum = AttrEqual
+	default:
 		node.Compare.Checksum = AttrDifferent
 	}
+	if node.ChecksumCountedDone {
+		return false
+	}
+	node.ChecksumCountedDone = true
+	return true
 }
 
 func (s *Scanner) setProgress(p ScanProgress) {
@@ -885,6 +950,39 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 		}
 	}
 	return left, right
+}
+
+type checksumGroup struct {
+	dir   *TreeNode
+	files []*TreeNode
+}
+
+// groupFilesByTopLevel splits all PresenceBoth files under root into groups,
+// one per top-level child dir (plus one with dir=nil for files directly under
+// root). The scanner processes each group independently so the rsync MD4
+// daemon call is scoped per top-level dir rather than fired once on the whole
+// base — which on big trees can take days for a single call.
+func groupFilesByTopLevel(root *TreeNode) []checksumGroup {
+	var groups []checksumGroup
+	var rootFiles []*TreeNode
+	for _, child := range root.Children {
+		if child.IsAttr {
+			continue
+		}
+		if !child.IsDir {
+			if child.Compare.Presence == PresenceBoth {
+				rootFiles = append(rootFiles, child)
+			}
+			continue
+		}
+		var files []*TreeNode
+		collectFiles(child, &files)
+		groups = append(groups, checksumGroup{dir: child, files: files})
+	}
+	if len(rootFiles) > 0 {
+		groups = append([]checksumGroup{{dir: nil, files: rootFiles}}, groups...)
+	}
+	return groups
 }
 
 func collectFiles(node *TreeNode, files *[]*TreeNode) {

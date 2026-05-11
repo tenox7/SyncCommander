@@ -58,9 +58,18 @@ type TreeNode struct {
 	Parent          *TreeNode
 	Compare         CompareResult
 	Children        []*TreeNode
-	Expanded        bool
-	Listed          bool
-	SubtreePending  bool
+	Expanded             bool
+	Listed               bool
+	SubtreePending       bool
+	ChecksumPendingLeft  bool
+	ChecksumPendingRight bool
+	ChecksumActiveLeft   bool
+	ChecksumActiveRight  bool
+	LeftChecksumDone     bool
+	RightChecksumDone    bool
+	LeftChecksumErr      bool
+	RightChecksumErr     bool
+	ChecksumCountedDone  bool
 	Depth           int
 	ChildStatus     AttrStatus
 	LeftChecksum    string

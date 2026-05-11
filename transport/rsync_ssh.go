@@ -150,11 +150,14 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 		remotePath += "/"
 	}
 
-	args := []string{"-c"}
+	// -n (--dry-run): sender computes and ships checksums in the filelist
+	// even when no data is transferred. Without it rsync downloads each
+	// file body just to discard it.
+	args := []string{"-c", "-n"}
 	if recursive {
 		args = append(args, "-r")
 	}
-	client, err := rsyncclient.New(args, rsyncclient.WithStderr(io.Discard), rsyncclient.DontRestrict())
+	client, err := rsyncclient.New(args, rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(io.Discard), rsyncclient.DontRestrict())
 	if err != nil {
 		return nil, err
 	}
