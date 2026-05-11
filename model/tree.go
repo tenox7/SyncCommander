@@ -129,6 +129,68 @@ func NewRootNode() *TreeNode {
 	return &TreeNode{Name: "/", IsDir: true, Expanded: true, Listed: true}
 }
 
+// mergeChildrenPreserving merges fresh entries into parent's children while
+// reusing existing TreeNodes (by name+isDir). Existing nodes keep their
+// Children/Listed/Expanded; new entries are added, missing ones dropped.
+// Used to refresh a single directory level without wiping nested state.
+func mergeChildrenPreserving(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
+	keyFor := func(name string, isDir bool) string {
+		if isDir {
+			return name + "/"
+		}
+		return name
+	}
+	existing := make(map[string]*TreeNode, len(parent.Children))
+	for _, c := range parent.Children {
+		existing[keyFor(c.Name, c.IsDir)] = c
+	}
+	byKey := make(map[string]*TreeNode)
+	pick := func(name string, isDir bool, relPath string) *TreeNode {
+		k := keyFor(name, isDir)
+		if n, ok := byKey[k]; ok {
+			return n
+		}
+		if old, ok := existing[k]; ok {
+			old.Left = nil
+			old.Right = nil
+			byKey[k] = old
+			return old
+		}
+		n := &TreeNode{
+			RelPath: relPath,
+			Name:    name,
+			IsDir:   isDir,
+			Depth:   depth,
+			Parent:  parent,
+		}
+		byKey[k] = n
+		return n
+	}
+	for i := range leftEntries {
+		e := &leftEntries[i]
+		n := pick(e.Name, e.IsDir, e.RelPath)
+		n.Left = e
+	}
+	for i := range rightEntries {
+		e := &rightEntries[i]
+		n := pick(e.Name, e.IsDir, e.RelPath)
+		n.Right = e
+	}
+	nodes := make([]*TreeNode, 0, len(byKey))
+	for _, n := range byKey {
+		compareNode(n, subSecond, timeGrace, ignoreTZDST)
+		nodes = append(nodes, n)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		a, b := nodes[i], nodes[j]
+		if a.IsDir != b.IsDir {
+			return a.IsDir
+		}
+		return a.Name < b.Name
+	})
+	return nodes
+}
+
 func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
 	keyFor := func(name string, isDir bool) string {
 		if isDir {

@@ -370,21 +370,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node != nil && node.IsAttr {
 			break
 		}
-		if node != nil {
-			m.scanning = true
-			return m, m.rescanNode(node)
-		}
-		return m, m.startScan()
+		m.scanning = true
+		return m, m.rescanWithTopLevel(node)
 	case "R":
-		node := m.activePanel().CursorNode()
-		if node != nil && node.IsAttr {
-			break
-		}
-		if node == nil {
+		tree := m.scanner.Tree()
+		if tree == nil {
 			break
 		}
 		m.scanning = true
-		return m, m.deepRescanNode(node)
+		return m, m.deepRescanNode(tree)
 	case "c":
 		if m.checksumming {
 			break
@@ -1571,6 +1565,25 @@ func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
 			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
+		})
+		return rescanDoneMsg{}
+	}
+}
+
+func (m *Model) rescanWithTopLevel(node *model.TreeNode) tea.Cmd {
+	checksum := m.cmpOpts.Checksum
+	subSecond := m.cmpOpts.SubSecond
+	timeGrace := m.cmpOpts.TimeGrace
+	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	scanner := m.scanner
+	target := scanTargetLabel(node)
+	rescanCursor := node != nil && node.RelPath != ""
+	return func() tea.Msg {
+		timeScan("rescan", target, func() {
+			if rescanCursor {
+				scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
+			}
+			scanner.RefreshTopLevel(context.Background(), subSecond, timeGrace, ignoreTZDST)
 		})
 		return rescanDoneMsg{}
 	}

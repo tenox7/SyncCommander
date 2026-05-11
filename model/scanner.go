@@ -266,6 +266,33 @@ func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, withChecks
 	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST)
 }
 
+// RefreshTopLevel re-lists root's immediate children without descending.
+// Reuses existing TreeNodes by (name, isDir) so already-listed subtrees keep
+// their Children/Listed/Expanded state; new entries are added, gone entries
+// dropped. Used by the "r" key so new top-level files appear regardless of
+// where the cursor sits.
+func (s *Scanner) RefreshTopLevel(ctx context.Context, subSecond, timeGrace, ignoreTZDST bool) {
+	root := s.Tree()
+	if root == nil {
+		return
+	}
+	setp := func(phase string) {
+		s.setProgress(ScanProgress{
+			Phase:       phase,
+			LeftActive:  phase != "done",
+			RightActive: phase != "done",
+		})
+	}
+	setp("scanning...")
+	leftEntries, rightEntries := s.listBoth(ctx, "")
+
+	s.mu.Lock()
+	root.Children = mergeChildrenPreserving(root, leftEntries, rightEntries, root.Depth+1, subSecond, timeGrace, ignoreTZDST)
+	root.Listed = true
+	s.mu.Unlock()
+	setp("done")
+}
+
 // ListNode lists a single directory's immediate children without descending.
 // Used by the lazy-expand-on-Enter UI path when a dir was left unlisted by an
 // initial shallow scan.
