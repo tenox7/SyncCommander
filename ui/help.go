@@ -28,6 +28,7 @@ var helpNavigation = []helpEntry{
 	{"Tab", "Switch panel"},
 	{"PgUp/Dn", "Page up / down"},
 	{"N", "Next difference"},
+	{"/", "Search (regex)"},
 	{"I", "Info / statistics"},
 	{"~", "Remote protocol log"},
 	{"=", "Settings"},

@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -747,6 +748,37 @@ func FindNextDiff(root, after *TreeNode, opts *CompareOpts) *TreeNode {
 			if isDiffLeaf(n, opts) {
 				return nil
 			}
+		}
+		if n.IsDir {
+			for _, child := range n.Children {
+				if r := visit(child); r != nil {
+					return r
+				}
+			}
+		}
+		return nil
+	}
+	return visit(root)
+}
+
+// FindByName walks the tree in DFS order starting after `after` and returns
+// the next non-attribute node whose Name matches re. Pass after=nil to start
+// from the beginning of the tree. The root node is excluded from matches.
+func FindByName(root, after *TreeNode, re *regexp.Regexp) *TreeNode {
+	if root == nil || re == nil {
+		return nil
+	}
+	started := after == nil
+	var visit func(n *TreeNode) *TreeNode
+	visit = func(n *TreeNode) *TreeNode {
+		if n.IsAttr {
+			return nil
+		}
+		if started && n != root && re.MatchString(n.Name) {
+			return n
+		}
+		if n == after {
+			started = true
 		}
 		if n.IsDir {
 			for _, child := range n.Children {

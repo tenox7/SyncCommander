@@ -5,11 +5,7 @@
 - select multiple files with tab or something and copy all at once
 - detect renames via CRC on and rename files (no rsync)
 - sort 
-- search with /
 
-- rsync ↔ non-local (sftp/ftp/scp): still uses tmp dir because rsync needs
-  a filesystem path and the non-local side has none. Could be avoided with
-  a FIFO bridge but rsync's renameio doesn't work on FIFOs.
 - support multiple concurrent remote connections (configurable)
   - use to run cocurrent dir listings in differerent subdirectories
   - concurrent file uploads

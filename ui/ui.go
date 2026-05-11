@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -349,6 +350,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
 			m.jumpToNextDiff()
 		}
+	case "/":
+		m.openSearch()
 	case "}":
 		tree := m.scanner.Tree()
 		if tree != nil {
@@ -1433,6 +1436,43 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace, ignoreTZDST)
 		return touchDoneMsg{}
 	}
+}
+
+func (m *Model) openSearch() {
+	m.input.Open("Search (regex):", "", func(query string) {
+		if query == "" {
+			return
+		}
+		re, err := regexp.Compile(query)
+		if err != nil {
+			return
+		}
+		m.findAndJump(re)
+	})
+}
+
+func (m *Model) findAndJump(re *regexp.Regexp) {
+	tree := m.scanner.Tree()
+	if tree == nil {
+		return
+	}
+	target := model.FindByName(tree, nil, re)
+	if target == nil {
+		return
+	}
+	for n := target.Parent; n != nil; n = n.Parent {
+		n.Expanded = true
+	}
+	m.refreshTree()
+	p := m.activePanel()
+	for i, n := range p.nodes {
+		if n == target {
+			p.cursor = i
+			p.clampOffset()
+			break
+		}
+	}
+	m.syncPanels()
 }
 
 func (m *Model) jumpToNextDiff() {
