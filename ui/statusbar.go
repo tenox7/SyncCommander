@@ -107,6 +107,7 @@ func RenderCopyPopup(file string, leftToRight bool,
 	fileBytes, fileSize, fileBaseBytes int64,
 	bytesCopied, totalBytes, baseBytes int64,
 	fileElapsed, totalElapsed time.Duration,
+	progressSpinner string,
 	width int) string {
 	arrow := ">"
 	if !leftToRight {
@@ -151,14 +152,22 @@ func RenderCopyPopup(file string, leftToRight bool,
 		totalRate = float64(totalRealBytes) / totalElapsed.Seconds()
 	}
 
+	progressMark := progressSpinner
+	if progressMark == "" {
+		progressMark = "·"
+	}
+	nameW := inner - lipgloss.Width(progressMark) - 1
+	if nameW < 5 {
+		nameW = 5
+	}
 	name := file
 	if name == "" {
 		name = "—"
 	}
-	if lipgloss.Width(name) > inner {
+	if lipgloss.Width(name) > nameW {
 		name = path.Base(name)
-		if lipgloss.Width(name) > inner {
-			name = ansi.Truncate(name, inner, "…")
+		if lipgloss.Width(name) > nameW {
+			name = ansi.Truncate(name, nameW, "…")
 		}
 	}
 
@@ -170,7 +179,7 @@ func RenderCopyPopup(file string, leftToRight bool,
 	}
 
 	line1 := fmt.Sprintf("COPY  %d/%d files", doneFiles, totalFiles)
-	line2 := name
+	line2 := progressMark + " " + name
 	line3 := fmt.Sprintf("File:  %s/%s  %s  ETA %s",
 		model.FormatSize(fileBytes), model.FormatSize(fileSize),
 		formatRateOrDash(fileRate), formatETA(fileSize-fileBytes, fileRate))

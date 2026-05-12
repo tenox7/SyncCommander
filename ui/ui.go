@@ -93,6 +93,8 @@ type Model struct {
 	width          int
 	height         int
 	spinFrame      int
+	copySpinFrame  int
+	lastCopyBytes  int64
 	settings       *SettingsDialog
 	input          *InputDialog
 	confirm        *ConfirmDialog
@@ -170,6 +172,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tickMsg:
 		m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
+		if m.copying {
+			cur := m.copyProgress.Bytes.Load()
+			if cur != m.lastCopyBytes {
+				m.copySpinFrame = (m.copySpinFrame + 1) % len(spinnerFrames)
+				m.lastCopyBytes = cur
+			}
+		} else {
+			m.lastCopyBytes = 0
+		}
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
 			m.settings.UpdateChecksumLabel(algo)
 		}
@@ -1870,7 +1881,8 @@ func (m Model) View() string {
 		if fStart := m.copyProgress.FileStart.Load(); fStart > 0 {
 			fileElapsed = time.Since(time.Unix(0, fStart))
 		}
-		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, popupW)
+		progressSpinner := spinnerFrames[m.copySpinFrame]
+		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {
