@@ -368,7 +368,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		details = fmt.Sprintf("DELETE: %d/%d items", info.FilesDone, info.FilesTotal)
 	case "IDLE":
 		if info.DirsListed > 0 || info.FilesScanned > 0 {
-			details = fmt.Sprintf("IDLE  Totals: %d dirs, %d files, %s", info.DirsListed, info.FilesScanned, formatSizeLong(info.TotalSize))
+			details = fmt.Sprintf("IDLE  Totals: %dd, %df, %s", info.DirsListed, info.FilesScanned, strings.ReplaceAll(formatSizeLong(info.TotalSize), " ", ""))
 		}
 	}
 
