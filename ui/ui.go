@@ -107,6 +107,7 @@ type Model struct {
 	openDlg        *OpenDialog
 	insecure       bool
 	deepScan       bool
+	tickActive     bool
 }
 
 func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool) Model {
@@ -133,6 +134,8 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		copyProgress:   &CopyProgress{},
 		deleteProgress: &DeleteProgress{},
 		insecure:       insecure,
+		scanning:       true,
+		tickActive:     true,
 	}
 	lp.cmpOpts = m.cmpOpts
 	rp.cmpOpts = m.cmpOpts
@@ -161,6 +164,14 @@ func (m Model) tickCmd() tea.Cmd {
 	})
 }
 
+func (m *Model) ensureTick() tea.Cmd {
+	if m.tickActive {
+		return nil
+	}
+	m.tickActive = true
+	return m.tickCmd()
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -171,6 +182,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layoutPanels()
 		return m, nil
 	case tickMsg:
+		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
+			m.tickActive = false
+			return m, nil
+		}
 		m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
 		if m.copying {
 			cur := m.copyProgress.Bytes.Load()
@@ -220,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTree()
 		if msg.rescanRoot != nil {
 			m.scanning = true
-			return m, m.rescanNode(msg.rescanRoot)
+			return m, tea.Batch(m.rescanNode(msg.rescanRoot), m.ensureTick())
 		}
 		return m, nil
 	case diffLoadDoneMsg:
@@ -340,7 +355,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node != nil && node.IsDir && !node.Listed && !m.scanning {
 			m.scanning = true
 			node.Expanded = true
-			return m, m.listNode(node)
+			return m, tea.Batch(m.listNode(node), m.ensureTick())
 		}
 		m.activePanel().Toggle()
 		m.refreshTree()
@@ -392,14 +407,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.scanning = true
-		return m, m.rescanWithTopLevel(node)
+		return m, tea.Batch(m.rescanWithTopLevel(node), m.ensureTick())
 	case "R":
 		tree := m.scanner.Tree()
 		if tree == nil {
 			break
 		}
 		m.scanning = true
-		return m, m.deepRescanNode(tree)
+		return m, tea.Batch(m.deepRescanNode(tree), m.ensureTick())
 	case "c":
 		if m.checksumming {
 			break
@@ -410,7 +425,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if node != nil {
 			m.checksumming = true
-			return m, m.checksumNode(node)
+			return m, tea.Batch(m.checksumNode(node), m.ensureTick())
 		}
 	case "e":
 		node := m.activePanel().CursorNode()
@@ -459,7 +474,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.copying = true
-		return m, m.copyNode(node, true, false)
+		return m, tea.Batch(m.copyNode(node, true, false), m.ensureTick())
 	case "<":
 		if m.copying {
 			break
@@ -489,7 +504,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.copying = true
-		return m, m.copyNode(node, false, false)
+		return m, tea.Batch(m.copyNode(node, false, false), m.ensureTick())
 	case "=":
 		m.settings.Open()
 	case "S", "s":
@@ -686,7 +701,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	m.rightPanel.title = m.right.BasePath()
 	m.leftPanel.SetNodes(nil)
 	m.rightPanel.SetNodes(nil)
-	return m.startScan(), ""
+	return tea.Batch(m.startScan(), m.ensureTick()), ""
 }
 
 func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -736,7 +751,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, m.deleteNode(node, side)
+			return m, tea.Batch(m.deleteNode(node, side), m.ensureTick())
 		}
 		return m, nil
 	}
@@ -748,13 +763,13 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, m.deleteNode(node, node.Compare.Presence)
+			return m, tea.Batch(m.deleteNode(node, node.Compare.Presence), m.ensureTick())
 		}
 		if m.pendingCopy != nil {
 			pc := m.pendingCopy
 			m.pendingCopy = nil
 			m.copying = true
-			return m, m.copyNode(pc.node, pc.leftToRight, true)
+			return m, tea.Batch(m.copyNode(pc.node, pc.leftToRight, true), m.ensureTick())
 		}
 	case "esc", "ctrl+c", "n", "N", "q":
 		m.confirm.Close()
