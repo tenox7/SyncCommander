@@ -128,11 +128,14 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted") {
+		return true
+	}
+	if strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such file") {
 		return true
 	}
 	return strings.Contains(msg, "not supported")
@@ -188,7 +191,7 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 			return ctx.Err()
 		}
 		if isPermanentError(err) {
-			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v (permanent error, not retrying)", what, err))
+			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v", what, err))
 			return err
 		}
 		if attempt == max {

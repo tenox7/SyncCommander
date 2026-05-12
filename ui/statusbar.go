@@ -390,7 +390,8 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	}
 	gap := inner - leftW - rightW
 	if gap < 1 {
-		gap = 1
+		content := ansi.Truncate(left+counters, inner, "")
+		return styleBar.Width(width).Render(content)
 	}
 	content := left + counters + strings.Repeat(" ", gap) + right
 	return styleBar.Width(width).Render(content)
