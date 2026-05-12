@@ -72,7 +72,7 @@ func (b *RsyncSSHBackend) Close() error           { return b.client.Close() }
 func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
-	out, err := b.sshRun(cmd)
+	out, err := b.sshRunCtx(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string,
 		return sum, nil
 	}
 	cmd := fmt.Sprintf("%s %s", b.cksumCmds[b.cksumAlgo], shellQuote(path.Join(b.base, relPath)))
-	out, err := b.sshRun(cmd)
+	out, err := b.sshRunCtx(ctx, cmd)
 	if err != nil {
 		return "", err
 	}
@@ -169,19 +169,23 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 	if err != nil {
 		return nil, err
 	}
+	stop := cancelCloser(ctx, session)
 
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
+		stop()
 		session.Close()
 		return nil, err
 	}
 
 	if err := session.Start(serverCmd); err != nil {
+		stop()
 		session.Close()
 		return nil, err
 	}
 
 	result, err := client.Run(ctx, rw, []string{tmpDir + "/"})
+	stop()
 	session.Close()
 	if err != nil {
 		return nil, err
@@ -244,40 +248,39 @@ func (b *RsyncSSHBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 }
 
-func (b *RsyncSSHBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {
+func (b *RsyncSSHBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	fp := shellQuote(path.Join(b.base, relPath))
 	cmd := fmt.Sprintf("touch -m -d @%d.%09d %s && touch -a -d @%d.%09d %s",
 		mtime.Unix(), mtime.Nanosecond(), fp,
 		atime.Unix(), atime.Nanosecond(), fp)
-	_, err := b.sshRun(cmd)
+	_, err := b.sshRunCtx(ctx, cmd)
 	return err
 }
 
-func (b *RsyncSSHBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+func (b *RsyncSSHBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
 	fullPath := path.Join(b.base, relPath)
 	cmd := fmt.Sprintf("mkdir -p %s", shellQuote(fullPath))
 	if mode != 0 {
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
-	Log.Add("rsync-ssh", ">>>", cmd)
-	_, err := b.sshRun(cmd)
+	_, err := b.sshRunCtx(ctx, cmd)
 	return err
 }
 
-func (b *RsyncSSHBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("mv %s %s",
+func (b *RsyncSSHBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),
 		shellQuote(path.Join(b.base, newRelPath))))
 	return err
 }
 
-func (b *RsyncSSHBackend) Remove(_ context.Context, relPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
+func (b *RsyncSSHBackend) Remove(ctx context.Context, relPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
 	return err
 }
 
-func (b *RsyncSSHBackend) RemoveAll(_ context.Context, relPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
+func (b *RsyncSSHBackend) RemoveAll(ctx context.Context, relPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
 	return err
 }
 
@@ -324,9 +327,11 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
+	sStop := cancelCloser(ctx, session)
 
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
+		sStop()
 		session.Close()
 		if stop != nil {
 			close(stop)
@@ -336,6 +341,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	}
 
 	if err := session.Start(serverCmd); err != nil {
+		sStop()
 		session.Close()
 		if stop != nil {
 			close(stop)
@@ -346,6 +352,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	}
 
 	_, err = client.Run(ctx, rw, []string{tmpDir + "/"})
+	sStop()
 	session.Close()
 	if stop != nil {
 		close(stop)
@@ -373,7 +380,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 // bypassing the per-call tmp dir.
 func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
 	remoteDest := path.Join(b.base, path.Dir(relPath))
-	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
+	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
 
 	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
@@ -387,18 +394,22 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 	if err != nil {
 		return err
 	}
+	stop := cancelCloser(ctx, session)
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
+		stop()
 		session.Close()
 		return err
 	}
 	if err := session.Start(serverCmd); err != nil {
+		stop()
 		session.Close()
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
 	}
 
 	_, err = client.Run(ctx, rw, []string{srcPath})
+	stop()
 	session.Close()
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
@@ -454,8 +465,10 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 		}
 		return err
 	}
+	sStop := cancelCloser(ctx, session)
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
+		sStop()
 		session.Close()
 		if stop != nil {
 			close(stop)
@@ -463,6 +476,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 		return err
 	}
 	if err := session.Start(serverCmd); err != nil {
+		sStop()
 		session.Close()
 		if stop != nil {
 			close(stop)
@@ -472,6 +486,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	}
 
 	_, err = client.Run(ctx, rw, []string{parent + "/"})
+	sStop()
 	session.Close()
 	if stop != nil {
 		close(stop)
@@ -492,15 +507,16 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	return nil
 }
 
-func (b *RsyncSSHBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
 	fullPath := path.Join(b.base, relPath)
-	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
+	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
 
 	session, err := b.client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	session.Stdin = src
 	cmd := fmt.Sprintf("truncate -s %d %s && cat >> %s && chmod %04o %s",
 		offset, shellQuote(fullPath),
@@ -510,7 +526,7 @@ func (b *RsyncSSHBackend) AppendFrom(_ context.Context, relPath string, src io.R
 	return session.Run(cmd)
 }
 
-func (b *RsyncSSHBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	session, err := b.client.NewSession()
 	if err != nil {
 		return nil, err
@@ -526,7 +542,8 @@ func (b *RsyncSSHBackend) OpenAt(_ context.Context, relPath string, offset int64
 		session.Close()
 		return nil, err
 	}
-	return &sshReadCloser{session: session, Reader: rd}, nil
+	stop := cancelCloser(ctx, session)
+	return &sshReadCloser{session: session, Reader: rd, stop: stop}, nil
 }
 
 func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
@@ -560,7 +577,7 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	f.Close()
 
 	remoteDest := path.Join(b.base, path.Dir(relPath))
-	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
+	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
 
 	client, err := rsyncclient.New(rsyncFlagsForCtx(ctx), rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
 	if err != nil {
@@ -574,14 +591,17 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	if err != nil {
 		return err
 	}
+	stop := cancelCloser(ctx, session)
 
 	rw, err := b.sessionReadWriter(session)
 	if err != nil {
+		stop()
 		session.Close()
 		return err
 	}
 
 	if err := session.Start(serverCmd); err != nil {
+		stop()
 		session.Close()
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
@@ -591,6 +611,7 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 		rw = &CountingReadWriter{RW: rw, Adder: NewCappedAdder(counter, pushBudget)}
 	}
 	_, err = client.Run(ctx, rw, []string{tmpFile})
+	stop()
 	session.Close()
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
@@ -631,6 +652,10 @@ func (s *sessionRW) Write(p []byte) (int, error) { return s.w.Write(p) }
 func (s *sessionRW) Close() error                { return s.session.Close() }
 
 func (b *RsyncSSHBackend) sshRun(cmd string) (string, error) {
+	return b.sshRunCtx(nil, cmd)
+}
+
+func (b *RsyncSSHBackend) sshRunCtx(ctx context.Context, cmd string) (string, error) {
 	Log.Add("rsync+ssh", ">>>", cmd)
 	session, err := b.client.NewSession()
 	if err != nil {
@@ -638,6 +663,7 @@ func (b *RsyncSSHBackend) sshRun(cmd string) (string, error) {
 		return "", err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr

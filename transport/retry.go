@@ -4,11 +4,87 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"strings"
 	"sync/atomic"
 	"time"
 )
+
+// cancelCloser starts a watcher that closes c when ctx is canceled. The
+// returned stop func cancels the watcher; call it on normal completion
+// (e.g. via defer) so the goroutine doesn't leak after the close. Closing
+// the destination handle is what actually unblocks an in-flight Write on
+// SFTP/SSH backends — ctx cancellation alone does not.
+func cancelCloser(ctx context.Context, c io.Closer) func() {
+	if ctx == nil || c == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
+// WithStallGuard runs op against a child of parent. If counter does not
+// advance for idle, the child ctx is canceled — unblocking whatever op is
+// waiting on. Parent cancellation propagates normally. If the stall fires
+// while parent is still healthy, op's err is normalized to ErrStall so
+// Retry treats it as retryable (rather than as a parent-ctx cancel which
+// would abort retries). idle <= 0 disables the guard.
+func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Duration, op func(context.Context) error) error {
+	if counter == nil || idle <= 0 {
+		return op(parent)
+	}
+	attemptCtx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	var stalled atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		last := counter.Load()
+		lastChange := time.Now()
+		tickInterval := idle / 4
+		if tickInterval < time.Second {
+			tickInterval = time.Second
+		}
+		t := time.NewTicker(tickInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-attemptCtx.Done():
+				return
+			case now := <-t.C:
+				cur := counter.Load()
+				if cur != last {
+					last = cur
+					lastChange = now
+					continue
+				}
+				if now.Sub(lastChange) >= idle {
+					stalled.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	err := op(attemptCtx)
+	cancel()
+	<-done
+
+	if stalled.Load() && parent.Err() == nil {
+		return ErrStall
+	}
+	return err
+}
 
 var maxRetries int32 = 5
 
@@ -22,6 +98,24 @@ func SetMaxRetries(n int) {
 func MaxRetries() int {
 	return int(atomic.LoadInt32(&maxRetries))
 }
+
+// stallTimeoutSec is the per-file idle window in seconds. If progress
+// bytes do not advance for this long, the current attempt is canceled
+// and (if invoked under Retry) retried. 0 disables stall detection.
+var stallTimeoutSec int64 = 60
+
+func SetStallTimeout(d time.Duration) {
+	atomic.StoreInt64(&stallTimeoutSec, int64(d/time.Second))
+}
+
+func StallTimeout() time.Duration {
+	return time.Duration(atomic.LoadInt64(&stallTimeoutSec)) * time.Second
+}
+
+// ErrStall is returned by WithStallGuard when no progress was observed for
+// the idle window. Retry treats it as a retryable failure (not permanent,
+// not a parent-ctx cancel).
+var ErrStall = errors.New("transfer stalled")
 
 func pluralRetries(n int) string {
 	if n == 1 {

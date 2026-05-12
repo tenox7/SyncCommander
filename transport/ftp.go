@@ -22,6 +22,7 @@ import (
 type FTPBackend struct {
 	base     string
 	conn     *ftp.ServerConn
+	rawConn  net.Conn
 	hasher   *ftpHasher
 	display  string
 	addr     string
@@ -44,9 +45,6 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 		pass = "sc@"
 	}
 
-	var opts []ftp.DialOption
-	opts = append(opts, ftp.DialWithTimeout(10*time.Second))
-
 	tlsCfg := &tls.Config{ServerName: host, InsecureSkipVerify: insecure}
 
 	switch scheme {
@@ -54,12 +52,10 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 		if port == "" {
 			port = "990"
 		}
-		opts = append(opts, ftp.DialWithTLS(tlsCfg))
 	case "ftpes":
 		if port == "" {
 			port = "21"
 		}
-		opts = append(opts, ftp.DialWithExplicitTLS(tlsCfg))
 	default:
 		if port == "" {
 			port = "21"
@@ -67,6 +63,32 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 	}
 
 	addr := host + ":" + port
+
+	// Capture the raw control conn at dial time so we can close it on
+	// cancellation. Also propagate Dialer.KeepAlive to both control and
+	// data conns (the library uses the same Dialer for data conns), so
+	// TCP-level keepalive detects dead peers even when sftp/scp wouldn't.
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var rawConn net.Conn
+	dialFunc := func(network, address string) (net.Conn, error) {
+		c, err := dialer.Dial(network, address)
+		if err == nil {
+			rawConn = c
+		}
+		return c, err
+	}
+	opts := []ftp.DialOption{
+		ftp.DialWithTimeout(10 * time.Second),
+		ftp.DialWithDialer(*dialer),
+		ftp.DialWithDialFunc(dialFunc),
+	}
+	switch scheme {
+	case "ftps":
+		opts = append(opts, ftp.DialWithTLS(tlsCfg))
+	case "ftpes":
+		opts = append(opts, ftp.DialWithExplicitTLS(tlsCfg))
+	}
+
 	conn, err := ftp.Dial(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("ftp dial %s: %v", addr, err)
@@ -102,6 +124,7 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 	return &FTPBackend{
 		base:     remotePath,
 		conn:     conn,
+		rawConn:  rawConn,
 		hasher:   hasher,
 		display:  fmt.Sprintf("%s://%s@%s%s", scheme, user, displayHost, remotePath),
 		addr:     addr,
@@ -113,6 +136,19 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 		port:     port,
 		tlsCfg:   tlsCfg,
 	}, nil
+}
+
+// abortOnCancel returns a stop func that, while running, closes the raw
+// control conn when ctx is canceled. Closing the underlying net.Conn
+// unblocks blocked Stor/Retr/List/etc by failing the next read/write on
+// the control conn. Data conns (which the library opens separately) get
+// TCP keepalive via the shared Dialer, so dead peers there are detected
+// at the OS level.
+func (b *FTPBackend) abortOnCancel(ctx context.Context) func() {
+	if ctx == nil || b.rawConn == nil {
+		return func() {}
+	}
+	return cancelCloser(ctx, b.rawConn)
 }
 
 func (b *FTPBackend) BasePath() string { return b.display }
@@ -132,7 +168,27 @@ func (b *FTPBackend) connAliveLocked() bool {
 
 func (b *FTPBackend) reconnectLocked() error {
 	b.conn.Quit()
-	conn, err := ftp.Dial(b.addr, b.dialOpts...)
+	b.rawConn = nil
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	dialFunc := func(network, address string) (net.Conn, error) {
+		c, err := dialer.Dial(network, address)
+		if err == nil {
+			b.rawConn = c
+		}
+		return c, err
+	}
+	opts := []ftp.DialOption{
+		ftp.DialWithTimeout(10 * time.Second),
+		ftp.DialWithDialer(*dialer),
+		ftp.DialWithDialFunc(dialFunc),
+	}
+	switch b.scheme {
+	case "ftps":
+		opts = append(opts, ftp.DialWithTLS(b.tlsCfg))
+	case "ftpes":
+		opts = append(opts, ftp.DialWithExplicitTLS(b.tlsCfg))
+	}
+	conn, err := ftp.Dial(b.addr, opts...)
 	if err != nil {
 		return err
 	}
@@ -142,6 +198,7 @@ func (b *FTPBackend) reconnectLocked() error {
 	}
 	conn.Type(ftp.TransferTypeBinary)
 	b.conn = conn
+	b.dialOpts = opts
 	if b.hasher != nil {
 		algo := b.hasher.algo
 		b.hasher.close()
@@ -157,6 +214,7 @@ func (b *FTPBackend) reconnectLocked() error {
 func (b *FTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	defer b.abortOnCancel(ctx)()
 	result, err := b.listDirLocked(ctx, relDir)
 	if err != nil && ctx.Err() == nil && !b.connAliveLocked() {
 		Log.Add("ftp", "ERR", "connection lost, reconnecting...")
@@ -254,9 +312,10 @@ func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ tim
 	return err
 }
 
-func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	defer b.abortOnCancel(ctx)()
 	Log.Add("ftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
 	b.mkdirAllLocked(path.Dir(fullPath))
@@ -267,9 +326,10 @@ func (b *FTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, 
 	return err
 }
 
-func (b *FTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, _ os.FileMode, offset int64) error {
+func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode, offset int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	defer b.abortOnCancel(ctx)()
 	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	b.mkdirAllLocked(path.Dir(fullPath))
@@ -342,7 +402,7 @@ func (b *FTPBackend) removeAllLocked(fullPath string) error {
 	return b.conn.RemoveDirRecur(fullPath)
 }
 
-func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+func (b *FTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	b.mu.Lock()
 	Log.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
@@ -351,10 +411,11 @@ func (b *FTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, err
 		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
-	return &lockedFTPReader{rc: resp, mu: &b.mu}, nil
+	stop := b.abortOnCancel(ctx)
+	return &lockedFTPReader{rc: resp, mu: &b.mu, stop: stop}, nil
 }
 
-func (b *FTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	b.mu.Lock()
 	Log.Add("ftp", ">>>", fmt.Sprintf("RETR %s @%d", relPath, offset))
 	resp, err := b.conn.RetrFrom(path.Join(b.base, relPath), uint64(offset))
@@ -363,7 +424,8 @@ func (b *FTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io
 		Log.Add("ftp", "ERR", err.Error())
 		return nil, err
 	}
-	return &lockedFTPReader{rc: resp, mu: &b.mu}, nil
+	stop := b.abortOnCancel(ctx)
+	return &lockedFTPReader{rc: resp, mu: &b.mu, stop: stop}, nil
 }
 
 func (b *FTPBackend) mkdirAllLocked(dir string) {
@@ -380,6 +442,7 @@ func (b *FTPBackend) mkdirAllLocked(dir string) {
 type lockedFTPReader struct {
 	rc     io.ReadCloser
 	mu     *sync.Mutex
+	stop   func()
 	closed bool
 }
 
@@ -392,6 +455,9 @@ func (r *lockedFTPReader) Close() error {
 		return nil
 	}
 	r.closed = true
+	if r.stop != nil {
+		r.stop()
+	}
 	err := r.rc.Close()
 	r.mu.Unlock()
 	return err

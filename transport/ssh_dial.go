@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,13 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
+
+// sshKeepaliveInterval is how often we send keepalive@openssh.com global
+// requests. Mirrors OpenSSH's ServerAliveInterval. If the request times out
+// or errors, the underlying client is closed so any in-flight read/write on
+// it (e.g. an SFTP write) unblocks with an error.
+const sshKeepaliveInterval = 30 * time.Second
+const sshKeepaliveTimeout = 15 * time.Second
 
 func parseRemoteURL(rawURL string) (scheme, user, pass, host, port, remotePath string) {
 	idx := strings.Index(rawURL, "://")
@@ -130,15 +138,24 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	}
 
 	addr := net.JoinHostPort(host, port)
-	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	rawConn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
+	}
+	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
 	}
+	c, chans, reqs, err := ssh.NewClientConn(rawConn, addr, cfg)
+	if err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("ssh handshake %s: %v", addr, err)
+	}
+	client := ssh.NewClient(c, chans, reqs)
+	go sshKeepalive(client, scheme)
 
 	return &sshConn{
 		client:   client,
@@ -148,6 +165,45 @@ func dialSSH(rawURL string) (*sshConn, error) {
 		port:     port,
 		basePath: remotePath,
 	}, nil
+}
+
+// sshKeepalive sends keepalive@openssh.com global requests on an interval.
+// Closes the client if a request errors or times out, so any blocked
+// session/SFTP write unblocks with an error.
+func sshKeepalive(client *ssh.Client, proto string) {
+	t := time.NewTicker(sshKeepaliveInterval)
+	defer t.Stop()
+	done := make(chan struct{})
+	go func() {
+		_ = client.Wait()
+		close(done)
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			errCh := make(chan error, 1)
+			go func() {
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				errCh <- err
+			}()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					Log.Add(proto, "ERR", "ssh keepalive: "+err.Error()+" — closing connection")
+					client.Close()
+					return
+				}
+			case <-time.After(sshKeepaliveTimeout):
+				Log.Add(proto, "ERR", "ssh keepalive timeout — closing connection")
+				client.Close()
+				return
+			case <-done:
+				return
+			}
+		}
+	}
 }
 
 func sshDisplayURL(conn *sshConn, remotePath string) string {
@@ -190,6 +246,10 @@ func probeSSHChecksums(run func(string) (string, error)) (algos []string, cmds m
 }
 
 func runSSHCmd(client interface{ NewSession() (*ssh.Session, error) }, proto, cmd string) (string, error) {
+	return runSSHCmdCtx(nil, client, proto, cmd)
+}
+
+func runSSHCmdCtx(ctx context.Context, client interface{ NewSession() (*ssh.Session, error) }, proto, cmd string) (string, error) {
 	Log.Add(proto, ">>>", cmd)
 	session, err := client.NewSession()
 	if err != nil {
@@ -197,6 +257,7 @@ func runSSHCmd(client interface{ NewSession() (*ssh.Session, error) }, proto, cm
 		return "", err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	var stdout bytes.Buffer
 	session.Stdout = &stdout
 	if err := session.Run(cmd); err != nil {

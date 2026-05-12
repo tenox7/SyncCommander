@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -155,7 +156,10 @@ func RenderCopyPopup(file string, leftToRight bool,
 		name = "—"
 	}
 	if lipgloss.Width(name) > inner {
-		name = ansi.Truncate(name, inner, "…")
+		name = path.Base(name)
+		if lipgloss.Width(name) > inner {
+			name = ansi.Truncate(name, inner, "…")
+		}
 	}
 
 	barIndent := "  " + arrow + " "

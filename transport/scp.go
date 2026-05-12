@@ -58,7 +58,7 @@ func (b *SCPBackend) Close() error { return b.client.Close() }
 func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
-	out, err := b.sshRun(cmd)
+	out, err := b.sshRunCtx(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -80,12 +80,12 @@ func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry
 	return result, nil
 }
 
-func (b *SCPBackend) Checksum(_ context.Context, relPath string) (string, error) {
+func (b *SCPBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	if b.cksumAlgo == "" {
 		return "", fmt.Errorf("no checksum algorithm configured")
 	}
 	cmd := fmt.Sprintf("%s %s", b.cksumCmds[b.cksumAlgo], shellQuote(path.Join(b.base, relPath)))
-	out, err := b.sshRun(cmd)
+	out, err := b.sshRunCtx(ctx, cmd)
 	if err != nil {
 		return "", err
 	}
@@ -118,38 +118,40 @@ func (b *SCPBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
 }
 
-func (b *SCPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {
+func (b *SCPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	fp := shellQuote(path.Join(b.base, relPath))
 	cmd := fmt.Sprintf("touch -m -d @%d.%09d %s && touch -a -d @%d.%09d %s",
 		mtime.Unix(), mtime.Nanosecond(), fp,
 		atime.Unix(), atime.Nanosecond(), fp)
-	_, err := b.sshRun(cmd)
+	_, err := b.sshRunCtx(ctx, cmd)
 	return err
 }
 
-func (b *SCPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	fullPath := path.Join(b.base, relPath)
-	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
+	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
 
 	session, err := b.client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	session.Stdin = src
 	return session.Run(fmt.Sprintf("cat > %s && chmod %04o %s",
 		shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)))
 }
 
-func (b *SCPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
 	fullPath := path.Join(b.base, relPath)
-	b.sshRun(fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
+	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
 
 	session, err := b.client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	session.Stdin = src
 	cmd := fmt.Sprintf("truncate -s %d %s && cat >> %s && chmod %04o %s",
 		offset, shellQuote(fullPath),
@@ -159,7 +161,7 @@ func (b *SCPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader
 	return session.Run(cmd)
 }
 
-func (b *SCPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+func (b *SCPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	session, err := b.client.NewSession()
 	if err != nil {
 		return nil, err
@@ -175,38 +177,38 @@ func (b *SCPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io
 		session.Close()
 		return nil, err
 	}
-	return &sshReadCloser{session: session, Reader: rd}, nil
+	stop := cancelCloser(ctx, session)
+	return &sshReadCloser{session: session, Reader: rd, stop: stop}, nil
 }
 
-func (b *SCPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+func (b *SCPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
 	fullPath := path.Join(b.base, relPath)
 	cmd := fmt.Sprintf("mkdir -p %s", shellQuote(fullPath))
 	if mode != 0 {
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
-	Log.Add("scp", ">>>", cmd)
-	_, err := b.sshRun(cmd)
+	_, err := b.sshRunCtx(ctx, cmd)
 	return err
 }
 
-func (b *SCPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("mv %s %s",
+func (b *SCPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),
 		shellQuote(path.Join(b.base, newRelPath))))
 	return err
 }
 
-func (b *SCPBackend) Remove(_ context.Context, relPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
+func (b *SCPBackend) Remove(ctx context.Context, relPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
 	return err
 }
 
-func (b *SCPBackend) RemoveAll(_ context.Context, relPath string) error {
-	_, err := b.sshRun(fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
+func (b *SCPBackend) RemoveAll(ctx context.Context, relPath string) error {
+	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
 	return err
 }
 
-func (b *SCPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+func (b *SCPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	session, err := b.client.NewSession()
 	if err != nil {
 		return nil, err
@@ -220,10 +222,15 @@ func (b *SCPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, err
 		session.Close()
 		return nil, err
 	}
-	return &sshReadCloser{session: session, Reader: rd}, nil
+	stop := cancelCloser(ctx, session)
+	return &sshReadCloser{session: session, Reader: rd, stop: stop}, nil
 }
 
 func (b *SCPBackend) sshRun(cmd string) (string, error) {
+	return b.sshRunCtx(nil, cmd)
+}
+
+func (b *SCPBackend) sshRunCtx(ctx context.Context, cmd string) (string, error) {
 	Log.Add("scp", ">>>", cmd)
 	session, err := b.client.NewSession()
 	if err != nil {
@@ -231,6 +238,7 @@ func (b *SCPBackend) sshRun(cmd string) (string, error) {
 		return "", err
 	}
 	defer session.Close()
+	defer cancelCloser(ctx, session)()
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr
@@ -253,9 +261,13 @@ func (b *SCPBackend) sshRun(cmd string) (string, error) {
 type sshReadCloser struct {
 	session *ssh.Session
 	io.Reader
+	stop func()
 }
 
 func (r *sshReadCloser) Close() error {
+	if r.stop != nil {
+		r.stop()
+	}
 	return r.session.Close()
 }
 

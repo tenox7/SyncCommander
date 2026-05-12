@@ -98,12 +98,12 @@ func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntr
 	return result, nil
 }
 
-func (b *SFTPBackend) Checksum(_ context.Context, relPath string) (string, error) {
+func (b *SFTPBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	if b.cksumAlgo == "" {
 		return "", fmt.Errorf("no checksum algorithm configured")
 	}
 	cmd := fmt.Sprintf("%s %s", b.cksumCmds[b.cksumAlgo], shellQuote(path.Join(b.base, relPath)))
-	out, err := runSSHCmd(b.sshClient, "sftp", cmd)
+	out, err := runSSHCmdCtx(ctx, b.sshClient, "sftp", cmd)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +144,7 @@ func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, 
 	return err
 }
 
-func (b *SFTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	Log.Add("sftp", ">>>", "STOR "+relPath)
 	fullPath := path.Join(b.base, relPath)
 	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
@@ -157,6 +157,7 @@ func (b *SFTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader,
 		return err
 	}
 	defer f.Close()
+	defer cancelCloser(ctx, f)()
 	if _, err := io.Copy(f, src); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
@@ -168,7 +169,7 @@ func (b *SFTPBackend) CopyFrom(_ context.Context, relPath string, src io.Reader,
 	return nil
 }
 
-func (b *SFTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
 	Log.Add("sftp", ">>>", fmt.Sprintf("APPEND %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
@@ -181,6 +182,7 @@ func (b *SFTPBackend) AppendFrom(_ context.Context, relPath string, src io.Reade
 		return err
 	}
 	defer f.Close()
+	defer cancelCloser(ctx, f)()
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err

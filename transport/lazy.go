@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +12,35 @@ import (
 
 	"sc/model"
 )
+
+// isConnLost reports whether err looks like the underlying network/SSH
+// connection has been torn down — the kind of error that survives across
+// retry attempts unless we redial. Matching is substring-based because
+// the SSH/SFTP/net stack wraps these in heterogeneous ways. Bare io.EOF
+// is excluded since it's the normal end-of-stream signal from readers.
+func isConnLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	msg := err.Error()
+	for _, sub := range []string{
+		"use of closed network connection",
+		"connection lost",
+		"broken pipe",
+		"connection reset",
+		"ssh: connection",
+		"ssh: handshake",
+		"ssh: disconnect",
+	} {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrResumeUnsupported is returned by lazyBackend.AppendFrom/OpenAt when the
 // underlying backend does not implement the corresponding optional interface.
@@ -54,6 +84,25 @@ func (b *lazyBackend) ensureConnected() (model.Backend, error) {
 	return inner, nil
 }
 
+// markBrokenIf inspects err and, if it indicates the connection has died,
+// drops the cached backend so the next ensureConnected() redials. Safe to
+// call from any goroutine. Returns err unchanged.
+func (b *lazyBackend) markBrokenIf(err error) error {
+	if !isConnLost(err) {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inner != nil {
+		Log.Add(b.proto, "ERR", "connection lost — will reconnect on next op: "+err.Error())
+		if c, ok := b.inner.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		b.inner = nil
+	}
+	return err
+}
+
 func (b *lazyBackend) BasePath() string {
 	b.mu.Lock()
 	inner := b.inner
@@ -65,32 +114,34 @@ func (b *lazyBackend) BasePath() string {
 }
 
 func (b *lazyBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return nil, err
-	}
 	return RetryVal(ctx, b.proto, "list "+relDir, func() ([]model.FileEntry, error) {
-		return inner.List(ctx, relDir)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return nil, err
+		}
+		entries, err := inner.List(ctx, relDir)
+		return entries, b.markBrokenIf(err)
 	})
 }
 
 func (b *lazyBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return "", err
-	}
 	return RetryVal(ctx, b.proto, "checksum "+relPath, func() (string, error) {
-		return inner.Checksum(ctx, relPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return "", err
+		}
+		s, err := inner.Checksum(ctx, relPath)
+		return s, b.markBrokenIf(err)
 	})
 }
 
 func (b *lazyBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
 	return Retry(ctx, b.proto, "settimes "+relPath, func() error {
-		return inner.SetTimes(ctx, relPath, mtime, atime, btime)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(inner.SetTimes(ctx, relPath, mtime, atime, btime))
 	})
 }
 
@@ -99,56 +150,57 @@ func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	if err != nil {
 		return err
 	}
-	return inner.CopyFrom(ctx, relPath, src, mode)
+	return b.markBrokenIf(inner.CopyFrom(ctx, relPath, src, mode))
 }
 
 func (b *lazyBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
 	return Retry(ctx, b.proto, "mkdir "+relPath, func() error {
-		return inner.Mkdir(ctx, relPath, mode)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(inner.Mkdir(ctx, relPath, mode))
 	})
 }
 
 func (b *lazyBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
 	return Retry(ctx, b.proto, "rename "+oldRelPath, func() error {
-		return inner.Rename(ctx, oldRelPath, newRelPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(inner.Rename(ctx, oldRelPath, newRelPath))
 	})
 }
 
 func (b *lazyBackend) Remove(ctx context.Context, relPath string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
 	return Retry(ctx, b.proto, "remove "+relPath, func() error {
-		return inner.Remove(ctx, relPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(inner.Remove(ctx, relPath))
 	})
 }
 
 func (b *lazyBackend) RemoveAll(ctx context.Context, relPath string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
 	return Retry(ctx, b.proto, "removeall "+relPath, func() error {
-		return inner.RemoveAll(ctx, relPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(inner.RemoveAll(ctx, relPath))
 	})
 }
 
 func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return nil, err
-	}
 	return RetryVal(ctx, b.proto, "open "+relPath, func() (io.ReadCloser, error) {
-		return inner.Open(ctx, relPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return nil, err
+		}
+		rc, err := inner.Open(ctx, relPath)
+		return rc, b.markBrokenIf(err)
 	})
 }
 
@@ -211,34 +263,35 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Rea
 	if !ok {
 		return ErrResumeUnsupported
 	}
-	return r.AppendFrom(ctx, relPath, src, mode, offset)
+	return b.markBrokenIf(r.AppendFrom(ctx, relPath, src, mode, offset))
 }
 
 func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return nil, err
-	}
-	o, ok := inner.(model.SeekableOpener)
-	if !ok {
-		return nil, ErrResumeUnsupported
-	}
 	return RetryVal(ctx, b.proto, "openat "+relPath, func() (io.ReadCloser, error) {
-		return o.OpenAt(ctx, relPath, offset)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return nil, err
+		}
+		o, ok := inner.(model.SeekableOpener)
+		if !ok {
+			return nil, ErrResumeUnsupported
+		}
+		rc, err := o.OpenAt(ctx, relPath, offset)
+		return rc, b.markBrokenIf(err)
 	})
 }
 
 func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	s, ok := inner.(model.LocalSender)
-	if !ok {
-		return ErrResumeUnsupported
-	}
 	return Retry(ctx, b.proto, "send "+relPath, func() error {
-		return s.SendLocalFile(ctx, srcPath, relPath, mode)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		s, ok := inner.(model.LocalSender)
+		if !ok {
+			return ErrResumeUnsupported
+		}
+		return b.markBrokenIf(s.SendLocalFile(ctx, srcPath, relPath, mode))
 	})
 }
 
@@ -255,15 +308,15 @@ func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error 
 }
 
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	r, ok := inner.(model.LocalReceiver)
-	if !ok {
-		return ErrResumeUnsupported
-	}
 	return Retry(ctx, b.proto, "recv "+relPath, func() error {
-		return r.RecvToLocalFile(ctx, relPath, dstPath)
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		r, ok := inner.(model.LocalReceiver)
+		if !ok {
+			return ErrResumeUnsupported
+		}
+		return b.markBrokenIf(r.RecvToLocalFile(ctx, relPath, dstPath))
 	})
 }

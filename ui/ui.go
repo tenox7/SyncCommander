@@ -224,6 +224,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		if c := m.copyProgress.Cancel.Swap(nil); c != nil {
+			c.f()
+		}
+		if c := m.deleteProgress.Cancel.Swap(nil); c != nil {
+			c.f()
+		}
+		m.scanner.Cancel()
+		return m, tea.Quit
+	}
 	if m.diffView.IsOpen() {
 		return m.handleDiffViewKey(msg)
 	}
@@ -1072,13 +1082,23 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				fileCtx = transport.ContextWithWholeFile(fileCtx)
 			}
 
-			if tryDirectTransfer(fileCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes) {
+			var directOK bool
+			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+				directOK = tryDirectTransfer(attemptCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
+				return nil
+			})
+			if directOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 				progress.Done.Add(1)
 				continue
 			}
 
-			if tryResumeCopy(fileCtx, src, dst, f.RelPath, srcEntry, dstEntry, progress) {
+			var resumeOK bool
+			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.RelPath, srcEntry, dstEntry, progress)
+				return nil
+			})
+			if resumeOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 				progress.Done.Add(1)
 				continue
@@ -1086,20 +1106,22 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 
 			attempt := 0
 			err := transport.Retry(fileCtx, "copy", "copy "+f.RelPath, func() error {
-				attempt++
-				if attempt > 1 {
-					offset := peekDstSize(fileCtx, dst, f.RelPath)
-					if offset > 0 && offset < srcEntry.Size {
-						err := resumeAttempt(fileCtx, src, dst, f.RelPath, srcEntry, offset, progress)
-						if err == nil {
-							return nil
-						}
-						if !errors.Is(err, transport.ErrResumeUnsupported) {
-							return err
+				return transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+					attempt++
+					if attempt > 1 {
+						offset := peekDstSize(attemptCtx, dst, f.RelPath)
+						if offset > 0 && offset < srcEntry.Size {
+							err := resumeAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, offset, progress)
+							if err == nil {
+								return nil
+							}
+							if !errors.Is(err, transport.ErrResumeUnsupported) {
+								return err
+							}
 						}
 					}
-				}
-				return fullCopyAttempt(fileCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
+					return fullCopyAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
+				})
 			})
 			if err == nil {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
