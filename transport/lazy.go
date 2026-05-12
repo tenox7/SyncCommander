@@ -267,6 +267,13 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Rea
 }
 
 func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := inner.(model.SeekableOpener); !ok {
+		return nil, ErrResumeUnsupported
+	}
 	return RetryVal(ctx, b.proto, "openat "+relPath, func() (io.ReadCloser, error) {
 		inner, err := b.ensureConnected()
 		if err != nil {
@@ -282,6 +289,13 @@ func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 }
 
 func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
+	}
+	if _, ok := inner.(model.LocalSender); !ok {
+		return ErrResumeUnsupported
+	}
 	return Retry(ctx, b.proto, "send "+relPath, func() error {
 		inner, err := b.ensureConnected()
 		if err != nil {
@@ -308,6 +322,13 @@ func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error 
 }
 
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
+	}
+	if _, ok := inner.(model.LocalReceiver); !ok {
+		return ErrResumeUnsupported
+	}
 	return Retry(ctx, b.proto, "recv "+relPath, func() error {
 		inner, err := b.ensureConnected()
 		if err != nil {
