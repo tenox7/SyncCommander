@@ -12,7 +12,6 @@
   - concurrent uploads within one file (subparts) if protocol supports
 
 - support remote move with relative and absolute paths, ask for path
-- export to csv/xls
 - color schemes
 - misc protocols
   - syncthing protocol
@@ -20,6 +19,8 @@
   - nfs
   - s3/gs with ETag
   - http scraping
-  - afero fs lib
+  - afero fs lib, etc
   - rclone protos
+  - restic protos, incl restic http server
+  - archive.org
 - goreleaser

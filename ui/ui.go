@@ -108,6 +108,7 @@ type Model struct {
 	insecure       bool
 	deepScan       bool
 	tickActive     bool
+	cachedStats    *TreeStats
 }
 
 func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool) Model {
@@ -1683,11 +1684,14 @@ func timeScan(op, target string, fn func()) {
 func (m *Model) refreshTree() {
 	tree := m.scanner.Tree()
 	if tree == nil {
+		m.cachedStats = nil
 		return
 	}
 	flat := model.FlattenTree(tree, m.cmpOpts)
 	m.leftPanel.SetNodes(flat)
 	m.rightPanel.SetNodes(flat)
+	s := computeTreeStats(tree)
+	m.cachedStats = &s
 }
 
 func (m *Model) swapSides() {
@@ -1771,36 +1775,18 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		info.DirsListed = progress.DirsListed
 		info.DirsTotal = progress.DirsTotal
 		info.FilesScanned = progress.TotalFiles
-		if tree := m.scanner.Tree(); tree != nil {
-			_, _, info.TotalSize = countTree(tree)
+		if m.cachedStats != nil {
+			info.TotalSize = m.cachedStats.TotalSize
 		}
 	default:
 		info.State = "IDLE"
-		if tree := m.scanner.Tree(); tree != nil {
-			info.DirsListed, info.FilesScanned, info.TotalSize = countTree(tree)
+		if m.cachedStats != nil {
+			info.DirsListed = m.cachedStats.TotalDirs
+			info.FilesScanned = m.cachedStats.TotalFiles
+			info.TotalSize = m.cachedStats.TotalSize
 		}
 	}
 	return info
-}
-
-func countTree(node *model.TreeNode) (dirs, files, size int64) {
-	for _, c := range node.Children {
-		if c.IsDir {
-			dirs++
-			d, f, s := countTree(c)
-			dirs += d
-			files += f
-			size += s
-			continue
-		}
-		files++
-		if c.Left != nil {
-			size += c.Left.Size
-		} else if c.Right != nil {
-			size += c.Right.Size
-		}
-	}
-	return
 }
 
 func (m *Model) layoutPanels() {
@@ -1820,7 +1806,6 @@ func (m Model) View() string {
 	}
 
 	progress := m.scanner.Progress()
-	tree := m.scanner.Tree()
 
 	spinner := ""
 	if (progress.Phase != "" && progress.Phase != "done") || m.scanning || m.deleting || m.copying || m.checksumming {
@@ -1833,11 +1818,7 @@ func (m Model) View() string {
 		operation = spinner + " checksumming..."
 	}
 
-	var stats *TreeStats
-	if tree != nil {
-		s := computeTreeStats(tree)
-		stats = &s
-	}
+	stats := m.cachedStats
 	leftPrefix := ""
 	rightPrefix := ""
 	if operation != "" {

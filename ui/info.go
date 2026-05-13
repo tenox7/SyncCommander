@@ -16,6 +16,9 @@ type TreeStats struct {
 	FilesEqual, FilesDiff int
 	FilesLeftOnly         int
 	FilesRightOnly        int
+	TotalDirs             int64
+	TotalFiles            int64
+	TotalSize             int64
 }
 
 func computeTreeStats(root *model.TreeNode) TreeStats {
@@ -45,8 +48,15 @@ func walkStats(node *model.TreeNode, s *TreeStats) {
 			}
 		}
 		if child.IsDir {
+			s.TotalDirs++
 			walkStats(child, s)
 			continue
+		}
+		s.TotalFiles++
+		if child.Left != nil {
+			s.TotalSize += child.Left.Size
+		} else if child.Right != nil {
+			s.TotalSize += child.Right.Size
 		}
 		switch child.Compare.Presence {
 		case model.PresenceBoth:
