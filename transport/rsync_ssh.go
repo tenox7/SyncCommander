@@ -386,10 +386,11 @@ func (b *RsyncSSHBackend) SetChecksumAlgo(algo string) {
 
 func (b *RsyncSSHBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	fp := shellQuote(path.Join(b.base, relPath))
-	cmd := fmt.Sprintf("touch -m -d @%d.%09d %s && touch -a -d @%d.%09d %s",
-		mtime.Unix(), mtime.Nanosecond(), fp,
-		atime.Unix(), atime.Nanosecond(), fp)
+	mt := shellQuote(mtime.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	at := shellQuote(atime.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	cmd := fmt.Sprintf("touch -m -d %s %s && touch -a -d %s %s", mt, fp, at, fp)
 	_, err := b.sshRunCtx(ctx, cmd)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
@@ -400,6 +401,7 @@ func (b *RsyncSSHBackend) Mkdir(ctx context.Context, relPath string, mode os.Fil
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
 	_, err := b.sshRunCtx(ctx, cmd)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
@@ -407,16 +409,22 @@ func (b *RsyncSSHBackend) Rename(ctx context.Context, oldRelPath, newRelPath str
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),
 		shellQuote(path.Join(b.base, newRelPath))))
+	b.listCache.invalidateTree(oldRelPath)
+	b.listCache.invalidate(parentDir(oldRelPath))
+	b.listCache.invalidate(parentDir(newRelPath))
 	return err
 }
 
 func (b *RsyncSSHBackend) Remove(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
 func (b *RsyncSSHBackend) RemoveAll(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
+	b.listCache.invalidateTree(relPath)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
@@ -659,7 +667,9 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src io
 		shellQuote(fullPath),
 		mode.Perm(), shellQuote(fullPath))
 	Log.Add("rsync+ssh", ">>>", cmd)
-	return session.Run(cmd)
+	err = session.Run(cmd)
+	b.listCache.invalidate(parentDir(relPath))
+	return err
 }
 
 func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
@@ -749,6 +759,7 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	_, err = client.Run(ctx, rw, []string{tmpFile})
 	stop()
 	session.Close()
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err

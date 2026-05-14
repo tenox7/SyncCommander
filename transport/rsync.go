@@ -103,6 +103,36 @@ func (c *rsyncListCache) finish() {
 	c.mu.Unlock()
 }
 
+func (c *rsyncListCache) invalidate(relDir string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.entries, relDir)
+	c.mu.Unlock()
+}
+
+func (c *rsyncListCache) invalidateTree(prefix string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.entries {
+		if k == prefix || strings.HasPrefix(k, prefix+"/") {
+			delete(c.entries, k)
+		}
+	}
+}
+
+func parentDir(relPath string) string {
+	p := path.Dir(relPath)
+	if p == "." {
+		return ""
+	}
+	return p
+}
+
 func (c *rsyncListCache) lookup(relDir string) (entries []model.FileEntry, hit, active, done bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -632,6 +662,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	args = append(args, srcPath, dest)
 	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err := b.rsyncRun(ctx, args...)
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 	}
@@ -726,6 +757,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	sendArgs = append(sendArgs, tmpFile, dest)
 	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, sendArgs...)
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 		return err
@@ -760,6 +792,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	args := []string{"-r", "-t", stageTop, dest}
 	Log.Add("rsync", ">>>", "MKDIR "+clean+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, args...)
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 	} else {
@@ -810,6 +843,10 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	}
 	Log.Add("rsync", ">>>", op+" "+clean)
 	_, err = b.rsyncRun(ctx, args...)
+	if recursive {
+		b.listCache.invalidateTree(relPath)
+	}
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("rsync", "ERR", op+" "+clean+": "+err.Error())
 		return err

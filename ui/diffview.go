@@ -123,8 +123,8 @@ func isTextContent(left, right []byte) bool {
 // --- text diff ---
 
 func (d *DiffView) buildTextDiff(leftData, rightData []byte) {
-	leftLines := splitLines(string(leftData))
-	rightLines := splitLines(string(rightData))
+	leftLines := splitLines(expandTabs(string(leftData)))
+	rightLines := splitLines(expandTabs(string(rightData)))
 
 	dmp := difflib.New()
 	a, b, lines := dmp.DiffLinesToChars(strings.Join(leftLines, "\n"), strings.Join(rightLines, "\n"))
@@ -207,6 +207,32 @@ func (d *DiffView) pairModifiedLines(delLines, insLines []string, leftNo, rightN
 		d.lines = append(d.lines, dl)
 		d.diffIdxs = append(d.diffIdxs, idx)
 	}
+}
+
+func expandTabs(s string) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s) + len(s)/8)
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\n':
+			sb.WriteRune(r)
+			col = 0
+		case '\t':
+			n := 8 - (col % 8)
+			for i := 0; i < n; i++ {
+				sb.WriteByte(' ')
+			}
+			col += n
+		default:
+			sb.WriteRune(r)
+			col++
+		}
+	}
+	return sb.String()
 }
 
 func splitLines(s string) []string {
@@ -420,17 +446,29 @@ func (d *DiffView) diffCount() int {
 // --- rendering ---
 
 var (
-	styleDiffAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styleDiffDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleDiffChg     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styleDiffLineNo  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleDiffTitle   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	styleDiffDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleDiffHexHL   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styleDiffMarkAdd = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	styleDiffMarkDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styleDiffMarkChg = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	styleDiffAdd    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	styleDiffDel    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleDiffChg    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styleDiffLineNo = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	styleDiffTitle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	styleDiffDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleDiffHexHL  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleRowMarkAdd = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Reverse(true)
+	styleRowMarkDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Reverse(true)
+	styleRowMarkChg = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Reverse(true)
 )
+
+func rowDiffMarker(kind diffLineKind) string {
+	switch kind {
+	case diffLineDeleted:
+		return styleRowMarkDel.Render(">")
+	case diffLineInserted:
+		return styleRowMarkAdd.Render(">")
+	case diffLineModified:
+		return styleRowMarkChg.Render(">")
+	}
+	return " "
+}
 
 func (d *DiffView) View(width, height int) string {
 	if !d.visible {
@@ -487,6 +525,7 @@ func (d *DiffView) viewText(width, height int) string {
 		line := d.lines[i]
 		leftPart := d.renderTextLine(line, true, gutterWidth, contentWidth)
 		rightPart := d.renderTextLine(line, false, gutterWidth, contentWidth)
+		sb.WriteString(rowDiffMarker(line.kind))
 		sb.WriteString(leftPart)
 		sb.WriteString(styleDiffDim.Render("│"))
 		sb.WriteString(rightPart)
@@ -517,7 +556,7 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 	}
 	availWidth := panelWidth
 	if isLeft {
-		availWidth-- // room for center divider
+		availWidth -= 2 // room for row marker + center divider
 	}
 
 	lineNo := line.leftLineNo
@@ -527,7 +566,6 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		text = line.rightText
 	}
 
-	// gutter
 	gutter := ""
 	if lineNo > 0 {
 		gutter = styleDiffLineNo.Render(fmt.Sprintf("%*d ", gutterWidth-1, lineNo))
@@ -535,42 +573,33 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		gutter = styleDiffDim.Render(strings.Repeat(" ", gutterWidth))
 	}
 
-	diffPrefix := " "
-	marker := " "
 	styledText := text
-
 	switch line.kind {
 	case diffLineEqual:
 		styledText = text
 	case diffLineDeleted:
 		if isLeft {
-			diffPrefix = styleDiffMarkDel.Render(">")
-			marker = styleDiffDel.Render("-")
 			styledText = styleDiffDel.Render(text)
 		} else {
 			styledText = ""
 		}
 	case diffLineInserted:
 		if !isLeft {
-			diffPrefix = styleDiffMarkAdd.Render(">")
-			marker = styleDiffAdd.Render("+")
 			styledText = styleDiffAdd.Render(text)
 		} else {
 			styledText = ""
 		}
 	case diffLineModified:
 		if isLeft && text != "" {
-			diffPrefix = styleDiffMarkChg.Render(">")
 			styledText = d.highlightCharDiff(line.leftText, line.rightText, true)
 		} else if !isLeft && text != "" {
-			diffPrefix = styleDiffMarkChg.Render(">")
 			styledText = d.highlightCharDiff(line.leftText, line.rightText, false)
 		} else {
 			styledText = ""
 		}
 	}
 
-	result := diffPrefix + gutter + marker + styledText
+	result := gutter + styledText
 	visLen := lipgloss.Width(result)
 	if visLen > availWidth {
 		result = ansi.Truncate(result, availWidth, "")
@@ -612,7 +641,7 @@ func (d *DiffView) viewHex(width, height int) string {
 	panelWidth := width / 2
 
 	// recompute rows if terminal width changed
-	bpr := hexBytesPerRow(panelWidth - 1) // -1 for center divider
+	bpr := hexBytesPerRow(panelWidth - 2) // -1 for row marker, -1 for center divider
 	if bpr != d.hexBPR {
 		d.rebuildHexRows(bpr)
 		d.navPos = -1
@@ -638,8 +667,16 @@ func (d *DiffView) viewHex(width, height int) string {
 
 	for i := d.offset; i < end; i++ {
 		row := d.hexRows[i]
-		leftPart := d.renderHexPanel(row, true, panelWidth-1, bpr)
+		leftPart := d.renderHexPanel(row, true, panelWidth-2, bpr)
 		rightPart := d.renderHexPanel(row, false, width-panelWidth, bpr)
+		marker := " "
+		for _, b := range row.diffs {
+			if b {
+				marker = styleRowMarkDel.Render(">")
+				break
+			}
+		}
+		sb.WriteString(marker)
 		sb.WriteString(leftPart)
 		sb.WriteString(styleDiffDim.Render("│"))
 		sb.WriteString(rightPart)

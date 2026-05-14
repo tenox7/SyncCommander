@@ -280,6 +280,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logView.Home()
 		case "end":
 			m.logView.End()
+		case "e":
+			m.logView.ToggleErrFilter()
 		}
 		return m, nil
 	}
@@ -1104,6 +1106,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			progress.File.Store(f.RelPath)
 			progress.BeginFile(srcEntry.Size)
+			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.RelPath, model.FormatSize(srcEntry.Size)))
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
 			if dstEntry == nil {
 				fileCtx = transport.ContextWithWholeFile(fileCtx)
@@ -1116,6 +1119,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if directOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
 				progress.Done.Add(1)
 				continue
 			}
@@ -1127,6 +1131,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if resumeOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK (resumed)")
 				progress.Done.Add(1)
 				continue
 			}
@@ -1152,6 +1157,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if err == nil {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
+			} else {
+				transport.Log.Add("copy", "ERR", "COPY "+f.RelPath+": "+err.Error())
 			}
 			progress.Done.Add(1)
 		}

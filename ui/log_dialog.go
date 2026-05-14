@@ -14,6 +14,7 @@ type LogDialog struct {
 	visible      bool
 	offset       int
 	follow       bool
+	errOnly      bool
 	width        int
 	height       int
 	lastSeenErrs int
@@ -25,6 +26,41 @@ func NewLogDialog() *LogDialog {
 }
 
 func (d *LogDialog) Open() { d.visible = true; d.follow = true }
+
+func (d *LogDialog) ToggleErrFilter() {
+	d.errOnly = !d.errOnly
+	d.offset = 0
+	d.follow = true
+}
+
+func isErrLogLine(line string) bool {
+	parts := strings.SplitN(line, " ", 4)
+	if len(parts) < 3 {
+		return false
+	}
+	return parts[2] == "ERR" || parts[2] == "FAIL"
+}
+
+func (d *LogDialog) filteredLines() []string {
+	lines := transport.Log.Lines()
+	if !d.errOnly {
+		return lines
+	}
+	out := lines[:0:0]
+	for _, l := range lines {
+		if isErrLogLine(l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func (d *LogDialog) filteredLen() int {
+	if !d.errOnly {
+		return transport.Log.Len()
+	}
+	return len(d.filteredLines())
+}
 func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()
@@ -61,7 +97,7 @@ func (d *LogDialog) ScrollUp() {
 }
 
 func (d *LogDialog) ScrollDown() {
-	lines := transport.Log.Len()
+	lines := d.filteredLen()
 	vh := d.viewHeight()
 	d.offset += vh / 2
 	max := lines - vh
@@ -83,7 +119,7 @@ func (d *LogDialog) PageUp() {
 }
 
 func (d *LogDialog) PageDown() {
-	lines := transport.Log.Len()
+	lines := d.filteredLen()
 	vh := d.viewHeight()
 	d.offset += vh
 	max := lines - vh
@@ -112,7 +148,7 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 	d.width = width
 	d.height = height
 
-	lines := transport.Log.Lines()
+	lines := d.filteredLines()
 	vh := d.viewHeight()
 	contentWidth := width - 6
 	if contentWidth < 20 {
@@ -134,7 +170,11 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 	if d.follow {
 		followMark = "▼"
 	}
-	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)", spinner, followMark, len(lines))))
+	filterTag := ""
+	if d.errOnly {
+		filterTag = "  [errors only]"
+	}
+	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", spinner, followMark, len(lines), filterTag)))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
@@ -157,7 +197,7 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  Esc=close"))
+	sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  Esc=close"))
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

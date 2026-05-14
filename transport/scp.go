@@ -267,10 +267,11 @@ func (b *SCPBackend) SetChecksumAlgo(algo string) {
 
 func (b *SCPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	fp := shellQuote(path.Join(b.base, relPath))
-	cmd := fmt.Sprintf("touch -m -d @%d.%09d %s && touch -a -d @%d.%09d %s",
-		mtime.Unix(), mtime.Nanosecond(), fp,
-		atime.Unix(), atime.Nanosecond(), fp)
+	mt := shellQuote(mtime.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	at := shellQuote(atime.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	cmd := fmt.Sprintf("touch -m -d %s %s && touch -a -d %s %s", mt, fp, at, fp)
 	_, err := b.sshRunCtx(ctx, cmd)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
@@ -285,8 +286,10 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	defer session.Close()
 	defer cancelCloser(ctx, session)()
 	session.Stdin = src
-	return session.Run(fmt.Sprintf("cat > %s && chmod %04o %s",
+	err = session.Run(fmt.Sprintf("cat > %s && chmod %04o %s",
 		shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)))
+	b.listCache.invalidate(parentDir(relPath))
+	return err
 }
 
 func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
@@ -305,7 +308,9 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src io.Read
 		shellQuote(fullPath),
 		mode.Perm(), shellQuote(fullPath))
 	Log.Add("scp", ">>>", cmd)
-	return session.Run(cmd)
+	err = session.Run(cmd)
+	b.listCache.invalidate(parentDir(relPath))
+	return err
 }
 
 func (b *SCPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
@@ -335,6 +340,7 @@ func (b *SCPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
 	_, err := b.sshRunCtx(ctx, cmd)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
@@ -342,16 +348,22 @@ func (b *SCPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) 
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("mv %s %s",
 		shellQuote(path.Join(b.base, oldRelPath)),
 		shellQuote(path.Join(b.base, newRelPath))))
+	b.listCache.invalidateTree(oldRelPath)
+	b.listCache.invalidate(parentDir(oldRelPath))
+	b.listCache.invalidate(parentDir(newRelPath))
 	return err
 }
 
 func (b *SCPBackend) Remove(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
 func (b *SCPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
+	b.listCache.invalidateTree(relPath)
+	b.listCache.invalidate(parentDir(relPath))
 	return err
 }
 
