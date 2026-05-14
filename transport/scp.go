@@ -117,8 +117,9 @@ func (b *SCPBackend) PreloadRecursive(ctx context.Context, scope string) error {
 }
 
 func (b *SCPBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
-	dir := shellQuote(path.Join(b.base, scope))
-	cmd := fmt.Sprintf("find %s -mindepth 1 -printf '%%P\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
+	absPrefix := path.Join(b.base, scope)
+	dir := shellQuote(absPrefix)
+	cmd := fmt.Sprintf("find %s -mindepth 1 -printf '%%p\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
 	Log.Add("scp", ">>>", "RLIST "+cmd)
 
 	session, err := b.client.NewSession()
@@ -146,6 +147,14 @@ func (b *SCPBackend) runRecursiveList(ctx context.Context, scope string, emit fu
 		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			return
+		}
+		if i := strings.IndexByte(line, '\t'); i > 0 {
+			rel := strings.TrimPrefix(line[:i], absPrefix)
+			rel = strings.TrimPrefix(rel, "/")
+			if rel == "" {
+				return
+			}
+			line = rel + line[i:]
 		}
 		parent, entry, ok := parseFindRecursiveLine(line, scope)
 		if !ok {

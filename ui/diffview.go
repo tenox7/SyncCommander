@@ -420,13 +420,16 @@ func (d *DiffView) diffCount() int {
 // --- rendering ---
 
 var (
-	styleDiffAdd    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styleDiffDel    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleDiffChg    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styleDiffLineNo = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleDiffTitle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	styleDiffDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleDiffHexHL  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleDiffAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	styleDiffDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleDiffChg     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styleDiffLineNo  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	styleDiffTitle   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	styleDiffDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleDiffHexHL   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleDiffMarkAdd = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleDiffMarkDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleDiffMarkChg = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 )
 
 func (d *DiffView) View(width, height int) string {
@@ -532,6 +535,7 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		gutter = styleDiffDim.Render(strings.Repeat(" ", gutterWidth))
 	}
 
+	diffPrefix := " "
 	marker := " "
 	styledText := text
 
@@ -540,6 +544,7 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		styledText = text
 	case diffLineDeleted:
 		if isLeft {
+			diffPrefix = styleDiffMarkDel.Render(">")
 			marker = styleDiffDel.Render("-")
 			styledText = styleDiffDel.Render(text)
 		} else {
@@ -547,6 +552,7 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		}
 	case diffLineInserted:
 		if !isLeft {
+			diffPrefix = styleDiffMarkAdd.Render(">")
 			marker = styleDiffAdd.Render("+")
 			styledText = styleDiffAdd.Render(text)
 		} else {
@@ -554,17 +560,17 @@ func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, conte
 		}
 	case diffLineModified:
 		if isLeft && text != "" {
-			marker = styleDiffChg.Render("~")
+			diffPrefix = styleDiffMarkChg.Render(">")
 			styledText = d.highlightCharDiff(line.leftText, line.rightText, true)
 		} else if !isLeft && text != "" {
-			marker = styleDiffChg.Render("~")
+			diffPrefix = styleDiffMarkChg.Render(">")
 			styledText = d.highlightCharDiff(line.leftText, line.rightText, false)
 		} else {
 			styledText = ""
 		}
 	}
 
-	result := gutter + marker + styledText
+	result := diffPrefix + gutter + marker + styledText
 	visLen := lipgloss.Width(result)
 	if visLen > availWidth {
 		result = ansi.Truncate(result, availWidth, "")
