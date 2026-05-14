@@ -22,6 +22,7 @@ type SCPBackend struct {
 	display   string
 	cksumAlgo string
 	cksumCmds map[string]string
+	listCache *rsyncListCache
 }
 
 func NewSCPBackend(rawURL string) (*SCPBackend, error) {
@@ -56,6 +57,21 @@ func (b *SCPBackend) BasePath() string { return b.display }
 func (b *SCPBackend) Close() error { return b.client.Close() }
 
 func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	if b.listCache != nil {
+		entries, hit, active, done := b.listCache.lookup(relDir)
+		if hit {
+			return entries, nil
+		}
+		if active && !done {
+			if e, ok := b.listCache.await(relDir); ok {
+				return e, nil
+			}
+		}
+	}
+	return b.liveList(ctx, relDir)
+}
+
+func (b *SCPBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
 	out, err := b.sshRunCtx(ctx, cmd)
@@ -78,6 +94,128 @@ func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry
 		result = append(result, entry)
 	}
 	return result, nil
+}
+
+func (b *SCPBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	if b.listCache == nil {
+		b.listCache = newRsyncListCache()
+	}
+	c := b.listCache
+	c.mu.Lock()
+	if c.active && !c.done {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	c.reset(ctx, scope)
+
+	go func() {
+		_ = b.runRecursiveList(ctx, scope, c.emit)
+		c.finish()
+	}()
+	return nil
+}
+
+func (b *SCPBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+	dir := shellQuote(path.Join(b.base, scope))
+	cmd := fmt.Sprintf("find %s -mindepth 1 -printf '%%P\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
+	Log.Add("scp", ">>>", "RLIST "+cmd)
+
+	session, err := b.client.NewSession()
+	if err != nil {
+		Log.Add("scp", "ERR", "RLIST: "+err.Error())
+		return err
+	}
+	defer session.Close()
+	defer cancelCloser(ctx, session)()
+
+	var current string
+	var haveCurrent bool
+	var batch []model.FileEntry
+	var seenDirs []string
+	flush := func() {
+		if !haveCurrent {
+			return
+		}
+		emit(current, batch)
+		batch = nil
+		haveCurrent = false
+	}
+
+	lw := newLineWriter(func(line string) {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			return
+		}
+		parent, entry, ok := parseFindRecursiveLine(line, scope)
+		if !ok {
+			return
+		}
+		if !haveCurrent || parent != current {
+			flush()
+			current = parent
+			haveCurrent = true
+		}
+		batch = append(batch, entry)
+		if entry.IsDir {
+			seenDirs = append(seenDirs, entry.RelPath)
+		}
+	})
+
+	var stderr bytes.Buffer
+	session.Stdout = lw
+	session.Stderr = &stderr
+	runErr := session.Run(cmd)
+	lw.flush()
+	flush()
+	for _, d := range seenDirs {
+		emit(d, nil)
+	}
+	if runErr != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			runErr = fmt.Errorf("%v: %s", runErr, msg)
+		}
+		Log.Add("scp", "ERR", "RLIST: "+runErr.Error())
+		return runErr
+	}
+	Log.Add("scp", "<<<", "RLIST done")
+	return nil
+}
+
+func parseFindRecursiveLine(line, scope string) (parent string, entry model.FileEntry, ok bool) {
+	fields := strings.SplitN(line, "\t", 7)
+	if len(fields) < 7 {
+		return "", model.FileEntry{}, false
+	}
+	if fields[6] == "l" {
+		return "", model.FileEntry{}, false
+	}
+	relFromScope := fields[0]
+	if relFromScope == "" {
+		return "", model.FileEntry{}, false
+	}
+	size, _ := strconv.ParseInt(fields[1], 10, 64)
+	modeVal, _ := strconv.ParseUint(fields[5], 8, 32)
+	isDir := fields[6] == "d"
+	mode := os.FileMode(modeVal)
+	if isDir {
+		mode |= os.ModeDir
+	}
+	parentLocal := path.Dir(relFromScope)
+	if parentLocal == "." {
+		parentLocal = ""
+	}
+	return path.Join(scope, parentLocal), model.FileEntry{
+		RelPath: path.Join(scope, relFromScope),
+		Name:    path.Base(relFromScope),
+		Size:    size,
+		ModTime: parseEpoch(fields[2]),
+		ATime:   parseEpoch(fields[3]),
+		CTime:   parseEpoch(fields[4]),
+		IsDir:   isDir,
+		Mode:    mode,
+	}, true
 }
 
 func (b *SCPBackend) Checksum(ctx context.Context, relPath string) (string, error) {
