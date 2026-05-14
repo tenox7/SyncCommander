@@ -117,6 +117,25 @@ func StallTimeout() time.Duration {
 // not a parent-ctx cancel).
 var ErrStall = errors.New("transfer stalled")
 
+type fatalCancelKey struct{}
+
+// ContextWithFatalCancel attaches a cancel func that backends can invoke via
+// TriggerFatalAbort to abort the entire enclosing operation (not just the
+// current retryable attempt). Used for errors that are pointless to retry
+// or continue past — e.g. an rsync daemon module marked read only.
+func ContextWithFatalCancel(ctx context.Context, cancel context.CancelFunc) context.Context {
+	if cancel == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, fatalCancelKey{}, cancel)
+}
+
+func TriggerFatalAbort(ctx context.Context) {
+	if c, ok := ctx.Value(fatalCancelKey{}).(context.CancelFunc); ok && c != nil {
+		c()
+	}
+}
+
 func pluralRetries(n int) string {
 	if n == 1 {
 		return "retry"

@@ -17,6 +17,7 @@ type RemoteLog struct {
 	retryCount     int
 	recoveredCount int
 	failedCount    int
+	fatalCount     int
 }
 
 func (l *RemoteLog) Add(proto, direction, msg string) {
@@ -35,6 +36,8 @@ func (l *RemoteLog) Add(proto, direction, msg string) {
 		l.recoveredCount++
 	case "FAIL":
 		l.failedCount++
+	case "FATAL":
+		l.fatalCount++
 	}
 }
 
@@ -60,6 +63,12 @@ func (l *RemoteLog) FailedCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.failedCount
+}
+
+func (l *RemoteLog) FatalCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.fatalCount
 }
 
 func (l *RemoteLog) Lines() []string {

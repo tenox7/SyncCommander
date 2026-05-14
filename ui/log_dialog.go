@@ -11,14 +11,15 @@ import (
 )
 
 type LogDialog struct {
-	visible      bool
-	offset       int
-	follow       bool
-	errOnly      bool
-	width        int
-	height       int
-	lastSeenErrs int
-	closedAt     time.Time
+	visible       bool
+	offset        int
+	follow        bool
+	errOnly       bool
+	width         int
+	height        int
+	lastSeenErrs  int
+	lastSeenFatal int
+	closedAt      time.Time
 }
 
 func NewLogDialog() *LogDialog {
@@ -38,7 +39,7 @@ func isErrLogLine(line string) bool {
 	if len(parts) < 3 {
 		return false
 	}
-	return parts[2] == "ERR" || parts[2] == "FAIL"
+	return parts[2] == "ERR" || parts[2] == "FAIL" || parts[2] == "FATAL"
 }
 
 func (d *LogDialog) filteredLines() []string {
@@ -65,9 +66,18 @@ func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()
 	d.lastSeenErrs = transport.Log.ErrCount()
+	d.lastSeenFatal = transport.Log.FatalCount()
 }
 
-func (d *LogDialog) AutoOpen(errCount int) {
+func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
+	if fatalCount > d.lastSeenFatal {
+		d.lastSeenErrs = errCount
+		d.lastSeenFatal = fatalCount
+		d.visible = true
+		d.follow = true
+		d.errOnly = true
+		return
+	}
 	if d.visible || errCount <= d.lastSeenErrs {
 		return
 	}

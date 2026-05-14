@@ -200,7 +200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if algo := m.scanner.ChecksumAlgo(); algo != "" {
 			m.settings.UpdateChecksumLabel(algo)
 		}
-		m.logView.AutoOpen(transport.Log.ErrCount())
+		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTree()
 		return m, m.tickCmd()
 	case scanDoneMsg:
@@ -226,6 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c := m.deleteProgress.Cancel.Swap(nil); c != nil {
 			c.f()
 		}
+		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTree()
 		return m, nil
 	case copyDoneMsg:
@@ -233,6 +234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c := m.copyProgress.Cancel.Swap(nil); c != nil {
 			c.f()
 		}
+		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTree()
 		if msg.rescanRoot != nil {
 			m.scanning = true
@@ -915,6 +917,7 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 		sideLabel = "LEFT"
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
+	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
 	progress.Total.Store(0)
 	progress.Done.Store(0)
@@ -999,6 +1002,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	opts := *m.cmpOpts
 	progress := m.copyProgress
 	baseCtx, cancel := context.WithCancel(context.Background())
+	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
 	return func() tea.Msg {
 		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
@@ -1011,6 +1015,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			dstBackend = left
 		}
 		for _, c := range model.CollectTypeCollisions(node, leftToRight) {
+			if ctx.Err() != nil {
+				break
+			}
 			dstEntry := c.Right
 			if !leftToRight {
 				dstEntry = c.Left
@@ -1175,6 +1182,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 					delBackend = left
 				}
 				for _, d := range deletes {
+					if ctx.Err() != nil {
+						break
+					}
 					if d.IsDir {
 						_ = delBackend.RemoveAll(ctx, d.RelPath)
 					} else {

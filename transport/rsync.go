@@ -243,6 +243,10 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 	_, err := cmd.Run(ctx)
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
+		if strings.Contains(errMsg, "module is read only") {
+			Log.Add("rsync", "FATAL", "module is read only — aborting operation")
+			TriggerFatalAbort(ctx)
+		}
 		if errMsg != "" {
 			return "", fmt.Errorf("%v: %s", err, errMsg)
 		}
