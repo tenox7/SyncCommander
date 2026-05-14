@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	rsyncpkg "github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/rsyncclient"
 	"golang.org/x/crypto/ssh"
 
@@ -28,6 +29,7 @@ type RsyncSSHBackend struct {
 	cksumCmds map[string]string
 	md4mu     sync.Mutex
 	md4cache  map[string]string
+	listCache *rsyncListCache
 }
 
 func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
@@ -70,6 +72,21 @@ func (b *RsyncSSHBackend) OwnsCopyProgress() bool { return true }
 func (b *RsyncSSHBackend) Close() error           { return b.client.Close() }
 
 func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	if b.listCache != nil {
+		entries, hit, active, done := b.listCache.lookup(relDir)
+		if hit {
+			return entries, nil
+		}
+		if active && !done {
+			if e, ok := b.listCache.await(relDir); ok {
+				return e, nil
+			}
+		}
+	}
+	return b.liveList(ctx, relDir)
+}
+
+func (b *RsyncSSHBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := shellQuote(path.Join(b.base, relDir))
 	cmd := fmt.Sprintf("find %s -maxdepth 1 -mindepth 1 -printf '%%f\\t%%s\\t%%T@\\t%%A@\\t%%C@\\t%%m\\t%%y\\n'", dir)
 	out, err := b.sshRunCtx(ctx, cmd)
@@ -92,6 +109,125 @@ func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.File
 		result = append(result, entry)
 	}
 	return result, nil
+}
+
+func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	if b.listCache == nil {
+		b.listCache = newRsyncListCache()
+	}
+	c := b.listCache
+	c.mu.Lock()
+	if c.active && !c.done {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	c.reset(ctx, scope)
+
+	go func() {
+		_ = b.runRecursiveList(ctx, scope, c.emit)
+		c.finish()
+	}()
+	return nil
+}
+
+func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+	remotePath := b.base
+	if scope != "" {
+		remotePath = path.Join(remotePath, scope)
+	}
+	remotePath += "/"
+
+	client, err := rsyncclient.New([]string{"-n", "-r"},
+		rsyncclient.WithStdout(io.Discard),
+		rsyncclient.WithStderr(io.Discard),
+		rsyncclient.DontRestrict())
+	if err != nil {
+		return err
+	}
+
+	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remotePath))
+	Log.Add("rsync+ssh", ">>>", "RLIST "+serverCmd)
+
+	session, err := b.client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	defer cancelCloser(ctx, session)()
+
+	rw, err := b.sessionReadWriter(session)
+	if err != nil {
+		return err
+	}
+
+	if err := session.Start(serverCmd); err != nil {
+		Log.Add("rsync+ssh", "ERR", "RLIST: "+err.Error())
+		return err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "rsync-rlist-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	result, err := client.Run(ctx, rw, []string{tmpDir + "/"})
+	if err != nil {
+		Log.Add("rsync+ssh", "ERR", "RLIST: "+err.Error())
+		return err
+	}
+
+	byParent := make(map[string][]model.FileEntry)
+	seenDirs := make(map[string]struct{})
+	for _, fi := range result.FileList {
+		if fi.Name == "" || fi.Name == "." {
+			continue
+		}
+		if fi.Mode&rsyncpkg.S_IFMT == rsyncpkg.S_IFLNK {
+			continue
+		}
+		parent := path.Dir(fi.Name)
+		if parent == "." {
+			parent = ""
+		}
+		parentRel := path.Join(scope, parent)
+		relPath := path.Join(scope, fi.Name)
+		mode := rsyncModeToFileMode(fi.Mode)
+		isDir := mode&os.ModeDir != 0
+		byParent[parentRel] = append(byParent[parentRel], model.FileEntry{
+			RelPath: relPath,
+			Name:    path.Base(fi.Name),
+			Size:    fi.Length,
+			ModTime: fi.ModTime,
+			IsDir:   isDir,
+			Mode:    mode,
+		})
+		if isDir {
+			seenDirs[relPath] = struct{}{}
+		}
+	}
+	for parent, entries := range byParent {
+		emit(parent, entries)
+	}
+	for d := range seenDirs {
+		if _, ok := byParent[d]; !ok {
+			emit(d, nil)
+		}
+	}
+	Log.Add("rsync+ssh", "<<<", fmt.Sprintf("RLIST %d entries", len(result.FileList)))
+	return nil
+}
+
+func rsyncModeToFileMode(m int32) os.FileMode {
+	mode := os.FileMode(m) & os.ModePerm
+	switch m & rsyncpkg.S_IFMT {
+	case rsyncpkg.S_IFDIR:
+		mode |= os.ModeDir
+	case rsyncpkg.S_IFLNK:
+		mode |= os.ModeSymlink
+	}
+	return mode
 }
 
 func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string, error) {
