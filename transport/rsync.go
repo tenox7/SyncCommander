@@ -112,6 +112,27 @@ func (c *rsyncListCache) invalidate(relDir string) {
 	c.mu.Unlock()
 }
 
+// invalidateAncestors clears cache entries for every ancestor dir of relPath
+// up to and including "". Writes that may create intermediate dirs via an
+// implicit mkdir -p (CopyFrom, AppendFrom, SendLocalFile, Mkdir of a deep
+// path) must use this — invalidating only parentDir(relPath) leaves stale
+// listings for shallower ancestors that gained a new child.
+func (c *rsyncListCache) invalidateAncestors(relPath string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := parentDir(relPath)
+	for {
+		delete(c.entries, p)
+		if p == "" {
+			return
+		}
+		p = parentDir(p)
+	}
+}
+
 func (c *rsyncListCache) invalidateTree(prefix string) {
 	if c == nil {
 		return
@@ -565,6 +586,28 @@ func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope string, recu
 	return err
 }
 
+// invalidateMD4 drops one path's cached MD4 hash. md4cache is populated in
+// bulk by PrefetchChecksums and has no TTL, so writes that change a file's
+// content must clear its entry or a follow-up Checksum returns the pre-write
+// hash.
+func (b *RsyncBackend) invalidateMD4(relPath string) {
+	b.md4mu.Lock()
+	delete(b.md4cache, relPath)
+	b.md4mu.Unlock()
+}
+
+// invalidateMD4Tree drops all cached MD4 hashes at or under prefix. Used by
+// RemoveAll.
+func (b *RsyncBackend) invalidateMD4Tree(prefix string) {
+	b.md4mu.Lock()
+	defer b.md4mu.Unlock()
+	for k := range b.md4cache {
+		if k == prefix || strings.HasPrefix(k, prefix+"/") {
+			delete(b.md4cache, k)
+		}
+	}
+}
+
 func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
 	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
 	if err != nil {
@@ -666,7 +709,8 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	args = append(args, srcPath, dest)
 	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err := b.rsyncRun(ctx, args...)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4(relPath)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 	}
@@ -761,7 +805,8 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	sendArgs = append(sendArgs, tmpFile, dest)
 	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, sendArgs...)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4(relPath)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 		return err
@@ -796,7 +841,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	args := []string{"-r", "-t", stageTop, dest}
 	Log.Add("rsync", ">>>", "MKDIR "+clean+" ["+strings.Join(args[:len(args)-2], " ")+"]")
 	_, err = b.rsyncRun(ctx, args...)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
 	} else {
@@ -849,6 +894,9 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	_, err = b.rsyncRun(ctx, args...)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
+		b.invalidateMD4Tree(relPath)
+	} else {
+		b.invalidateMD4(relPath)
 	}
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {

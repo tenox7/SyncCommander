@@ -288,7 +288,7 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	session.Stdin = src
 	err = session.Run(fmt.Sprintf("cat > %s && chmod %04o %s",
 		shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)))
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
 	return err
 }
 
@@ -309,7 +309,7 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src io.Read
 		mode.Perm(), shellQuote(fullPath))
 	Log.Add("scp", ">>>", cmd)
 	err = session.Run(cmd)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
 	return err
 }
 
@@ -340,7 +340,7 @@ func (b *SCPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
 	_, err := b.sshRunCtx(ctx, cmd)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
 	return err
 }
 

@@ -271,6 +271,28 @@ func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope string, r
 	return err
 }
 
+// invalidateMD4 drops one path's cached MD4 hash. md4cache is populated in
+// bulk by PrefetchChecksums and has no TTL, so writes that change a file's
+// content must clear its entry or a follow-up Checksum returns the pre-write
+// hash.
+func (b *RsyncSSHBackend) invalidateMD4(relPath string) {
+	b.md4mu.Lock()
+	delete(b.md4cache, relPath)
+	b.md4mu.Unlock()
+}
+
+// invalidateMD4Tree drops all cached MD4 hashes at or under prefix. Used by
+// RemoveAll and dir Rename.
+func (b *RsyncSSHBackend) invalidateMD4Tree(prefix string) {
+	b.md4mu.Lock()
+	defer b.md4mu.Unlock()
+	for k := range b.md4cache {
+		if k == prefix || strings.HasPrefix(k, prefix+"/") {
+			delete(b.md4cache, k)
+		}
+	}
+}
+
 func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
 	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
 	if err != nil {
@@ -401,7 +423,7 @@ func (b *RsyncSSHBackend) Mkdir(ctx context.Context, relPath string, mode os.Fil
 		cmd = fmt.Sprintf("%s && chmod %04o %s", cmd, mode.Perm(), shellQuote(fullPath))
 	}
 	_, err := b.sshRunCtx(ctx, cmd)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
 	return err
 }
 
@@ -412,12 +434,15 @@ func (b *RsyncSSHBackend) Rename(ctx context.Context, oldRelPath, newRelPath str
 	b.listCache.invalidateTree(oldRelPath)
 	b.listCache.invalidate(parentDir(oldRelPath))
 	b.listCache.invalidate(parentDir(newRelPath))
+	b.invalidateMD4Tree(oldRelPath)
+	b.invalidateMD4(newRelPath)
 	return err
 }
 
 func (b *RsyncSSHBackend) Remove(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm %s", shellQuote(path.Join(b.base, relPath))))
 	b.listCache.invalidate(parentDir(relPath))
+	b.invalidateMD4(relPath)
 	return err
 }
 
@@ -425,6 +450,7 @@ func (b *RsyncSSHBackend) RemoveAll(ctx context.Context, relPath string) error {
 	_, err := b.sshRunCtx(ctx, fmt.Sprintf("rm -rf %s", shellQuote(path.Join(b.base, relPath))))
 	b.listCache.invalidateTree(relPath)
 	b.listCache.invalidate(parentDir(relPath))
+	b.invalidateMD4Tree(relPath)
 	return err
 }
 
@@ -555,6 +581,8 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 	_, err = client.Run(ctx, rw, []string{srcPath})
 	stop()
 	session.Close()
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4(relPath)
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
@@ -668,7 +696,8 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src io
 		mode.Perm(), shellQuote(fullPath))
 	Log.Add("rsync+ssh", ">>>", cmd)
 	err = session.Run(cmd)
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4(relPath)
 	return err
 }
 
@@ -759,7 +788,8 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	_, err = client.Run(ctx, rw, []string{tmpFile})
 	stop()
 	session.Close()
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4(relPath)
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
