@@ -71,6 +71,12 @@ type LocalFS interface {
 // LocalSender is implemented by backends that can ingest a file directly from
 // a local filesystem path, bypassing the io.Reader streaming flow and any
 // intermediate tmp file (e.g. rsync invoked with the local path as source).
+//
+// Implementations MUST credit progress.Bytes during the push and top up to
+// fileSize on success, so the stall guard sees movement on long transfers and
+// the byte counter ends correctly even under delta-sync. On error the
+// implementation MUST roll back any in-band credit. The caller does not
+// top-up after the call. See RsyncSSHBackend.SendLocalFile for the pattern.
 type LocalSender interface {
 	SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error
 }

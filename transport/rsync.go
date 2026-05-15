@@ -23,21 +23,17 @@ import (
 )
 
 // rsyncTransferFlags are passed to every rsync invocation that moves file
-// data. -t preserves mtime; --inplace writes directly to the destination so
-// resume works at the rsync protocol level; --partial keeps interrupted files
-// for the next run. Delta-sync is the default for remote transfers. Callers
-// that know the destination has no file to delta against can attach
-// ContextWithWholeFile to the ctx, which adds -W per call.
-var rsyncTransferFlags = []string{"-t", "--inplace", "--partial"}
+// data. -t preserves mtime; --inplace writes directly to the destination
+// (resume keeps the partial body in place); --partial keeps interrupted
+// files for the next run; -W disables the delta-sync algorithm so the sender
+// streams the whole file. -W is intentional: gokrazy/rsync's hashSearch path
+// (internal/sender/fileio.go) misclassifies read errors as "file has changed
+// mid-transfer", and on this workload delta-sync saves no bandwidth anyway
+// (mostly immutable archives).
+var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "-W"}
 
-// rsyncFlagsForCtx returns rsyncTransferFlags plus -W if the ctx carries the
-// whole-file hint. Returns a fresh slice; safe to append to.
-func rsyncFlagsForCtx(ctx context.Context) []string {
-	args := append([]string{}, rsyncTransferFlags...)
-	if wholeFileFromContext(ctx) {
-		args = append(args, "-W")
-	}
-	return args
+func rsyncFlagsForCtx(_ context.Context) []string {
+	return append([]string{}, rsyncTransferFlags...)
 }
 
 type RsyncBackend struct {
@@ -257,9 +253,19 @@ func (b *RsyncBackend) remoteURL(relPath string) string {
 }
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
+	var stdout bytes.Buffer
+	if err := b.rsyncRunStdout(ctx, &stdout, args...); err != nil {
+		return "", err
+	}
+	return stdout.String(), nil
+}
+
+// rsyncRunStdout invokes rsync with stdout routed through w. Used by transfer
+// paths that pass --progress to credit byte progress via rsyncProgressWriter.
+func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...string) error {
 	cmd := rsynccmd.Command("rsync", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	cmd.Stdout = w
 	cmd.Stderr = &stderr
 	_, err := cmd.Run(ctx)
 	if err != nil {
@@ -269,11 +275,49 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 			TriggerFatalAbort(ctx)
 		}
 		if errMsg != "" {
-			return "", fmt.Errorf("%v: %s", err, errMsg)
+			return fmt.Errorf("%v: %s", err, errMsg)
 		}
-		return "", err
+		return err
 	}
-	return stdout.String(), nil
+	return nil
+}
+
+// rsyncProgressWriter consumes `rsync --progress` output and credits the
+// leading byte-offset of each progress line to adder. Updates are \r-separated
+// (in-place line repaint) and the final line ends in \n; we split on either.
+// Non-numeric lines (file names, banners, totals) are ignored.
+type rsyncProgressWriter struct {
+	adder *CappedAdder
+	buf   []byte
+	last  int64
+}
+
+func (w *rsyncProgressWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexAny(w.buf, "\r\n")
+		if i < 0 {
+			break
+		}
+		line := bytes.TrimSpace(w.buf[:i])
+		w.buf = w.buf[i+1:]
+		if len(line) == 0 {
+			continue
+		}
+		end := bytes.IndexByte(line, ' ')
+		if end < 0 {
+			continue
+		}
+		off, err := strconv.ParseInt(string(line[:end]), 10, 64)
+		if err != nil {
+			continue
+		}
+		if off > w.last {
+			w.adder.Add(off - w.last)
+			w.last = off
+		}
+	}
+	return len(p), nil
 }
 
 func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -698,23 +742,42 @@ func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) 
 }
 
 // SendLocalFile sends an existing local file directly to the rsync daemon
-// without writing to a tmp dir first. With rsyncTransferFlags it does delta
-// sync against any partial data already at dst.
+// without writing to a tmp dir first. Progress: --progress drives the
+// in-process rsync sender to emit byte-offset lines on stdout; we parse them
+// into the counter so the stall guard sees movement. On error in-band credit
+// is rolled back; on success a cap-bounded top-up brings the total to
+// fileSize.
 func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
 	dest := b.remoteURL(path.Dir(relPath)) + "/"
 	args := rsyncFlagsForCtx(ctx)
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
+	counter := progressFromContext(ctx)
+	fileSize := fileSizeFromContext(ctx)
+	var adder *CappedAdder
+	var stdout io.Writer = io.Discard
+	if counter != nil && fileSize > 0 {
+		adder = NewCappedAdder(counter, fileSize)
+		stdout = &rsyncProgressWriter{adder: adder}
+		args = append(args, "--progress")
+	}
 	args = append(args, srcPath, dest)
 	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
-	_, err := b.rsyncRun(ctx, args...)
+	err := b.rsyncRunStdout(ctx, stdout, args...)
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
 	if err != nil {
+		if adder != nil {
+			counter.Add(-adder.Used())
+		}
 		Log.Add("rsync", "ERR", err.Error())
+		return err
 	}
-	return err
+	if adder != nil {
+		adder.Add(fileSize)
+	}
+	return nil
 }
 
 // RecvToLocalFile downloads a file from the rsync daemon directly to a local
@@ -785,14 +848,28 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		return err
 	}
 
+	// Split the per-file progress budget so the rsync push phase also credits
+	// the counter — otherwise after the local copy exhausts the cap, a slow
+	// push can stall the guard even though bytes are flowing on the wire.
 	counter := progressFromContext(ctx)
 	fileSize := fileSizeFromContext(ctx)
-	var copyDst io.Writer = f
+	var readAdder, pushAdder *CappedAdder
+	var readBudget, pushBudget int64
 	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
-		copyDst = &CountingWriter{W: f, Adder: NewCappedAdder(counter, fileSize)}
+		readBudget = fileSize / 2
+		pushBudget = fileSize - readBudget
+		readAdder = NewCappedAdder(counter, readBudget)
+		pushAdder = NewCappedAdder(counter, pushBudget)
+	}
+	var copyDst io.Writer = f
+	if readAdder != nil {
+		copyDst = &CountingWriter{W: f, Adder: readAdder}
 	}
 	if _, err := io.Copy(copyDst, src); err != nil {
 		f.Close()
+		if readAdder != nil {
+			counter.Add(-readAdder.Used())
+		}
 		return err
 	}
 	f.Close()
@@ -802,14 +879,25 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if b.useChecksum {
 		sendArgs = append(sendArgs, "-c")
 	}
+	var stdout io.Writer = io.Discard
+	if pushAdder != nil {
+		stdout = &rsyncProgressWriter{adder: pushAdder}
+		sendArgs = append(sendArgs, "--progress")
+	}
 	sendArgs = append(sendArgs, tmpFile, dest)
 	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
-	_, err = b.rsyncRun(ctx, sendArgs...)
+	err = b.rsyncRunStdout(ctx, stdout, sendArgs...)
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
 	if err != nil {
+		if pushAdder != nil {
+			counter.Add(-pushAdder.Used())
+		}
 		Log.Add("rsync", "ERR", err.Error())
 		return err
+	}
+	if pushAdder != nil {
+		pushAdder.Add(pushBudget)
 	}
 	Log.Add("rsync", "<<<", "OK")
 	return nil

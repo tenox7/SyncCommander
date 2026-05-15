@@ -1115,22 +1115,11 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			progress.BeginFile(srcEntry.Size)
 			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.RelPath, model.FormatSize(srcEntry.Size)))
 			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
-			if dstEntry == nil {
-				fileCtx = transport.ContextWithWholeFile(fileCtx)
-			}
 
-			var directOK bool
-			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				directOK = tryDirectTransfer(attemptCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
-				return nil
-			})
-			if directOK {
-				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
-				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
-				progress.Done.Add(1)
-				continue
-			}
-
+			// Resume first when a partial dst body exists: append the missing
+			// tail rather than overwrite the whole file. tryResumeCopy
+			// self-gates (no-op for absent/full/oversized dst). Blind trust;
+			// a post-sync CRC pass catches any divergence.
 			var resumeOK bool
 			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.RelPath, srcEntry, dstEntry, progress)
@@ -1139,6 +1128,18 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			if resumeOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK (resumed)")
+				progress.Done.Add(1)
+				continue
+			}
+
+			var directOK bool
+			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+				directOK = tryDirectTransfer(attemptCtx, src, dst, f.RelPath, srcEntry)
+				return nil
+			})
+			if directOK {
+				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
 				progress.Done.Add(1)
 				continue
 			}
@@ -1206,16 +1207,15 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 // LocalFS path and the other side supports a direct send/receive. This avoids
 // any intermediate tmp file and lets rsync do its own delta-sync resume
 // against whatever already exists at the destination. Returns true on success.
-func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) bool {
-	// src is local-backed and dst can pull a local file directly.
+func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry) bool {
+	// src is local-backed and dst can pull a local file directly. Backends
+	// implementing LocalSender self-credit progress.Bytes during the push and
+	// top up to fileSize on success — see RsyncSSHBackend/RsyncBackend
+	// SendLocalFile. Don't credit again here.
 	if lp, ok := src.(model.LocalFS); ok {
 		if r, ok2 := dst.(model.LocalSender); ok2 {
 			err := r.SendLocalFile(ctx, lp.LocalPath(relPath), relPath, srcEntry.Mode)
-			if err != nil {
-				return false
-			}
-			counter.Add(srcEntry.Size)
-			return true
+			return err == nil
 		}
 	}
 	// dst is local-backed and src can push directly to a local path.

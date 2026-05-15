@@ -12,7 +12,6 @@ import (
 type progressKey struct{}
 type baseProgressKey struct{}
 type fileSizeKey struct{}
-type wholeFileKey struct{}
 
 func ContextWithProgress(ctx context.Context, counter *atomic.Int64) context.Context {
 	if counter == nil {
@@ -51,18 +50,6 @@ func ContextWithFileSize(ctx context.Context, size int64) context.Context {
 func fileSizeFromContext(ctx context.Context) int64 {
 	s, _ := ctx.Value(fileSizeKey{}).(int64)
 	return s
-}
-
-// ContextWithWholeFile signals that the destination has no existing file to
-// delta against, so rsync should send the whole file (-W) and skip the
-// receiver-side checksum scan.
-func ContextWithWholeFile(ctx context.Context) context.Context {
-	return context.WithValue(ctx, wholeFileKey{}, true)
-}
-
-func wholeFileFromContext(ctx context.Context) bool {
-	v, _ := ctx.Value(wholeFileKey{}).(bool)
-	return v
 }
 
 type PreCounted interface {
@@ -121,6 +108,16 @@ func (c *CappedAdder) Add(delta int64) {
 			return
 		}
 	}
+}
+
+// Used returns the bytes already credited through this adder. Callers use this
+// to roll back in-band progress on operation failure (counter.Add(-Used)) so
+// that a retry path doesn't double-count.
+func (c *CappedAdder) Used() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.used.Load()
 }
 
 // tailDirSize polls dir for the largest in-progress file size matching the

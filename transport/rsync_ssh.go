@@ -547,7 +547,12 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 }
 
 // SendLocalFile sends an existing local file via rsync-over-SSH directly,
-// bypassing the per-call tmp dir.
+// bypassing the per-call tmp dir. Progress: rw is wrapped so bytes written to
+// the SSH session credit progress.Bytes during the push — without this, the
+// stall guard fires after StallTimeout for any file taking longer than that.
+// On error the in-band credit is rolled back so a retry doesn't double-count.
+// On success a final cap-respecting top-up brings the total to fileSize even
+// when rsync ran in delta mode and sent less than the full body.
 func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
 	remoteDest := path.Join(b.base, path.Dir(relPath))
 	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest)))
@@ -578,14 +583,29 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 		return err
 	}
 
-	_, err = client.Run(ctx, rw, []string{srcPath})
+	counter := progressFromContext(ctx)
+	fileSize := fileSizeFromContext(ctx)
+	var adder *CappedAdder
+	var rwForRun io.ReadWriter = rw
+	if counter != nil && fileSize > 0 {
+		adder = NewCappedAdder(counter, fileSize)
+		rwForRun = &CountingReadWriter{RW: rw, Adder: adder}
+	}
+
+	_, err = client.Run(ctx, rwForRun, []string{srcPath})
 	stop()
 	session.Close()
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
 	if err != nil {
+		if adder != nil {
+			counter.Add(-adder.Used())
+		}
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
+	}
+	if adder != nil {
+		adder.Add(fileSize)
 	}
 	Log.Add("rsync+ssh", "<<<", "OK")
 	return nil
@@ -736,17 +756,23 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 
 	counter := progressFromContext(ctx)
 	fileSize := fileSizeFromContext(ctx)
+	var readAdder, pushAdder *CappedAdder
 	var readBudget, pushBudget int64
 	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
 		readBudget = fileSize / 2
 		pushBudget = fileSize - readBudget
+		readAdder = NewCappedAdder(counter, readBudget)
+		pushAdder = NewCappedAdder(counter, pushBudget)
 	}
 	var copyDst io.Writer = f
-	if readBudget > 0 {
-		copyDst = &CountingWriter{W: f, Adder: NewCappedAdder(counter, readBudget)}
+	if readAdder != nil {
+		copyDst = &CountingWriter{W: f, Adder: readAdder}
 	}
 	if _, err := io.Copy(copyDst, src); err != nil {
 		f.Close()
+		if readAdder != nil {
+			counter.Add(-readAdder.Used())
+		}
 		return err
 	}
 	f.Close()
@@ -782,17 +808,24 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 		return err
 	}
 
-	if pushBudget > 0 {
-		rw = &CountingReadWriter{RW: rw, Adder: NewCappedAdder(counter, pushBudget)}
+	var rwForRun io.ReadWriter = rw
+	if pushAdder != nil {
+		rwForRun = &CountingReadWriter{RW: rw, Adder: pushAdder}
 	}
-	_, err = client.Run(ctx, rw, []string{tmpFile})
+	_, err = client.Run(ctx, rwForRun, []string{tmpFile})
 	stop()
 	session.Close()
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
 	if err != nil {
+		if pushAdder != nil {
+			counter.Add(-pushAdder.Used())
+		}
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
+	}
+	if pushAdder != nil {
+		pushAdder.Add(pushBudget)
 	}
 	Log.Add("rsync+ssh", "<<<", "OK")
 	return nil
