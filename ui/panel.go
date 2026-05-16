@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -226,10 +227,10 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 		if sideIsDir {
 			if p.isLeft {
 				pendingCksum = node.ChecksumPendingLeft
-				activeCksum = node.ChecksumActiveLeft
+				activeCksum = node.ChecksumActiveLeft || atomic.LoadInt32(&node.ChecksumInFlightLeft) > 0
 			} else {
 				pendingCksum = node.ChecksumPendingRight
-				activeCksum = node.ChecksumActiveRight
+				activeCksum = node.ChecksumActiveRight || atomic.LoadInt32(&node.ChecksumInFlightRight) > 0
 			}
 		}
 		switch {

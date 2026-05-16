@@ -66,6 +66,8 @@ type TreeNode struct {
 	ChecksumPendingRight   bool
 	ChecksumActiveLeft     bool
 	ChecksumActiveRight    bool
+	ChecksumInFlightLeft   int32
+	ChecksumInFlightRight  int32
 	LeftChecksumDone       bool
 	RightChecksumDone      bool
 	LeftChecksumErr        bool

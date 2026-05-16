@@ -865,6 +865,16 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 	}
 }
 
+func markChecksumInFlight(node *TreeNode, isLeft bool, delta int32) {
+	for p := node.Parent; p != nil; p = p.Parent {
+		if isLeft {
+			atomic.AddInt32(&p.ChecksumInFlightLeft, delta)
+		} else {
+			atomic.AddInt32(&p.ChecksumInFlightRight, delta)
+		}
+	}
+}
+
 // checksumSideFile runs one side's Checksum for node and stores the result.
 // Returns true if this call completed the pair (both sides done) — caller
 // uses that to increment the file-count progress exactly once per pair.
@@ -878,7 +888,9 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft b
 	var sum string
 	var err error
 	if entry != nil {
+		markChecksumInFlight(node, isLeft, 1)
 		sum, err = backend.Checksum(ctx, node.RelPath)
+		markChecksumInFlight(node, isLeft, -1)
 	}
 
 	s.mu.Lock()
