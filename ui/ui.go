@@ -793,9 +793,9 @@ func (m *Model) openDelete(node *model.TreeNode) {
 	m.pendingDelete = node
 
 	if node.Compare.Presence != model.PresenceBoth {
-		sides := "left side only"
+		sides := "← left side only"
 		if node.Compare.Presence == model.PresenceRightOnly {
-			sides = "right side only"
+			sides = "right side only →"
 		}
 		if !node.IsDir {
 			m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)

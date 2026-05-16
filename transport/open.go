@@ -150,7 +150,7 @@ func ParentPath(p string) string {
 			return p
 		}
 		authority := rest[:si]
-		pathPart := rest[si:]
+		pathPart := path.Clean(rest[si:])
 		parent := path.Dir(pathPart)
 		if parent == pathPart {
 			return p
