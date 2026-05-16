@@ -21,6 +21,9 @@ type RemoteLog struct {
 }
 
 func (l *RemoteLog) Add(proto, direction, msg string) {
+	if direction == "ERR" && (strings.Contains(msg, "context canceled") || msg == "EOF") {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ts := time.Now().Format("15:04:05.000")

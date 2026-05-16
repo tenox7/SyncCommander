@@ -29,10 +29,18 @@ func NewSFTPBackend(rawURL string) (*SFTPBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	sftpClient, err := sftp.NewClient(conn.client)
+	b, err := newSFTPBackendFromConn(conn)
 	if err != nil {
 		conn.client.Close()
+	}
+	return b, err
+}
+
+// newSFTPBackendFromConn builds an SFTPBackend over an already-dialed sshConn.
+// On error the caller is responsible for closing conn.client.
+func newSFTPBackendFromConn(conn *sshConn) (*SFTPBackend, error) {
+	sftpClient, err := sftp.NewClient(conn.client)
+	if err != nil {
 		return nil, fmt.Errorf("sftp: %v", err)
 	}
 
@@ -169,13 +177,19 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	return nil
 }
 
-func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	Log.Add("sftp", ">>>", fmt.Sprintf("APPEND %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
+	rd, err := src.OpenAt(ctx, offset)
+	if err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+		return err
+	}
+	defer rd.Close()
 	f, err := b.client.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
@@ -187,7 +201,7 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src io.Rea
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	if _, err := io.Copy(f, src); err != nil {
+	if _, err := io.Copy(f, rd); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}

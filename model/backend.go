@@ -46,11 +46,30 @@ type ChecksumPrefetcher interface {
 	PrefetchChecksums(ctx context.Context, scope string, recursive bool) error
 }
 
+// RangeOpener is a handle to a source file the destination can open from byte
+// 0 or from an arbitrary offset. Used by Resumer.AppendFrom so each backend
+// can pick the access pattern that fits its protocol — cat-style backends
+// open only the tail (OpenAt(offset)); rsync wants the full file (Open).
+//
+// LocalPath returns a path on the local filesystem if the source backend is
+// LocalFS, or "" otherwise. Rsync-style destinations use this to send
+// directly from disk without staging a tmpfile copy.
+type RangeOpener interface {
+	Open(ctx context.Context) (io.ReadCloser, error)
+	OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error)
+	Size() int64
+	LocalPath() string
+}
+
 // Resumer is implemented by backends that can resume an interrupted upload by
-// appending to an existing partial destination file. src must be positioned at
-// the byte that follows the last byte already present at the destination.
+// continuing from the offset that already exists at the destination.
+//
+// src exposes the source file for whichever access pattern fits the backend:
+// streaming backends (cat-style append) call src.OpenAt(offset) to read only
+// the tail; protocol-aware backends (rsync --append) call src.Open() and let
+// the protocol negotiate the prefix.
 type Resumer interface {
-	AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error
+	AppendFrom(ctx context.Context, relPath string, src RangeOpener, mode os.FileMode, offset int64) error
 }
 
 // SeekableOpener is implemented by backends that can open a file for reading
@@ -86,6 +105,50 @@ type LocalSender interface {
 // file (e.g. rsync invoked with the local path as destination).
 type LocalReceiver interface {
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
+}
+
+// BackendRangeOpener adapts a Backend + relPath into a RangeOpener. OpenAt
+// uses the backend's SeekableOpener path when available, otherwise opens
+// from byte 0 and discards the prefix.
+type BackendRangeOpener struct {
+	Backend  Backend
+	RelPath  string
+	FileSize int64
+}
+
+func (r *BackendRangeOpener) Size() int64 { return r.FileSize }
+
+func (r *BackendRangeOpener) LocalPath() string {
+	if lp, ok := r.Backend.(LocalFS); ok {
+		return lp.LocalPath(r.RelPath)
+	}
+	return ""
+}
+
+func (r *BackendRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
+	return r.Backend.Open(ctx, r.RelPath)
+}
+
+func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
+	if offset == 0 {
+		return r.Backend.Open(ctx, r.RelPath)
+	}
+	if seeker, ok := r.Backend.(SeekableOpener); ok {
+		rd, err := seeker.OpenAt(ctx, r.RelPath, offset)
+		if err == nil {
+			return rd, nil
+		}
+		// Fall back below on any error (notably ErrResumeUnsupported).
+	}
+	rd, err := r.Backend.Open(ctx, r.RelPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.CopyN(io.Discard, rd, offset); err != nil {
+		rd.Close()
+		return nil, err
+	}
+	return rd, nil
 }
 
 // RecursivePreloader is implemented by backends where one recursive listing

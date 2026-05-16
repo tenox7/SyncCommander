@@ -60,8 +60,7 @@ func NewRsyncSSHBackend(rawURL string) (*RsyncSSHBackend, error) {
 		return nil, fmt.Errorf("rsync+ssh: remote rsync not found")
 	}
 
-	display := sshDisplayURL(conn, remotePath)
-	b.display = "rsync+" + display
+	b.display = sshDisplayURL(conn, remotePath)
 
 	return b, nil
 }
@@ -699,26 +698,109 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	return nil
 }
 
-func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+// AppendFrom resumes a partial upload by running rsync with --append. Remote
+// rsync inspects its existing dst size and only sends the missing tail. With
+// --inplace --partial -W on the transfer flags, the dst is written in place
+// and a partial upload survives for the next retry. -W is dropped automatically
+// by gorsync's serveroptions when --append is set (real rsync rejects the
+// combination).
+//
+// When src exposes a local filesystem path, rsync reads directly from it (no
+// tmpfile copy). Otherwise the source is streamed into a tmpfile first.
+//
+// The dst file is pre-truncated to offset on the remote — callers compute
+// offset from a recent dst stat, so this is normally a no-op, but it defends
+// against the remote shrinking under us between size probe and upload.
+func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	fullPath := path.Join(b.base, relPath)
-	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
+	if _, err := b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s && truncate -s %d %s",
+		shellQuote(path.Dir(fullPath)), offset, shellQuote(fullPath))); err != nil {
+		return err
+	}
+
+	srcPath := src.LocalPath()
+	var tmpDir string
+	if srcPath == "" {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "rsync-ssh-append-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmpDir)
+		tmpPath := filepath.Join(tmpDir, filepath.Base(relPath))
+		f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+		if err != nil {
+			return err
+		}
+		rd, err := src.Open(ctx)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		_, copyErr := io.Copy(f, rd)
+		rd.Close()
+		f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		srcPath = tmpPath
+	}
+
+	counter := progressFromContext(ctx)
+	tailSize := src.Size() - offset
+	var pushAdder *CappedAdder
+	if counter != nil && tailSize > 0 {
+		pushAdder = NewCappedAdder(counter, tailSize)
+	}
+
+	remoteDest := path.Join(b.base, path.Dir(relPath))
+	flags := append(rsyncFlagsForCtx(ctx), "--append")
+	client, err := rsyncclient.New(flags, rsyncclient.WithSender(), rsyncclient.WithStderr(io.Discard))
+	if err != nil {
+		return err
+	}
+	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remoteDest + "/"))
+	Log.Add("rsync+ssh", ">>>", fmt.Sprintf("APPEND %s @%d/%d via %s", relPath, offset, src.Size(), serverCmd))
 
 	session, err := b.client.NewSession()
 	if err != nil {
 		return err
 	}
-	defer session.Close()
-	defer cancelCloser(ctx, session)()
-	session.Stdin = src
-	cmd := fmt.Sprintf("truncate -s %d %s && cat >> %s && chmod %04o %s",
-		offset, shellQuote(fullPath),
-		shellQuote(fullPath),
-		mode.Perm(), shellQuote(fullPath))
-	Log.Add("rsync+ssh", ">>>", cmd)
-	err = session.Run(cmd)
+	stop := cancelCloser(ctx, session)
+	rw, rwErr := b.sessionReadWriter(session)
+	if rwErr != nil {
+		stop()
+		session.Close()
+		return rwErr
+	}
+	if err := session.Start(serverCmd); err != nil {
+		stop()
+		session.Close()
+		Log.Add("rsync+ssh", "ERR", err.Error())
+		return err
+	}
+
+	var rwForRun io.ReadWriter = rw
+	if pushAdder != nil {
+		rwForRun = &CountingReadWriter{RW: rw, Adder: pushAdder}
+	}
+	_, err = client.Run(ctx, rwForRun, []string{srcPath})
+	stop()
+	session.Close()
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
-	return err
+	if err != nil {
+		if pushAdder != nil {
+			counter.Add(-pushAdder.Used())
+		}
+		Log.Add("rsync+ssh", "ERR", err.Error())
+		return err
+	}
+	if pushAdder != nil {
+		pushAdder.Add(tailSize)
+	}
+	Log.Add("rsync+ssh", "<<<", fmt.Sprintf("APPEND %s OK (%d bytes appended)", relPath, tailSize))
+	return nil
 }
 
 func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
@@ -888,7 +970,12 @@ func (b *RsyncSSHBackend) sshRunCtx(ctx context.Context, cmd string) (string, er
 	}
 	out := stdout.String()
 	if out != "" {
-		Log.Add("rsync+ssh", "<<<", strings.TrimRight(out, "\n"))
+		trimmed := strings.TrimRight(out, "\n")
+		if n := strings.Count(trimmed, "\n"); n > 0 {
+			Log.Add("rsync+ssh", "<<<", fmt.Sprintf("%d lines", n+1))
+		} else {
+			Log.Add("rsync+ssh", "<<<", trimmed)
+		}
 	}
 	return out, nil
 }

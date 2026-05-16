@@ -317,6 +317,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "x", "X", "ctrl+c":
 			if c := m.copyProgress.Cancel.Load(); c != nil {
+				transport.Log.Add("copy", "<<<", "user canceled transfer")
 				c.f()
 			}
 		case "~", "`":
@@ -328,6 +329,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "x", "X", "ctrl+c":
 			if c := m.deleteProgress.Cancel.Load(); c != nil {
+				transport.Log.Add("delete", "<<<", "user canceled delete")
 				c.f()
 			}
 		case "~", "`":
@@ -566,6 +568,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node == nil || !node.IsDir || node.IsAttr {
 			break
 		}
+		if node.Left == nil && node.Right == nil {
+			break
+		}
 		leftPath := m.left.BasePath()
 		rightPath := m.right.BasePath()
 		if node.Left != nil {
@@ -738,9 +743,9 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var side model.Presence
 		found := true
 		switch msg.String() {
-		case ",":
+		case "a":
 			side = model.PresenceLeftOnly
-		case ".":
+		case "l":
 			side = model.PresenceRightOnly
 		case "enter":
 			side = model.PresenceBoth
@@ -1253,42 +1258,21 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 		return false
 	}
 
-	var reader io.ReadCloser
-	if seeker, ok := src.(model.SeekableOpener); ok {
-		r, err := seeker.OpenAt(ctx, relPath, offset)
-		if err != nil {
-			return false
-		}
-		reader = r
-	} else {
-		r, err := src.Open(ctx, relPath)
-		if err != nil {
-			return false
-		}
-		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
-			r.Close()
-			return false
-		}
-		reader = r
-	}
-	defer reader.Close()
-	defer startCancelCloser(ctx, reader)()
-
-	var srcReader io.Reader = reader
+	progress.Bytes.Add(offset)
+	progress.BaseBytes.Add(offset)
 	var added atomic.Int64
-	preCounted := transport.IsPreCounted(reader)
-	if !preCounted {
-		progress.Bytes.Add(offset)
-		progress.BaseBytes.Add(offset)
-		added.Store(offset)
-		srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
+	added.Store(offset)
+	opener := &trackedRangeOpener{
+		Backend:  src,
+		RelPath:  relPath,
+		FileSize: srcEntry.Size,
+		Ctx:      ctx,
+		Target:   &progress.Bytes,
+		Added:    &added,
 	}
-	srcReader = &cancelReader{r: srcReader, ctx: ctx}
-	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
+	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
 		progress.Bytes.Add(-added.Load())
-		if !preCounted {
-			progress.BaseBytes.Add(-offset)
-		}
+		progress.BaseBytes.Add(-offset)
 		return false
 	}
 	return true
@@ -1318,63 +1302,25 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 // portion is also tracked in BaseBytes so it doesn't inflate the transfer-rate
 // calculation.
 func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, progress *CopyProgress) error {
-	var reader io.ReadCloser
-	if seeker, ok := src.(model.SeekableOpener); ok {
-		r, err := seeker.OpenAt(ctx, relPath, offset)
-		if err != nil {
-			if errors.Is(err, transport.ErrResumeUnsupported) {
-				ro, oerr := src.Open(ctx, relPath)
-				if oerr != nil {
-					return oerr
-				}
-				if _, derr := io.CopyN(io.Discard, ro, offset); derr != nil {
-					ro.Close()
-					return derr
-				}
-				reader = ro
-			} else {
-				return err
-			}
-		} else {
-			reader = r
-		}
-	} else {
-		r, err := src.Open(ctx, relPath)
-		if err != nil {
-			return err
-		}
-		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
-			r.Close()
-			return err
-		}
-		reader = r
-	}
-	defer reader.Close()
-	defer startCancelCloser(ctx, reader)()
-
-	var srcReader io.Reader = reader
-	var added atomic.Int64
-	preCounted := transport.IsPreCounted(reader)
-	if !preCounted {
-		progress.Bytes.Add(offset)
-		progress.BaseBytes.Add(offset)
-		added.Store(offset)
-		srcReader = &trackedReader{r: reader, target: &progress.Bytes, added: &added}
-	}
-	srcReader = &cancelReader{r: srcReader, ctx: ctx}
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
-		progress.Bytes.Add(-added.Load())
-		if !preCounted {
-			progress.BaseBytes.Add(-offset)
-		}
 		return transport.ErrResumeUnsupported
 	}
-	if err := resumer.AppendFrom(ctx, relPath, srcReader, srcEntry.Mode, offset); err != nil {
+	progress.Bytes.Add(offset)
+	progress.BaseBytes.Add(offset)
+	var added atomic.Int64
+	added.Store(offset)
+	opener := &trackedRangeOpener{
+		Backend:  src,
+		RelPath:  relPath,
+		FileSize: srcEntry.Size,
+		Ctx:      ctx,
+		Target:   &progress.Bytes,
+		Added:    &added,
+	}
+	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
 		progress.Bytes.Add(-added.Load())
-		if !preCounted {
-			progress.BaseBytes.Add(-offset)
-		}
+		progress.BaseBytes.Add(-offset)
 		return err
 	}
 	return nil
@@ -1405,6 +1351,99 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 	}
 	return nil
 }
+
+// trackedRangeOpener implements model.RangeOpener for resume flows. OpenAt
+// wraps the returned reader so each tail byte read increments Target/Added.
+// Open (used by rsync-style backends that own their own progress accounting)
+// is left un-instrumented — those backends drive progress via
+// transport.progressFromContext during the rsync push.
+type trackedRangeOpener struct {
+	Backend  model.Backend
+	RelPath  string
+	FileSize int64
+	Ctx      context.Context
+	Target   *atomic.Int64
+	Added    *atomic.Int64
+}
+
+func (o *trackedRangeOpener) Size() int64 { return o.FileSize }
+
+func (o *trackedRangeOpener) LocalPath() string {
+	if lp, ok := o.Backend.(model.LocalFS); ok {
+		return lp.LocalPath(o.RelPath)
+	}
+	return ""
+}
+
+func (o *trackedRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
+	rd, err := o.Backend.Open(ctx, o.RelPath)
+	if err != nil {
+		return nil, err
+	}
+	return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
+}
+
+func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
+	var rd io.ReadCloser
+	if seeker, ok := o.Backend.(model.SeekableOpener); ok {
+		r, err := seeker.OpenAt(ctx, o.RelPath, offset)
+		if err != nil && !errors.Is(err, transport.ErrResumeUnsupported) {
+			return nil, err
+		}
+		rd = r
+	}
+	if rd == nil {
+		r, err := o.Backend.Open(ctx, o.RelPath)
+		if err != nil {
+			return nil, err
+		}
+		if offset > 0 {
+			if _, err := io.CopyN(io.Discard, r, offset); err != nil {
+				r.Close()
+				return nil, err
+			}
+		}
+		rd = r
+	}
+	if transport.IsPreCounted(rd) {
+		return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
+	}
+	return &cancelReadCloser{
+		rc:  &trackedReadCloser{rc: rd, target: o.Target, added: o.Added},
+		ctx: o.Ctx,
+	}, nil
+}
+
+type trackedReadCloser struct {
+	rc     io.ReadCloser
+	target *atomic.Int64
+	added  *atomic.Int64
+}
+
+func (t *trackedReadCloser) Read(p []byte) (int, error) {
+	n, err := t.rc.Read(p)
+	if n > 0 {
+		t.target.Add(int64(n))
+		t.added.Add(int64(n))
+	}
+	return n, err
+}
+
+func (t *trackedReadCloser) Close() error { return t.rc.Close() }
+
+type cancelReadCloser struct {
+	rc  io.ReadCloser
+	ctx context.Context
+}
+
+func (c *cancelReadCloser) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.rc.Read(p)
+}
+
+func (c *cancelReadCloser) Close() error { return c.rc.Close() }
 
 type trackedReader struct {
 	r      io.Reader

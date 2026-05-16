@@ -134,7 +134,7 @@ func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	return err
 }
 
-func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	path := filepath.Join(b.base, relPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -142,6 +142,11 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src io.Re
 	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
 		return fmt.Errorf("local: refuse to append into existing directory %s", path)
 	}
+	rd, err := src.OpenAt(ctx, offset)
+	if err != nil {
+		return err
+	}
+	defer rd.Close()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, mode)
 	if err != nil {
 		return err
@@ -150,7 +155,7 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src io.Re
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	_, err = io.Copy(f, src)
+	_, err = io.Copy(f, rd)
 	return err
 }
 

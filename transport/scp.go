@@ -30,7 +30,16 @@ func NewSCPBackend(rawURL string) (*SCPBackend, error) {
 	if err != nil {
 		return nil, err
 	}
+	b, err := newSCPBackendFromConn(conn)
+	if err != nil {
+		conn.client.Close()
+	}
+	return b, err
+}
 
+// newSCPBackendFromConn builds an SCPBackend over an already-dialed sshConn.
+// On error the caller is responsible for closing conn.client.
+func newSCPBackendFromConn(conn *sshConn) (*SCPBackend, error) {
 	b := &SCPBackend{client: conn.client}
 
 	remotePath := conn.basePath
@@ -48,7 +57,6 @@ func NewSCPBackend(rawURL string) (*SCPBackend, error) {
 	}
 	b.base = remotePath
 	b.display = sshDisplayURL(conn, remotePath)
-
 	return b, nil
 }
 
@@ -292,17 +300,22 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	return err
 }
 
-func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	fullPath := path.Join(b.base, relPath)
 	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
 
+	rd, err := src.OpenAt(ctx, offset)
+	if err != nil {
+		return err
+	}
+	defer rd.Close()
 	session, err := b.client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 	defer cancelCloser(ctx, session)()
-	session.Stdin = src
+	session.Stdin = rd
 	cmd := fmt.Sprintf("truncate -s %d %s && cat >> %s && chmod %04o %s",
 		offset, shellQuote(fullPath),
 		shellQuote(fullPath),
@@ -412,7 +425,12 @@ func (b *SCPBackend) sshRunCtx(ctx context.Context, cmd string) (string, error) 
 	}
 	out := stdout.String()
 	if out != "" {
-		Log.Add("scp", "<<<", strings.TrimRight(out, "\n"))
+		trimmed := strings.TrimRight(out, "\n")
+		if n := strings.Count(trimmed, "\n"); n > 0 {
+			Log.Add("scp", "<<<", fmt.Sprintf("%d lines", n+1))
+		} else {
+			Log.Add("scp", "<<<", trimmed)
+		}
 	}
 	return out, nil
 }

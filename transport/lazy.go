@@ -254,7 +254,7 @@ func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recur
 	})
 }
 
-func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode, offset int64) error {
+func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	inner, err := b.ensureConnected()
 	if err != nil {
 		return err

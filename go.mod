@@ -45,4 +45,4 @@ require (
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.78 // indirect
 )
 
-replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260511041215-3efba87cfc72 // branch: main
+replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20260516044321-667042a5b58d // branch: main

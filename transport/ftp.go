@@ -326,14 +326,19 @@ func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	return err
 }
 
-func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode, offset int64) error {
+func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+	rd, err := src.OpenAt(ctx, offset)
+	if err != nil {
+		return err
+	}
+	defer rd.Close()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	defer b.abortOnCancel(ctx)()
 	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	b.mkdirAllLocked(path.Dir(fullPath))
-	err := b.conn.StorFrom(fullPath, src, uint64(offset))
+	err = b.conn.StorFrom(fullPath, rd, uint64(offset))
 	if err != nil {
 		Log.Add("ftp", "ERR", err.Error())
 	}

@@ -29,7 +29,20 @@ func NewPanel(title string) *Panel {
 }
 
 func (p *Panel) SetNodes(nodes []*model.TreeNode) {
+	var anchor *model.TreeNode
+	if p.cursor >= 0 && p.cursor < len(p.nodes) {
+		anchor = p.nodes[p.cursor]
+	}
 	p.nodes = nodes
+	if anchor != nil {
+		for i, n := range nodes {
+			if n == anchor {
+				p.cursor = i
+				p.clampOffset()
+				return
+			}
+		}
+	}
 	if p.cursor >= len(p.nodes) {
 		p.cursor = max(0, len(p.nodes)-1)
 	}
