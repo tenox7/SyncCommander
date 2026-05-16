@@ -259,7 +259,7 @@ func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string,
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty checksum output")
 	}
-	return fields[0], nil
+	return strings.TrimPrefix(fields[0], "\\"), nil
 }
 
 func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {

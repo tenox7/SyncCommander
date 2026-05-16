@@ -248,7 +248,7 @@ func (b *SCPBackend) Checksum(ctx context.Context, relPath string) (string, erro
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty checksum output")
 	}
-	return fields[0], nil
+	return strings.TrimPrefix(fields[0], "\\"), nil
 }
 
 func (b *SCPBackend) ProbeChecksums() []string {

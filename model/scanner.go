@@ -878,9 +878,7 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft b
 	var sum string
 	var err error
 	if entry != nil {
-		callCtx, cancel := context.WithTimeout(ctx, s.stallTimeout)
-		sum, err = backend.Checksum(callCtx, node.RelPath)
-		cancel()
+		sum, err = backend.Checksum(ctx, node.RelPath)
 	}
 
 	s.mu.Lock()
