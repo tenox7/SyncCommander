@@ -706,7 +706,7 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 		switch node.Compare.Presence {
 		case PresenceBoth:
 			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
-			if collision || nodeStatus(node, opts) != AttrEqual {
+			if collision || nodeStatus(node, opts) != AttrEqual || node.Compare.Checksum == AttrDifferent {
 				*result = append(*result, node)
 			}
 		case PresenceLeftOnly:

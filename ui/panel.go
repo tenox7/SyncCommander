@@ -438,6 +438,9 @@ func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 	case model.PresenceLeftOnly, model.PresenceRightOnly:
 		return styleDir.Foreground(styleDifferent.GetForeground())
 	}
+	if node.SubtreeChecksumAnyDiff {
+		return styleDir.Foreground(styleDifferent.GetForeground())
+	}
 	switch node.ChildStatus {
 	case model.AttrEqual:
 		return styleDir.Foreground(styleEqual.GetForeground())
@@ -451,6 +454,9 @@ func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 func (p *Panel) nodeStyle(node *model.TreeNode) lipgloss.Style {
 	switch node.Compare.Presence {
 	case model.PresenceLeftOnly, model.PresenceRightOnly:
+		return styleDifferent
+	}
+	if node.Compare.Checksum == model.AttrDifferent {
 		return styleDifferent
 	}
 	opts := p.cmpOpts

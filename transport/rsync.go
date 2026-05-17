@@ -29,8 +29,11 @@ import (
 // streams the whole file. -W is intentional: gokrazy/rsync's hashSearch path
 // (internal/sender/fileio.go) misclassifies read errors as "file has changed
 // mid-transfer", and on this workload delta-sync saves no bandwidth anyway
-// (mostly immutable archives).
-var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "-W"}
+// (mostly immutable archives). --ignore-times bypasses rsync's quick-check
+// (skip when size+mtime match): SC only invokes these calls on user-initiated
+// copies, so we must transfer unconditionally — otherwise a same-size,
+// same-mtime, different-content file is silently skipped.
+var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "-W", "--ignore-times"}
 
 func rsyncFlagsForCtx(_ context.Context) []string {
 	return append([]string{}, rsyncTransferFlags...)
