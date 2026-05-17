@@ -217,7 +217,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		return
 	}
 
-	groups := groupFilesByTopLevel(root)
+	groups := groupFilesByTopLevel(root, false)
 	var checksumTotal int64
 	for _, g := range groups {
 		checksumTotal += int64(len(g.files))
@@ -248,22 +248,22 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	s.setProgress(p)
 }
 
-func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
+func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, changed *ChangedPaths) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, s.maxDepth)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, s.maxDepth, changed)
 		return
 	}
-	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST)
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, changed)
 }
 
 // DeepRescanNode rescans a node recursively regardless of the scanner's
 // maxDepth setting. Used by the explicit "deep scan" key.
 func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
 	if node.IsDir {
-		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, 0)
+		s.rescanDir(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, 0, nil)
 		return
 	}
-	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST)
+	s.rescanFile(ctx, node, withChecksum, subSecond, timeGrace, ignoreTZDST, nil)
 }
 
 // RefreshTopLevel re-lists root's immediate children without descending.
@@ -321,7 +321,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
 	}
-	children := MergeChildren(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace, ignoreTZDST)
+	children := mergeChildrenPreserving(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	restoreExpanded(children, oldExpanded)
 
 	s.mu.Lock()
@@ -331,7 +331,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	setp("done")
 }
 
-func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool) {
+func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, changed *ChangedPaths) {
 	var totalFiles, ckFiles, ckDone int64
 	setp := func(phase string) {
 		s.setProgress(ScanProgress{
@@ -365,12 +365,13 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	node.Left = le
 	node.Right = re
 	compareNode(node, subSecond, timeGrace, ignoreTZDST)
+	revalidateChecksum(node, changed)
 	s.mu.Unlock()
 
 	totalFiles = 1
 	setp("scanning...")
 
-	if withChecksum && node.Compare.Presence == PresenceBoth {
+	if withChecksum && node.Compare.Presence == PresenceBoth && node.Compare.Checksum == AttrUnknown {
 		ckFiles = 1
 		setp("checksumming...")
 		s.checksumNode(ctx, node)
@@ -379,7 +380,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	setp("done")
 }
 
-func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, depthLimit int) {
+func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, depthLimit int, changed *ChangedPaths) {
 	preloadFired := false
 	var dirsListed, totalFiles, ckTotal int64
 	var ckDone atomic.Int64
@@ -441,7 +442,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		queue = queue[:len(queue)-1]
 
 		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
+		children := mergeChildrenPreservingWithChanged(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST, changed)
 		restoreExpanded(children, oldExpanded)
 
 		s.mu.Lock()
@@ -494,7 +495,11 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		setp("done")
 		return
 	}
-	groups := groupFilesByTopLevel(node)
+	groups := groupFilesByTopLevel(node, true)
+	if len(groups) == 0 {
+		setp("done")
+		return
+	}
 	for _, g := range groups {
 		ckTotal += int64(len(g.files))
 	}
@@ -513,7 +518,7 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	}
 	var groups []checksumGroup
 	if node.IsDir {
-		groups = groupFilesByTopLevel(node)
+		groups = groupFilesByTopLevel(node, false)
 	} else if node.Compare.Presence == PresenceBoth {
 		groups = []checksumGroup{{dir: nil, files: []*TreeNode{node}}}
 	}
@@ -593,29 +598,7 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecon
 	if parent == nil {
 		return
 	}
-	nodeKey := func(name string, isDir bool) string {
-		if isDir {
-			return name + "/"
-		}
-		return name
-	}
-	oldByKey := make(map[string]*TreeNode)
-	for _, child := range parent.Children {
-		oldByKey[nodeKey(child.Name, child.IsDir)] = child
-	}
-	children := MergeChildren(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
-	for _, c := range children {
-		old, ok := oldByKey[nodeKey(c.Name, c.IsDir)]
-		if !ok {
-			continue
-		}
-		c.Listed = old.Listed
-		c.Expanded = old.Expanded
-		c.Children = old.Children
-		for _, gc := range old.Children {
-			gc.Parent = c
-		}
-	}
+	children := mergeChildrenPreserving(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	s.mu.Lock()
 	parent.Children = children
 	parent.Listed = true
@@ -766,6 +749,10 @@ func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 		for _, f := range g.files {
 			f.LeftChecksum = ""
 			f.RightChecksum = ""
+			f.LeftCksumSize = 0
+			f.LeftCksumModTime = time.Time{}
+			f.RightCksumSize = 0
+			f.RightCksumModTime = time.Time{}
 			f.LeftChecksumDone = false
 			f.RightChecksumDone = false
 			f.LeftChecksumErr = false
@@ -902,6 +889,8 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft b
 			node.LeftChecksumErr = true
 		} else {
 			node.LeftChecksum = sum
+			node.LeftCksumSize = entry.Size
+			node.LeftCksumModTime = entry.ModTime
 		}
 		node.LeftChecksumDone = true
 	} else {
@@ -911,6 +900,8 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft b
 			node.RightChecksumErr = true
 		} else {
 			node.RightChecksum = sum
+			node.RightCksumSize = entry.Size
+			node.RightCksumModTime = entry.ModTime
 		}
 		node.RightChecksumDone = true
 	}
@@ -994,12 +985,17 @@ type checksumGroup struct {
 	files []*TreeNode
 }
 
-// groupFilesByTopLevel splits all PresenceBoth files under root into groups,
+// groupFilesByTopLevel splits PresenceBoth files under root into groups,
 // one per top-level child dir (plus one with dir=nil for files directly under
 // root). The scanner processes each group independently so the rsync MD4
 // daemon call is scoped per top-level dir rather than fired once on the whole
 // base — which on big trees can take days for a single call.
-func groupFilesByTopLevel(root *TreeNode) []checksumGroup {
+//
+// onlyPending=true skips files whose Compare.Checksum is already known
+// (AttrEqual/AttrDifferent) — used by rescan paths so cached CRC survives
+// rescan unchanged. ChecksumNode and initial Scan pass false to enqueue all
+// PresenceBoth files.
+func groupFilesByTopLevel(root *TreeNode, onlyPending bool) []checksumGroup {
 	var groups []checksumGroup
 	var rootFiles []*TreeNode
 	for _, child := range root.Children {
@@ -1007,14 +1003,16 @@ func groupFilesByTopLevel(root *TreeNode) []checksumGroup {
 			continue
 		}
 		if !child.IsDir {
-			if child.Compare.Presence == PresenceBoth {
+			if child.Compare.Presence == PresenceBoth && needsChecksum(child, onlyPending) {
 				rootFiles = append(rootFiles, child)
 			}
 			continue
 		}
 		var files []*TreeNode
-		collectFiles(child, &files)
-		groups = append(groups, checksumGroup{dir: child, files: files})
+		collectFiles(child, &files, onlyPending)
+		if len(files) > 0 {
+			groups = append(groups, checksumGroup{dir: child, files: files})
+		}
 	}
 	if len(rootFiles) > 0 {
 		groups = append([]checksumGroup{{dir: nil, files: rootFiles}}, groups...)
@@ -1022,13 +1020,20 @@ func groupFilesByTopLevel(root *TreeNode) []checksumGroup {
 	return groups
 }
 
-func collectFiles(node *TreeNode, files *[]*TreeNode) {
-	if !node.IsDir && node.Compare.Presence == PresenceBoth {
+func collectFiles(node *TreeNode, files *[]*TreeNode, onlyPending bool) {
+	if !node.IsDir && node.Compare.Presence == PresenceBoth && needsChecksum(node, onlyPending) {
 		*files = append(*files, node)
 	}
 	for _, child := range node.Children {
-		collectFiles(child, files)
+		collectFiles(child, files, onlyPending)
 	}
+}
+
+func needsChecksum(n *TreeNode, onlyPending bool) bool {
+	if !onlyPending {
+		return true
+	}
+	return n.Compare.Checksum == AttrUnknown
 }
 
 func (s *Scanner) negotiateChecksum() bool {

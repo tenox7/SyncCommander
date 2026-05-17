@@ -80,6 +80,14 @@ type TreeNode struct {
 	ChildStatus     AttrStatus
 	LeftChecksum    string
 	RightChecksum   string
+	// CksumFingerprint stores (size, mtime) snapshots at the moment Left/RightChecksum
+	// were computed. The preserving merge used by rescan paths consults these to
+	// decide whether to keep cached CRC: if the new entry's (size, mtime) match,
+	// the file's body is presumed unchanged and CRC is reused; otherwise dropped.
+	LeftCksumSize     int64
+	LeftCksumModTime  time.Time
+	RightCksumSize    int64
+	RightCksumModTime time.Time
 	LeftTotalSize   int64
 	RightTotalSize  int64
 	LeftTotalFiles  int
@@ -131,11 +139,33 @@ func NewRootNode() *TreeNode {
 	return &TreeNode{Name: "/", IsDir: true, Expanded: true, Listed: true}
 }
 
+// ChangedPaths names files whose content this process modified since CRC was
+// last cached. The preserving merge drops cached CRC for any path listed here
+// even when the new (size, mtime) match the cached fingerprint — handles the
+// case where rsync -t preserves mtime across a copy, leaving the fingerprint
+// looking valid while the body has changed.
+type ChangedPaths struct {
+	Left  map[string]bool
+	Right map[string]bool
+}
+
+func (c *ChangedPaths) hasLeft(relPath string) bool {
+	return c != nil && c.Left[relPath]
+}
+
+func (c *ChangedPaths) hasRight(relPath string) bool {
+	return c != nil && c.Right[relPath]
+}
+
 // mergeChildrenPreserving merges fresh entries into parent's children while
 // reusing existing TreeNodes (by name+isDir). Existing nodes keep their
 // Children/Listed/Expanded; new entries are added, missing ones dropped.
 // Used to refresh a single directory level without wiping nested state.
 func mergeChildrenPreserving(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
+	return mergeChildrenPreservingWithChanged(parent, leftEntries, rightEntries, depth, subSecond, timeGrace, ignoreTZDST, nil)
+}
+
+func mergeChildrenPreservingWithChanged(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool, changed *ChangedPaths) []*TreeNode {
 	keyFor := func(name string, isDir bool) string {
 		if isDir {
 			return name + "/"
@@ -181,6 +211,7 @@ func mergeChildrenPreserving(parent *TreeNode, leftEntries, rightEntries []FileE
 	nodes := make([]*TreeNode, 0, len(byKey))
 	for _, n := range byKey {
 		compareNode(n, subSecond, timeGrace, ignoreTZDST)
+		revalidateChecksum(n, changed)
 		nodes = append(nodes, n)
 	}
 	sort.Slice(nodes, func(i, j int) bool {
@@ -191,6 +222,47 @@ func mergeChildrenPreserving(parent *TreeNode, leftEntries, rightEntries []FileE
 		return a.Name < b.Name
 	})
 	return nodes
+}
+
+// revalidateChecksum drops cached Left/RightChecksum if the new entry's
+// (size, mtime) disagree with the stored fingerprint, or if the path was
+// explicitly flagged as content-changed on that side. After this runs,
+// Compare.Checksum reflects whatever survived: AttrUnknown when either side
+// is missing a cached sum and both sides are present.
+func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
+	if n.IsDir || n.IsAttr {
+		return
+	}
+	leftPath := ""
+	if n.Left != nil {
+		leftPath = n.Left.RelPath
+	}
+	rightPath := ""
+	if n.Right != nil {
+		rightPath = n.Right.RelPath
+	}
+	if n.Left == nil || changed.hasLeft(leftPath) ||
+		n.LeftCksumSize != n.Left.Size || !n.LeftCksumModTime.Equal(n.Left.ModTime) {
+		n.LeftChecksum = ""
+		n.LeftCksumSize = 0
+		n.LeftCksumModTime = time.Time{}
+	}
+	if n.Right == nil || changed.hasRight(rightPath) ||
+		n.RightCksumSize != n.Right.Size || !n.RightCksumModTime.Equal(n.Right.ModTime) {
+		n.RightChecksum = ""
+		n.RightCksumSize = 0
+		n.RightCksumModTime = time.Time{}
+	}
+	switch {
+	case n.Compare.Presence != PresenceBoth:
+		n.Compare.Checksum = AttrNA
+	case n.LeftChecksum == "" || n.RightChecksum == "":
+		n.Compare.Checksum = AttrUnknown
+	case n.LeftChecksum == n.RightChecksum:
+		n.Compare.Checksum = AttrEqual
+	default:
+		n.Compare.Checksum = AttrDifferent
+	}
 }
 
 func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {

@@ -34,6 +34,7 @@ type renameDoneMsg struct{ err error }
 type deleteDoneMsg struct{}
 type copyDoneMsg struct {
 	rescanRoot *model.TreeNode
+	changed    *model.ChangedPaths
 }
 
 type cancelFn struct{ f context.CancelFunc }
@@ -238,7 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTree()
 		if msg.rescanRoot != nil {
 			m.scanning = true
-			return m, tea.Batch(m.rescanNode(msg.rescanRoot), m.ensureTick())
+			return m, tea.Batch(m.rescanNode(msg.rescanRoot, msg.changed), m.ensureTick())
 		}
 		return m, nil
 	case diffLoadDoneMsg:
@@ -826,83 +827,6 @@ func (m *Model) openDelete(node *model.TreeNode) {
 	m.confirm.OpenChoice("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr}, true)
 }
 
-type deleteEntry struct {
-	relPath string
-	isDir   bool
-	onLeft  bool
-	onRight bool
-}
-
-func enumerateDeletesFromTree(node *model.TreeNode, delLeft, delRight bool) ([]deleteEntry, bool) {
-	if node.IsAttr {
-		return nil, true
-	}
-	var result []deleteEntry
-	if node.IsDir {
-		if !node.Listed {
-			return nil, false
-		}
-		for _, child := range node.Children {
-			if child.IsAttr {
-				continue
-			}
-			sub, ok := enumerateDeletesFromTree(child, delLeft, delRight)
-			if !ok {
-				return nil, false
-			}
-			result = append(result, sub...)
-		}
-	}
-	entry := deleteEntry{
-		relPath: node.RelPath,
-		isDir:   node.IsDir,
-		onLeft:  delLeft && node.Left != nil,
-		onRight: delRight && node.Right != nil,
-	}
-	if entry.onLeft || entry.onRight {
-		result = append(result, entry)
-	}
-	return result, true
-}
-
-func enumerateDeletesFromBackend(ctx context.Context, backend model.Backend, relPath string, isDir bool, onLeft, onRight bool, progress *DeleteProgress) ([]deleteEntry, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if !isDir {
-		entry := deleteEntry{relPath: relPath, isDir: false, onLeft: onLeft, onRight: onRight}
-		progress.Total.Add(countOps(entry))
-		return []deleteEntry{entry}, nil
-	}
-	list, err := backend.List(ctx, relPath)
-	if err != nil {
-		return nil, err
-	}
-	var result []deleteEntry
-	for _, e := range list {
-		sub, err := enumerateDeletesFromBackend(ctx, backend, e.RelPath, e.IsDir, onLeft, onRight, progress)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, sub...)
-	}
-	entry := deleteEntry{relPath: relPath, isDir: true, onLeft: onLeft, onRight: onRight}
-	progress.Total.Add(countOps(entry))
-	result = append(result, entry)
-	return result, nil
-}
-
-func countOps(e deleteEntry) int64 {
-	var n int64
-	if e.onLeft {
-		n++
-	}
-	if e.onRight {
-		n++
-	}
-	return n
-}
-
 func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	left := m.left
 	right := m.right
@@ -924,65 +848,49 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
-	progress.Total.Store(0)
 	progress.Done.Store(0)
-	progress.File.Store("")
+	progress.File.Store(relPath)
 	progress.Side.Store(sideLabel)
 	progress.Start.Store(time.Now().UnixNano())
-	progress.Enumerating.Store(true)
+	progress.Enumerating.Store(false)
+
+	files, dirs, _ := model.CountDescendants(node)
+	perSide := int64(files + dirs)
+	if isDir {
+		perSide++
+	}
+	if perSide == 0 {
+		perSide = 1
+	}
+	var sides int64
+	if delLeft {
+		sides++
+	}
+	if delRight {
+		sides++
+	}
+	progress.Total.Store(perSide * sides)
+
 	return func() tea.Msg {
 		ctx := baseCtx
-		var entries []deleteEntry
-		if treeEntries, complete := enumerateDeletesFromTree(node, delLeft, delRight); complete {
-			entries = treeEntries
-			var total int64
-			for _, e := range entries {
-				total += countOps(e)
-			}
-			progress.Total.Store(total)
-		} else {
-			var leftEntries, rightEntries []deleteEntry
-			if delLeft {
-				le, err := enumerateDeletesFromBackend(ctx, left, relPath, isDir, true, false, progress)
-				if err != nil {
-					transport.Log.Add("delete", "ERR", "enumerate left "+relPath+": "+err.Error())
-				}
-				leftEntries = le
-			}
-			if delRight {
-				re, err := enumerateDeletesFromBackend(ctx, right, relPath, isDir, false, true, progress)
-				if err != nil {
-					transport.Log.Add("delete", "ERR", "enumerate right "+relPath+": "+err.Error())
-				}
-				rightEntries = re
-			}
-			entries = append(leftEntries, rightEntries...)
-		}
-		progress.Enumerating.Store(false)
 
-		for _, e := range entries {
-			if ctx.Err() != nil {
-				break
+		if delLeft && ctx.Err() == nil {
+			err := removeOne(ctx, left, relPath, isDir)
+			if err != nil {
+				transport.Log.Add("delete", "ERR", "left "+relPath+": "+err.Error())
+			} else {
+				transport.Log.Add("delete", "<<<", "left "+relPath)
 			}
-			progress.File.Store(e.relPath)
-			if e.onLeft {
-				err := removeOne(ctx, left, e.relPath, e.isDir)
-				if err != nil {
-					transport.Log.Add("delete", "ERR", "left "+e.relPath+": "+err.Error())
-				} else {
-					transport.Log.Add("delete", "<<<", "left "+e.relPath)
-				}
-				progress.Done.Add(1)
+			progress.Done.Add(perSide)
+		}
+		if delRight && ctx.Err() == nil {
+			err := removeOne(ctx, right, relPath, isDir)
+			if err != nil {
+				transport.Log.Add("delete", "ERR", "right "+relPath+": "+err.Error())
+			} else {
+				transport.Log.Add("delete", "<<<", "right "+relPath)
 			}
-			if e.onRight {
-				err := removeOne(ctx, right, e.relPath, e.isDir)
-				if err != nil {
-					transport.Log.Add("delete", "ERR", "right "+e.relPath+": "+err.Error())
-				} else {
-					transport.Log.Add("delete", "<<<", "right "+e.relPath)
-				}
-				progress.Done.Add(1)
-			}
+			progress.Done.Add(perSide)
 		}
 
 		refreshCtx := context.Background()
@@ -1073,6 +981,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.FileStartBaseBytes.Store(0)
 		progress.FileStart.Store(0)
 
+		dstChanged := make(map[string]bool)
+		markChanged := func(relPath string) {
+			dstChanged[relPath] = true
+		}
 		for _, f := range files {
 			if ctx.Err() != nil {
 				break
@@ -1132,6 +1044,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if resumeOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				markChanged(f.RelPath)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK (resumed)")
 				progress.Done.Add(1)
 				continue
@@ -1144,6 +1057,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if directOK {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				markChanged(f.RelPath)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
 				progress.Done.Add(1)
 				continue
@@ -1170,6 +1084,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			})
 			if err == nil {
 				_ = dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime)
+				markChanged(f.RelPath)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
 			} else {
 				transport.Log.Add("copy", "ERR", "COPY "+f.RelPath+": "+err.Error())
@@ -1203,7 +1118,13 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			parentDir := model.DirOf(node.RelPath)
 			rescanRoot = scanner.FindNearestDestNode(parentDir, leftToRight)
 		}
-		return copyDoneMsg{rescanRoot: rescanRoot}
+		changed := &model.ChangedPaths{}
+		if leftToRight {
+			changed.Right = dstChanged
+		} else {
+			changed.Left = dstChanged
+		}
+		return copyDoneMsg{rescanRoot: rescanRoot, changed: changed}
 	}
 }
 
@@ -1526,11 +1447,22 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		}
 		newer, older := l, r
 		olderBackend := right
+		touchedLeft := false
 		if r.ModTime.After(l.ModTime) {
 			newer, older = r, l
 			olderBackend = left
+			touchedLeft = true
 		}
-		_ = olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime)
+		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime); err == nil {
+			// Touch only changes metadata; the file body is unchanged. Roll the
+			// cached CRC fingerprint forward to the new mtime so the preserving
+			// merge below treats CRC as still valid.
+			if touchedLeft {
+				node.LeftCksumModTime = newer.ModTime
+			} else {
+				node.RightCksumModTime = newer.ModTime
+			}
+		}
 		parentDir := model.DirOf(node.RelPath)
 		le, re := scanner.ListBothDir(ctx, parentDir)
 		scanner.RefreshDir(model.DirOf(node.RelPath), le, re, subSecond, timeGrace, ignoreTZDST)
@@ -1661,7 +1593,7 @@ func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
 	}
 }
 
-func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
+func (m *Model) rescanNode(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
 	checksum := m.cmpOpts.Checksum
 	subSecond := m.cmpOpts.SubSecond
 	timeGrace := m.cmpOpts.TimeGrace
@@ -1670,7 +1602,7 @@ func (m *Model) rescanNode(node *model.TreeNode) tea.Cmd {
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
-			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
+			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST, changed)
 		})
 		return rescanDoneMsg{}
 	}
@@ -1687,7 +1619,7 @@ func (m *Model) rescanWithTopLevel(node *model.TreeNode) tea.Cmd {
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
 			if rescanCursor {
-				scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
+				scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST, nil)
 			}
 			scanner.RefreshTopLevel(context.Background(), subSecond, timeGrace, ignoreTZDST)
 		})
@@ -1772,6 +1704,8 @@ func (m *Model) swapSides() {
 func swapTreeData(node *model.TreeNode) {
 	node.Left, node.Right = node.Right, node.Left
 	node.LeftChecksum, node.RightChecksum = node.RightChecksum, node.LeftChecksum
+	node.LeftCksumSize, node.RightCksumSize = node.RightCksumSize, node.LeftCksumSize
+	node.LeftCksumModTime, node.RightCksumModTime = node.RightCksumModTime, node.LeftCksumModTime
 	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
 	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
 	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
