@@ -371,7 +371,11 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	totalFiles = 1
 	setp("scanning...")
 
-	if withChecksum && node.Compare.Presence == PresenceBoth && node.Compare.Checksum == AttrUnknown {
+	needCk := node.Compare.Presence == PresenceBoth && node.Compare.Checksum == AttrUnknown
+	if needCk && !withChecksum && (node.LeftChecksum != "") == (node.RightChecksum != "") {
+		needCk = false
+	}
+	if needCk {
 		ckFiles = 1
 		setp("checksumming...")
 		s.checksumNode(ctx, node)
@@ -491,12 +495,11 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		}
 	}
 
-	if !withChecksum || !s.negotiateChecksum() {
-		setp("done")
-		return
-	}
 	groups := groupFilesByTopLevel(node, true)
-	if len(groups) == 0 {
+	if !withChecksum {
+		groups = filterPartialCRCGroups(groups)
+	}
+	if len(groups) == 0 || !s.negotiateChecksum() {
 		setp("done")
 		return
 	}
@@ -1034,6 +1037,22 @@ func needsChecksum(n *TreeNode, onlyPending bool) bool {
 		return true
 	}
 	return n.Compare.Checksum == AttrUnknown
+}
+
+func filterPartialCRCGroups(groups []checksumGroup) []checksumGroup {
+	var out []checksumGroup
+	for _, g := range groups {
+		var keep []*TreeNode
+		for _, f := range g.files {
+			if (f.LeftChecksum != "") != (f.RightChecksum != "") {
+				keep = append(keep, f)
+			}
+		}
+		if len(keep) > 0 {
+			out = append(out, checksumGroup{dir: g.dir, files: keep})
+		}
+	}
+	return out
 }
 
 func (s *Scanner) negotiateChecksum() bool {

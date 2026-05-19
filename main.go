@@ -25,6 +25,7 @@ func main() {
 	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences (hour-modulo)")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
+	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
@@ -71,7 +72,10 @@ func main() {
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
 
-	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan)
+	if *parallel < 1 {
+		*parallel = 1
+	}
+	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel)
 	p := tea.NewProgram(mdl, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

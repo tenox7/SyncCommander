@@ -8,6 +8,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,8 @@ type cancelFn struct{ f context.CancelFunc }
 type CopyProgress struct {
 	Total              atomic.Int64
 	Done               atomic.Int64
+	InFlight           atomic.Int64
+	Parallel           atomic.Int64
 	Bytes              atomic.Int64
 	BaseBytes          atomic.Int64
 	TotalBytes         atomic.Int64
@@ -108,11 +111,15 @@ type Model struct {
 	openDlg        *OpenDialog
 	insecure       bool
 	deepScan       bool
+	copyParallel   int
 	tickActive     bool
 	cachedStats    *TreeStats
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool) Model {
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel int) Model {
+	if copyParallel < 1 {
+		copyParallel = 1
+	}
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
@@ -125,6 +132,7 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
+		copyParallel:   copyParallel,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
 		confirm:        NewConfirmDialog(),
@@ -914,6 +922,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	scanner := m.scanner
 	opts := *m.cmpOpts
 	progress := m.copyProgress
+	parallel := m.copyParallel
+	if parallel < 1 {
+		parallel = 1
+	}
 	baseCtx, cancel := context.WithCancel(context.Background())
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
@@ -971,6 +983,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.Total.Store(int64(len(files)))
 		progress.TotalBytes.Store(totalBytes)
 		progress.Done.Store(0)
+		progress.InFlight.Store(0)
+		progress.Parallel.Store(int64(parallel))
 		progress.Bytes.Store(0)
 		progress.BaseBytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
@@ -982,13 +996,20 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.FileStart.Store(0)
 
 		dstChanged := make(map[string]bool)
+		var changedMu sync.Mutex
 		markChanged := func(relPath string) {
+			changedMu.Lock()
 			dstChanged[relPath] = true
+			changedMu.Unlock()
 		}
-		for _, f := range files {
-			if ctx.Err() != nil {
-				break
-			}
+
+		if parallel > 1 {
+			transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", parallel))
+		}
+		sem := make(chan struct{}, parallel)
+		var wg sync.WaitGroup
+
+		copyOne := func(f *model.TreeNode) {
 			var src, dst model.Backend
 			var srcEntry, dstEntry *model.FileEntry
 			if leftToRight {
@@ -1000,7 +1021,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			if srcEntry == nil {
 				progress.Done.Add(1)
-				continue
+				return
 			}
 			if srcEntry.IsDir {
 				progress.File.Store(f.RelPath)
@@ -1011,7 +1032,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 					transport.Log.Add("copy", "<<<", "mkdir "+f.RelPath)
 				}
 				progress.Done.Add(1)
-				continue
+				return
 			}
 			if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
 				var clearErr error
@@ -1023,7 +1044,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				if clearErr != nil {
 					transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.RelPath+": "+clearErr.Error())
 					progress.Done.Add(1)
-					continue
+					return
 				}
 				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.RelPath)
 				dstEntry = nil
@@ -1047,7 +1068,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				markChanged(f.RelPath)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK (resumed)")
 				progress.Done.Add(1)
-				continue
+				return
 			}
 
 			var directOK bool
@@ -1060,7 +1081,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				markChanged(f.RelPath)
 				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
 				progress.Done.Add(1)
-				continue
+				return
 			}
 
 			attempt := 0
@@ -1091,6 +1112,24 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 			progress.Done.Add(1)
 		}
+
+	dispatch:
+		for _, f := range files {
+			select {
+			case <-ctx.Done():
+				break dispatch
+			case sem <- struct{}{}:
+			}
+			wg.Add(1)
+			progress.InFlight.Add(1)
+			go func(f *model.TreeNode) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				defer progress.InFlight.Add(-1)
+				copyOne(f)
+			}(f)
+		}
+		wg.Wait()
 
 		var rescanRoot *model.TreeNode
 		if node.IsDir {
@@ -1854,6 +1893,8 @@ func (m Model) View() string {
 		ltr := m.copyProgress.LeftToRight.Load()
 		done := m.copyProgress.Done.Load()
 		total := m.copyProgress.Total.Load()
+		inflight := m.copyProgress.InFlight.Load()
+		parallel := m.copyProgress.Parallel.Load()
 		bytes := m.copyProgress.Bytes.Load()
 		baseBytes := m.copyProgress.BaseBytes.Load()
 		totalBytes := m.copyProgress.TotalBytes.Load()
@@ -1869,7 +1910,7 @@ func (m Model) View() string {
 			fileElapsed = time.Since(time.Unix(0, fStart))
 		}
 		progressSpinner := spinnerFrames[m.copySpinFrame]
-		popup := RenderCopyPopup(file, ltr, done, total, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
+		popup := RenderCopyPopup(file, ltr, done, total, inflight, parallel, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {

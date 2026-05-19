@@ -104,6 +104,7 @@ func formatElapsed(d time.Duration) string {
 
 func RenderCopyPopup(file string, leftToRight bool,
 	doneFiles, totalFiles int64,
+	inFlight, parallel int64,
 	fileBytes, fileSize, fileBaseBytes int64,
 	bytesCopied, totalBytes, baseBytes int64,
 	fileElapsed, totalElapsed time.Duration,
@@ -179,6 +180,9 @@ func RenderCopyPopup(file string, leftToRight bool,
 	}
 
 	line1 := fmt.Sprintf("COPY  %d/%d files", doneFiles, totalFiles)
+	if parallel > 1 {
+		line1 += fmt.Sprintf("  [%d/%d in flight]", inFlight, parallel)
+	}
 	line2 := progressMark + " " + name
 	line3 := fmt.Sprintf("File:  %s/%s  %s  ETA %s",
 		model.FormatSize(fileBytes), model.FormatSize(fileSize),
