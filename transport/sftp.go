@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -15,21 +16,52 @@ import (
 	"sc/model"
 )
 
+// sftpFastOpts returns the throughput tuning applied to every sftp.Client
+// the backend opens. The pkg/sftp defaults are pessimistic: maxPacket=32KB
+// and writes are synchronous (each Write blocks for STATUS), so per-stream
+// throughput collapses to roughly maxPacket/RTT. UseConcurrentWrites lets
+// File.ReadFrom (which io.Copy invokes) pipeline up to
+// maxConcurrentRequests packets at once, and MaxPacketChecked(256KB) cuts
+// the per-block overhead in half again.
+func sftpFastOpts() []sftp.ClientOption {
+	return []sftp.ClientOption{
+		sftp.UseConcurrentWrites(true),
+		sftp.UseConcurrentReads(true),
+		sftp.MaxPacketChecked(256 << 10),
+	}
+}
+
+type sftpConn struct {
+	sftp *sftp.Client
+	ssh  *ssh.Client
+}
+
+func (c *sftpConn) close() {
+	if c.sftp != nil {
+		c.sftp.Close()
+	}
+	if c.ssh != nil {
+		c.ssh.Close()
+	}
+}
+
 type SFTPBackend struct {
 	base      string
+	rawURL    string
 	client    *sftp.Client
 	sshClient *ssh.Client
 	display   string
 	cksumAlgo string
 	cksumCmds map[string]string
+	pool      *sshPool[*sftpConn]
 }
 
-func NewSFTPBackend(rawURL string) (*SFTPBackend, error) {
+func NewSFTPBackend(rawURL string, parallel int) (*SFTPBackend, error) {
 	conn, err := dialSSH(rawURL)
 	if err != nil {
 		return nil, err
 	}
-	b, err := newSFTPBackendFromConn(conn)
+	b, err := newSFTPBackendFromConn(conn, rawURL, parallel)
 	if err != nil {
 		conn.client.Close()
 	}
@@ -37,9 +69,12 @@ func NewSFTPBackend(rawURL string) (*SFTPBackend, error) {
 }
 
 // newSFTPBackendFromConn builds an SFTPBackend over an already-dialed sshConn.
-// On error the caller is responsible for closing conn.client.
-func newSFTPBackendFromConn(conn *sshConn) (*SFTPBackend, error) {
-	sftpClient, err := sftp.NewClient(conn.client)
+// rawURL is retained so the pool can dial fresh SSH connections for parallel
+// transfers. parallel sizes the pool's extras (= parallel-1, so total
+// concurrent slots = parallel). On error the caller is responsible for
+// closing conn.client.
+func newSFTPBackendFromConn(conn *sshConn, rawURL string, parallel int) (*SFTPBackend, error) {
+	sftpClient, err := sftp.NewClient(conn.client, sftpFastOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("sftp: %v", err)
 	}
@@ -58,17 +93,37 @@ func newSFTPBackendFromConn(conn *sshConn) (*SFTPBackend, error) {
 		}
 	}
 
+	primary := &sftpConn{sftp: sftpClient, ssh: conn.client}
+	maxExtras := parallel - 1
+	dial := func() (*sftpConn, error) {
+		c, err := dialSSH(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		sc, err := sftp.NewClient(c.client, sftpFastOpts()...)
+		if err != nil {
+			c.client.Close()
+			return nil, fmt.Errorf("sftp: %v", err)
+		}
+		Log.Add("sftp", "<<<", "extra connection dialed")
+		return &sftpConn{sftp: sc, ssh: c.client}, nil
+	}
+	pool := newSSHPool(primary, maxExtras, dial, func(c *sftpConn) { c.close() })
+
 	return &SFTPBackend{
 		base:      remotePath,
+		rawURL:    rawURL,
 		client:    sftpClient,
 		sshClient: conn.client,
 		display:   sshDisplayURL(conn, remotePath),
+		pool:      pool,
 	}, nil
 }
 
 func (b *SFTPBackend) BasePath() string { return b.display }
 
 func (b *SFTPBackend) Close() error {
+	b.pool.close()
 	b.client.Close()
 	return b.sshClient.Close()
 }
@@ -159,7 +214,9 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	f, err := b.client.Create(fullPath)
+	conn, release := b.pool.acquire()
+	defer release()
+	f, err := conn.sftp.Create(fullPath)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
@@ -170,7 +227,7 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	if err := b.client.Chmod(fullPath, mode); err != nil {
+	if err := conn.sftp.Chmod(fullPath, mode); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
@@ -190,7 +247,9 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 		return err
 	}
 	defer rd.Close()
-	f, err := b.client.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE)
+	conn, release := b.pool.acquire()
+	defer release()
+	f, err := conn.sftp.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
@@ -205,7 +264,7 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	if err := b.client.Chmod(fullPath, mode); err != nil {
+	if err := conn.sftp.Chmod(fullPath, mode); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
@@ -213,17 +272,20 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 }
 
 func (b *SFTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	rc, err := b.client.Open(path.Join(b.base, relPath))
+	conn, release := b.pool.acquire()
+	rc, err := conn.sftp.Open(path.Join(b.base, relPath))
 	if err != nil {
+		release()
 		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
 		return nil, err
 	}
 	if _, err := rc.Seek(offset, io.SeekStart); err != nil {
 		rc.Close()
+		release()
 		Log.Add("sftp", "ERR", "SEEK "+relPath+": "+err.Error())
 		return nil, err
 	}
-	return rc, nil
+	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
 }
 
 func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
@@ -291,9 +353,26 @@ func (b *SFTPBackend) removeAll(fullPath string) error {
 }
 
 func (b *SFTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	rc, err := b.client.Open(path.Join(b.base, relPath))
+	conn, release := b.pool.acquire()
+	rc, err := conn.sftp.Open(path.Join(b.base, relPath))
 	if err != nil {
+		release()
 		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
+		return nil, err
 	}
-	return rc, err
+	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
+}
+
+// sftpPooledReader wraps an sftp.File so the underlying connection is
+// released back to the pool when the caller closes the reader.
+type sftpPooledReader struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (r *sftpPooledReader) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.release)
+	return err
 }

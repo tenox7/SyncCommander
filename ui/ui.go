@@ -50,6 +50,8 @@ type CopyProgress struct {
 	Batched            atomic.Bool
 	Bytes              atomic.Int64
 	BaseBytes          atomic.Int64
+	CompletedBytes     atomic.Int64
+	CompletedBaseBytes atomic.Int64
 	TotalBytes         atomic.Int64
 	Start              atomic.Int64
 	File               atomic.Value
@@ -59,6 +61,107 @@ type CopyProgress struct {
 	FileStartBaseBytes atomic.Int64
 	LeftToRight        atomic.Bool
 	Cancel             atomic.Pointer[cancelFn]
+
+	slotsMu sync.RWMutex
+	slots   []*ProgressSlot
+}
+
+// ProgressSlot tracks one in-flight file copy for the multi-slot copy popup.
+// Each parallel goroutine in copyOne claims a slot at start and releases it
+// at end. The transport writes byte deltas into Bytes via the context counter.
+type ProgressSlot struct {
+	File      atomic.Value
+	Size      atomic.Int64
+	Bytes     atomic.Int64
+	BaseBytes atomic.Int64
+	Start     atomic.Int64
+	Active    atomic.Bool
+}
+
+func (p *CopyProgress) ResetSlots(n int) {
+	p.slotsMu.Lock()
+	defer p.slotsMu.Unlock()
+	p.slots = make([]*ProgressSlot, n)
+	for i := range p.slots {
+		p.slots[i] = &ProgressSlot{}
+	}
+}
+
+func (p *CopyProgress) ClaimSlot() *ProgressSlot {
+	p.slotsMu.RLock()
+	defer p.slotsMu.RUnlock()
+	for _, s := range p.slots {
+		if s.Active.CompareAndSwap(false, true) {
+			s.File.Store("")
+			s.Size.Store(0)
+			s.Bytes.Store(0)
+			s.BaseBytes.Store(0)
+			s.Start.Store(0)
+			return s
+		}
+	}
+	return nil
+}
+
+func (p *CopyProgress) ReleaseSlot(s *ProgressSlot) {
+	if s == nil {
+		return
+	}
+	p.CompletedBytes.Add(s.Bytes.Load())
+	p.CompletedBaseBytes.Add(s.BaseBytes.Load())
+	s.Active.Store(false)
+}
+
+func (p *CopyProgress) SnapshotSlots() []SlotSnapshot {
+	p.slotsMu.RLock()
+	defer p.slotsMu.RUnlock()
+	out := make([]SlotSnapshot, 0, len(p.slots))
+	for _, s := range p.slots {
+		if !s.Active.Load() {
+			continue
+		}
+		file, _ := s.File.Load().(string)
+		out = append(out, SlotSnapshot{
+			File:      file,
+			Size:      s.Size.Load(),
+			Bytes:     s.Bytes.Load(),
+			BaseBytes: s.BaseBytes.Load(),
+			Start:     s.Start.Load(),
+		})
+	}
+	return out
+}
+
+type SlotSnapshot struct {
+	File      string
+	Size      int64
+	Bytes     int64
+	BaseBytes int64
+	Start     int64
+}
+
+// SyncTotals refreshes Bytes/BaseBytes to be the sum of completed bytes plus
+// the in-flight slot counters. The status bar reads progress.Bytes directly;
+// per-slot writers update only their slot, so without this the status bar
+// counter would freeze during parallel copies. Skip during batch mode —
+// batch writes Bytes directly and has no slots to sum from.
+func (p *CopyProgress) SyncTotals() {
+	if p.Batched.Load() {
+		return
+	}
+	bytes := p.CompletedBytes.Load()
+	base := p.CompletedBaseBytes.Load()
+	p.slotsMu.RLock()
+	for _, s := range p.slots {
+		if !s.Active.Load() {
+			continue
+		}
+		bytes += s.Bytes.Load()
+		base += s.BaseBytes.Load()
+	}
+	p.slotsMu.RUnlock()
+	p.Bytes.Store(bytes)
+	p.BaseBytes.Store(base)
 }
 
 func (p *CopyProgress) BeginFile(size int64) {
@@ -115,11 +218,12 @@ type Model struct {
 	insecure       bool
 	deepScan       bool
 	copyParallel   int
+	batchTransfer  *bool
 	tickActive     bool
 	cachedStats    *TreeStats
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel int) Model {
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel int, batchTransfer bool) Model {
 	if copyParallel < 1 {
 		copyParallel = 1
 	}
@@ -136,6 +240,7 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
 		copyParallel:   copyParallel,
+		batchTransfer:  &batchTransfer,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
 		confirm:        NewConfirmDialog(),
@@ -163,6 +268,7 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},
 		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
 		{Label: "Ignore TZ/DST (hour-modulo)", Value: &m.cmpOpts.IgnoreTZDST},
+		{Label: "Batch rsync+ssh transfer", Value: m.batchTransfer},
 	})
 	return m
 }
@@ -201,6 +307,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
 		if m.copying {
+			m.copyProgress.SyncTotals()
 			cur := m.copyProgress.Bytes.Load()
 			if cur != m.lastCopyBytes {
 				m.copySpinFrame = (m.copySpinFrame + 1) % len(spinnerFrames)
@@ -690,13 +797,13 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	var err error
 
 	if leftPath != m.left.BasePath() {
-		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure)
+		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
 	if rightPath != m.right.BasePath() {
-		newRight, err = transport.TryOpenBackend(rightPath, m.insecure)
+		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
 		if err != nil {
 			if newLeft != nil {
 				transport.CloseBackend(newLeft)
@@ -929,6 +1036,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	if parallel < 1 {
 		parallel = 1
 	}
+	batchEnabled := m.batchTransfer != nil && *m.batchTransfer
 	baseCtx, cancel := context.WithCancel(context.Background())
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
@@ -991,6 +1099,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.Batched.Store(false)
 		progress.Bytes.Store(0)
 		progress.BaseBytes.Store(0)
+		progress.CompletedBytes.Store(0)
+		progress.CompletedBaseBytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
 		progress.LeftToRight.Store(leftToRight)
 		progress.File.Store("")
@@ -998,6 +1108,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.FileStartBytes.Store(0)
 		progress.FileStartBaseBytes.Store(0)
 		progress.FileStart.Store(0)
+		progress.ResetSlots(parallel)
 
 		dstChanged := make(map[string]bool)
 		var changedMu sync.Mutex
@@ -1012,7 +1123,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			srcBackend = right
 		}
 		batched := false
-		if node.IsDir {
+		if batchEnabled && node.IsDir {
 			if bs, ok := dstBackend.(model.BatchSender); ok {
 				if lp, ok := srcBackend.(model.LocalFS); ok {
 					srcRoot := lp.LocalPath("")
@@ -1045,9 +1156,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							}
 						})
 						progress.InFlight.Store(0)
-						progress.Batched.Store(false)
 						if err == nil {
 							progress.Done.Store(progress.Total.Load())
+							progress.CompletedBytes.Store(progress.Bytes.Load())
+							progress.CompletedBaseBytes.Store(progress.BaseBytes.Load())
 							for _, f := range files {
 								markChanged(f.RelPath)
 							}
@@ -1061,7 +1173,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							progress.TotalBytes.Store(totalBytes)
 							progress.Done.Store(0)
 							progress.Bytes.Store(0)
+							progress.CompletedBytes.Store(0)
+							progress.CompletedBaseBytes.Store(0)
 						}
+						progress.Batched.Store(false)
 					}
 				}
 			}
@@ -1113,18 +1228,34 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.RelPath)
 				dstEntry = nil
 			}
+			slot := progress.ClaimSlot()
+			defer progress.ReleaseSlot(slot)
+			if slot != nil {
+				slot.File.Store(f.RelPath)
+				slot.Size.Store(srcEntry.Size)
+				slot.Start.Store(time.Now().UnixNano())
+			}
 			progress.File.Store(f.RelPath)
 			progress.BeginFile(srcEntry.Size)
 			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.RelPath, model.FormatSize(srcEntry.Size)))
-			fileCtx := transport.ContextWithFileSize(ctx, srcEntry.Size)
+
+			slotBytes := &progress.Bytes
+			slotBase := &progress.BaseBytes
+			if slot != nil {
+				slotBytes = &slot.Bytes
+				slotBase = &slot.BaseBytes
+			}
+			fileCtx := transport.ContextWithProgress(ctx, slotBytes)
+			fileCtx = transport.ContextWithBaseProgress(fileCtx, slotBase)
+			fileCtx = transport.ContextWithFileSize(fileCtx, srcEntry.Size)
 
 			// Resume first when a partial dst body exists: append the missing
 			// tail rather than overwrite the whole file. tryResumeCopy
 			// self-gates (no-op for absent/full/oversized dst). Blind trust;
 			// a post-sync CRC pass catches any divergence.
 			var resumeOK bool
-			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.RelPath, srcEntry, dstEntry, progress)
+			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.RelPath, srcEntry, dstEntry, slotBytes, slotBase)
 				return nil
 			})
 			if resumeOK {
@@ -1136,7 +1267,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			}
 
 			var directOK bool
-			_ = transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 				directOK = tryDirectTransfer(attemptCtx, src, dst, f.RelPath, srcEntry)
 				return nil
 			})
@@ -1150,12 +1281,12 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 
 			attempt := 0
 			err := transport.Retry(fileCtx, "copy", "copy "+f.RelPath, func() error {
-				return transport.WithStallGuard(fileCtx, &progress.Bytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+				return transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 					attempt++
 					if attempt > 1 {
 						offset := peekDstSize(attemptCtx, dst, f.RelPath)
 						if offset > 0 && offset < srcEntry.Size {
-							err := resumeAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, offset, progress)
+							err := resumeAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, offset, slotBytes, slotBase)
 							if err == nil {
 								return nil
 							}
@@ -1164,7 +1295,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							}
 						}
 					}
-					return fullCopyAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, &progress.Bytes)
+					return fullCopyAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, slotBytes)
 				})
 			})
 			if err == nil {
@@ -1271,7 +1402,7 @@ func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath stri
 // transfer-rate calculation. On failure any progress credited along the way is
 // rolled back so a fallback CopyFrom can re-credit the full source size
 // without double-counting.
-func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, progress *CopyProgress) bool {
+func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, bytes, baseBytes *atomic.Int64) bool {
 	if dstEntry == nil || dstEntry.IsDir {
 		return false
 	}
@@ -1284,8 +1415,8 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 		return false
 	}
 
-	progress.Bytes.Add(offset)
-	progress.BaseBytes.Add(offset)
+	bytes.Add(offset)
+	baseBytes.Add(offset)
 	var added atomic.Int64
 	added.Store(offset)
 	opener := &trackedRangeOpener{
@@ -1293,12 +1424,12 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 		RelPath:  relPath,
 		FileSize: srcEntry.Size,
 		Ctx:      ctx,
-		Target:   &progress.Bytes,
+		Target:   bytes,
 		Added:    &added,
 	}
 	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
-		progress.Bytes.Add(-added.Load())
-		progress.BaseBytes.Add(-offset)
+		bytes.Add(-added.Load())
+		baseBytes.Add(-offset)
 		return false
 	}
 	return true
@@ -1327,13 +1458,13 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 // error any progress credited during the attempt is rolled back. The offset
 // portion is also tracked in BaseBytes so it doesn't inflate the transfer-rate
 // calculation.
-func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, progress *CopyProgress) error {
+func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64) error {
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
 		return transport.ErrResumeUnsupported
 	}
-	progress.Bytes.Add(offset)
-	progress.BaseBytes.Add(offset)
+	bytes.Add(offset)
+	baseBytes.Add(offset)
 	var added atomic.Int64
 	added.Store(offset)
 	opener := &trackedRangeOpener{
@@ -1341,12 +1472,12 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		RelPath:  relPath,
 		FileSize: srcEntry.Size,
 		Ctx:      ctx,
-		Target:   &progress.Bytes,
+		Target:   bytes,
 		Added:    &added,
 	}
 	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
-		progress.Bytes.Add(-added.Load())
-		progress.BaseBytes.Add(-offset)
+		bytes.Add(-added.Load())
+		baseBytes.Add(-offset)
 		return err
 	}
 	return nil
@@ -1956,15 +2087,9 @@ func (m Model) View() string {
 			popupW = 24
 		}
 		file, _ := m.copyProgress.File.Load().(string)
-		ltr := m.copyProgress.LeftToRight.Load()
-		done := m.copyProgress.Done.Load()
-		total := m.copyProgress.Total.Load()
-		inflight := m.copyProgress.InFlight.Load()
-		parallel := m.copyProgress.Parallel.Load()
 		batched := m.copyProgress.Batched.Load()
 		bytes := m.copyProgress.Bytes.Load()
 		baseBytes := m.copyProgress.BaseBytes.Load()
-		totalBytes := m.copyProgress.TotalBytes.Load()
 		fileSize := m.copyProgress.FileSize.Load()
 		fileBytes := bytes - m.copyProgress.FileStartBytes.Load()
 		fileBaseBytes := baseBytes - m.copyProgress.FileStartBaseBytes.Load()
@@ -1976,8 +2101,42 @@ func (m Model) View() string {
 		if fStart := m.copyProgress.FileStart.Load(); fStart > 0 {
 			fileElapsed = time.Since(time.Unix(0, fStart))
 		}
-		progressSpinner := spinnerFrames[m.copySpinFrame]
-		popup := RenderCopyPopup(file, ltr, done, total, inflight, parallel, batched, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
+		now := time.Now().UnixNano()
+		var slotViews []CopySlotView
+		if !batched {
+			for _, s := range m.copyProgress.SnapshotSlots() {
+				var e time.Duration
+				if s.Start > 0 {
+					e = time.Duration(now - s.Start)
+				}
+				slotViews = append(slotViews, CopySlotView{
+					File:      s.File,
+					Size:      s.Size,
+					Bytes:     s.Bytes,
+					BaseBytes: s.BaseBytes,
+					Elapsed:   e,
+				})
+			}
+		}
+		popup := RenderCopyPopup(CopyPopupData{
+			LeftToRight:        m.copyProgress.LeftToRight.Load(),
+			DoneFiles:          m.copyProgress.Done.Load(),
+			TotalFiles:         m.copyProgress.Total.Load(),
+			InFlight:           m.copyProgress.InFlight.Load(),
+			Parallel:           m.copyProgress.Parallel.Load(),
+			Batched:            batched,
+			BatchFile:          file,
+			BatchFileBytes:     fileBytes,
+			BatchFileSize:      fileSize,
+			BatchFileBaseBytes: fileBaseBytes,
+			BatchFileElapsed:   fileElapsed,
+			Slots:              slotViews,
+			BytesCopied:        bytes,
+			TotalBytes:         m.copyProgress.TotalBytes.Load(),
+			BaseBytes:          baseBytes,
+			TotalElapsed:       elapsed,
+			Spinner:            spinnerFrames[m.copySpinFrame],
+		}, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {

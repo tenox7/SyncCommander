@@ -102,17 +102,40 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-func RenderCopyPopup(file string, leftToRight bool,
-	doneFiles, totalFiles int64,
-	inFlight, parallel int64,
-	batched bool,
-	fileBytes, fileSize, fileBaseBytes int64,
-	bytesCopied, totalBytes, baseBytes int64,
-	fileElapsed, totalElapsed time.Duration,
-	progressSpinner string,
-	width int) string {
+// CopyPopupData is the input to RenderCopyPopup. Slots are the in-flight
+// per-file rows; BatchFile/BatchFileBytes are populated instead when the
+// transfer is running through a single batch session.
+type CopyPopupData struct {
+	LeftToRight        bool
+	DoneFiles          int64
+	TotalFiles         int64
+	InFlight           int64
+	Parallel           int64
+	Batched            bool
+	BatchFile          string
+	BatchFileBytes     int64
+	BatchFileSize      int64
+	BatchFileBaseBytes int64
+	BatchFileElapsed   time.Duration
+	Slots              []CopySlotView
+	BytesCopied        int64
+	TotalBytes         int64
+	BaseBytes          int64
+	TotalElapsed       time.Duration
+	Spinner            string
+}
+
+type CopySlotView struct {
+	File      string
+	Size      int64
+	Bytes     int64
+	BaseBytes int64
+	Elapsed   time.Duration
+}
+
+func RenderCopyPopup(d CopyPopupData, width int) string {
 	arrow := ">"
-	if !leftToRight {
+	if !d.LeftToRight {
 		arrow = "<"
 	}
 	inner := width - 4
@@ -120,83 +143,39 @@ func RenderCopyPopup(file string, leftToRight bool,
 		inner = 20
 	}
 
-	if fileBytes < 0 {
-		fileBytes = 0
-	}
-	if fileSize > 0 && fileBytes > fileSize {
-		fileBytes = fileSize
-	}
-
-	filePct := 0
-	if fileSize > 0 {
-		filePct = int(fileBytes * 100 / fileSize)
-	}
 	totalPct := 0
-	if totalBytes > 0 {
-		totalPct = int(bytesCopied * 100 / totalBytes)
+	if d.TotalBytes > 0 {
+		totalPct = int(d.BytesCopied * 100 / d.TotalBytes)
 	}
-
-	fileRealBytes := fileBytes - fileBaseBytes
-	if fileRealBytes < 0 {
-		fileRealBytes = 0
-	}
-	totalRealBytes := bytesCopied - baseBytes
+	totalRealBytes := d.BytesCopied - d.BaseBytes
 	if totalRealBytes < 0 {
 		totalRealBytes = 0
 	}
-
-	fileRate := 0.0
-	if fileElapsed >= 100*time.Millisecond && fileRealBytes > 0 {
-		fileRate = float64(fileRealBytes) / fileElapsed.Seconds()
-	}
 	totalRate := 0.0
-	if totalElapsed >= 100*time.Millisecond && totalRealBytes > 0 {
-		totalRate = float64(totalRealBytes) / totalElapsed.Seconds()
+	if d.TotalElapsed >= 100*time.Millisecond && totalRealBytes > 0 {
+		totalRate = float64(totalRealBytes) / d.TotalElapsed.Seconds()
 	}
 
-	progressMark := progressSpinner
+	progressMark := d.Spinner
 	if progressMark == "" {
 		progressMark = "·"
-	}
-	nameW := inner - lipgloss.Width(progressMark) - 1
-	if nameW < 5 {
-		nameW = 5
-	}
-	name := file
-	if name == "" {
-		name = "—"
-	}
-	if lipgloss.Width(name) > nameW {
-		name = path.Base(name)
-		if lipgloss.Width(name) > nameW {
-			name = ansi.Truncate(name, nameW, "…")
-		}
 	}
 
 	barIndent := "  " + arrow + " "
 	pctStrLen := 5
-	barWidth := inner - lipgloss.Width(barIndent) - pctStrLen
-	if barWidth < 5 {
-		barWidth = 5
+	rateW := 11
+	totalBarWidth := inner - lipgloss.Width(barIndent) - pctStrLen
+	if totalBarWidth < 5 {
+		totalBarWidth = 5
 	}
 
-	line1 := fmt.Sprintf("COPY  %d/%d files", doneFiles, totalFiles)
+	header := fmt.Sprintf("COPY  %d/%d files", d.DoneFiles, d.TotalFiles)
 	switch {
-	case batched:
-		line1 += "  [BATCH]"
-	case parallel > 1:
-		line1 += fmt.Sprintf("  [%d/%d in flight]", inFlight, parallel)
+	case d.Batched:
+		header += "  [BATCH]"
+	case d.Parallel > 1:
+		header += fmt.Sprintf("  [%d/%d in flight]", d.InFlight, d.Parallel)
 	}
-	line2 := progressMark + " " + name
-	line3 := fmt.Sprintf("File:  %s/%s  %s  ETA %s",
-		model.FormatSize(fileBytes), model.FormatSize(fileSize),
-		formatRateOrDash(fileRate), formatETA(fileSize-fileBytes, fileRate))
-	line4 := fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, barWidth), filePct)
-	line5 := fmt.Sprintf("Total: %s/%s  %s  ETA %s",
-		model.FormatSize(bytesCopied), model.FormatSize(totalBytes),
-		formatRateOrDash(totalRate), formatETA(totalBytes-bytesCopied, totalRate))
-	line6 := fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(bytesCopied, totalBytes, barWidth), totalPct)
-	line7 := "X=cancel"
 
 	pad := func(s string) string {
 		if lipgloss.Width(s) > inner {
@@ -208,11 +187,111 @@ func RenderCopyPopup(file string, leftToRight bool,
 		}
 		return s + strings.Repeat(" ", inner-w)
 	}
-	body := pad(line1) + "\n" + pad(line2) + "\n" +
-		pad(line3) + "\n" + pad(line4) + "\n" +
-		pad(line5) + "\n" + pad(line6) + "\n" +
-		pad(line7)
+
+	var rows []string
+	rows = append(rows, header)
+
+	if d.Batched {
+		fileBytes := d.BatchFileBytes
+		fileSize := d.BatchFileSize
+		if fileBytes < 0 {
+			fileBytes = 0
+		}
+		if fileSize > 0 && fileBytes > fileSize {
+			fileBytes = fileSize
+		}
+		filePct := 0
+		if fileSize > 0 {
+			filePct = int(fileBytes * 100 / fileSize)
+		}
+		fileRealBytes := fileBytes - d.BatchFileBaseBytes
+		if fileRealBytes < 0 {
+			fileRealBytes = 0
+		}
+		fileRate := 0.0
+		if d.BatchFileElapsed >= 100*time.Millisecond && fileRealBytes > 0 {
+			fileRate = float64(fileRealBytes) / d.BatchFileElapsed.Seconds()
+		}
+		nameW := inner - lipgloss.Width(progressMark) - 1
+		if nameW < 5 {
+			nameW = 5
+		}
+		name := truncateName(d.BatchFile, nameW)
+		rows = append(rows,
+			progressMark+" "+name,
+			fmt.Sprintf("File:  %s/%s  %s  ETA %s",
+				model.FormatSize(fileBytes), model.FormatSize(fileSize),
+				formatRateOrDash(fileRate), formatETA(fileSize-fileBytes, fileRate)),
+			fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, totalBarWidth), filePct),
+		)
+	} else {
+		nameW := inner - lipgloss.Width(barIndent) - pctStrLen - rateW - 2
+		if nameW < 8 {
+			nameW = 8
+		}
+		barW := 10
+		if d.Slots != nil && len(d.Slots) == 0 {
+			rows = append(rows, "  (waiting…)")
+		}
+		for _, s := range d.Slots {
+			pct := 0
+			if s.Size > 0 {
+				cap := s.Bytes
+				if cap > s.Size {
+					cap = s.Size
+				}
+				pct = int(cap * 100 / s.Size)
+			}
+			realBytes := s.Bytes - s.BaseBytes
+			if realBytes < 0 {
+				realBytes = 0
+			}
+			rate := 0.0
+			if s.Elapsed >= 100*time.Millisecond && realBytes > 0 {
+				rate = float64(realBytes) / s.Elapsed.Seconds()
+			}
+			name := truncateName(s.File, nameW)
+			namePad := nameW - lipgloss.Width(name)
+			if namePad < 0 {
+				namePad = 0
+			}
+			row := fmt.Sprintf("%s%s%s %s %3d%% %s",
+				barIndent,
+				name, strings.Repeat(" ", namePad),
+				progressBar(s.Bytes, s.Size, barW), pct,
+				formatRateOrDash(rate))
+			rows = append(rows, row)
+		}
+	}
+
+	rows = append(rows,
+		fmt.Sprintf("Total: %s/%s  %s  ETA %s",
+			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes),
+			formatRateOrDash(totalRate), formatETA(d.TotalBytes-d.BytesCopied, totalRate)),
+		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(d.BytesCopied, d.TotalBytes, totalBarWidth), totalPct),
+		"X=cancel",
+	)
+
+	var lines []string
+	for _, r := range rows {
+		lines = append(lines, pad(r))
+	}
+	body := strings.Join(lines, "\n")
 	return styleCopyPopup.Width(width).Render(body)
+}
+
+func truncateName(s string, w int) string {
+	if s == "" {
+		return "—"
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	base := path.Base(s)
+	if lipgloss.Width(base) <= w {
+		return base
+	}
+	return ansi.Truncate(base, w, "…")
 }
 
 func formatRateOrDash(rate float64) string {

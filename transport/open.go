@@ -45,12 +45,12 @@ func MaskURLPassword(rawURL string) string {
 	return rawURL[:idx+3] + creds[:ci] + ":xxxxx@" + authority[ai+1:] + tail
 }
 
-func OpenBackend(arg string, insecure bool) (model.Backend, error) {
+func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
 	if strings.HasPrefix(arg, "sftp://") {
-		return NewSFTPBackend(arg)
+		return NewSFTPBackend(arg, parallel)
 	}
 	if strings.HasPrefix(arg, "ssh://") || strings.HasPrefix(arg, "scp://") {
-		return openSSHBackend(arg)
+		return openSSHBackend(arg, parallel)
 	}
 	if strings.HasPrefix(arg, "ftp://") || strings.HasPrefix(arg, "ftps://") || strings.HasPrefix(arg, "ftpes://") {
 		return NewFTPBackend(arg, insecure)
@@ -67,8 +67,9 @@ func OpenBackend(arg string, insecure bool) (model.Backend, error) {
 // openSSHBackend dials SSH once, logs the server version, probes the SFTP
 // subsystem, and returns the SFTPBackend when available — otherwise the
 // shell-and-cat SCPBackend. Used for ssh:// and scp:// URLs; sftp:// always
-// goes straight to SFTP without a fallback.
-func openSSHBackend(rawURL string) (model.Backend, error) {
+// goes straight to SFTP without a fallback. parallel sizes the lazy
+// connection pool used for parallel transfers (1 = no extras).
+func openSSHBackend(rawURL string, parallel int) (model.Backend, error) {
 	conn, err := dialSSH(rawURL)
 	if err != nil {
 		return nil, err
@@ -76,7 +77,7 @@ func openSSHBackend(rawURL string) (model.Backend, error) {
 	ver := strings.TrimRight(string(conn.client.ServerVersion()), "\r\n")
 	if probeSFTP(conn.client) {
 		Log.Add("ssh", "<<<", "SFTP available — using SFTP backend ("+ver+")")
-		b, err := newSFTPBackendFromConn(conn)
+		b, err := newSFTPBackendFromConn(conn, rawURL, parallel)
 		if err != nil {
 			conn.client.Close()
 			return nil, err
@@ -84,7 +85,7 @@ func openSSHBackend(rawURL string) (model.Backend, error) {
 		return b, nil
 	}
 	Log.Add("ssh", "<<<", "SFTP unavailable — falling back to shell backend ("+ver+")")
-	b, err := newSCPBackendFromConn(conn)
+	b, err := newSCPBackendFromConn(conn, rawURL, parallel)
 	if err != nil {
 		conn.client.Close()
 		return nil, err
@@ -108,7 +109,7 @@ func probeSFTP(client *ssh.Client) bool {
 	return true
 }
 
-func OpenBackendLazy(arg string, insecure bool) model.Backend {
+func OpenBackendLazy(arg string, insecure bool, parallel int) model.Backend {
 	if !IsRemote(arg) {
 		info, err := os.Stat(arg)
 		if err != nil {
@@ -122,11 +123,11 @@ func OpenBackendLazy(arg string, insecure bool) model.Backend {
 		return NewLocalBackend(arg)
 	}
 	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
-		return OpenBackend(arg, insecure)
+		return OpenBackend(arg, insecure, parallel)
 	})
 }
 
-func TryOpenBackend(arg string, insecure bool) (model.Backend, error) {
+func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
 	if !IsRemote(arg) {
 		info, err := os.Stat(arg)
 		if err != nil {
@@ -138,7 +139,7 @@ func TryOpenBackend(arg string, insecure bool) (model.Backend, error) {
 		return NewLocalBackend(arg), nil
 	}
 	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
-		return OpenBackend(arg, insecure)
+		return OpenBackend(arg, insecure, parallel)
 	}), nil
 }
 

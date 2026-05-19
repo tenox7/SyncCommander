@@ -18,19 +18,21 @@ import (
 
 type SCPBackend struct {
 	base      string
+	rawURL    string
 	client    *ssh.Client
 	display   string
 	cksumAlgo string
 	cksumCmds map[string]string
 	listCache *rsyncListCache
+	pool      *sshPool[*ssh.Client]
 }
 
-func NewSCPBackend(rawURL string) (*SCPBackend, error) {
+func NewSCPBackend(rawURL string, parallel int) (*SCPBackend, error) {
 	conn, err := dialSSH(rawURL)
 	if err != nil {
 		return nil, err
 	}
-	b, err := newSCPBackendFromConn(conn)
+	b, err := newSCPBackendFromConn(conn, rawURL, parallel)
 	if err != nil {
 		conn.client.Close()
 	}
@@ -38,9 +40,11 @@ func NewSCPBackend(rawURL string) (*SCPBackend, error) {
 }
 
 // newSCPBackendFromConn builds an SCPBackend over an already-dialed sshConn.
-// On error the caller is responsible for closing conn.client.
-func newSCPBackendFromConn(conn *sshConn) (*SCPBackend, error) {
-	b := &SCPBackend{client: conn.client}
+// rawURL is retained so the pool can dial fresh SSH connections for parallel
+// transfers. parallel sizes the pool's extras. On error the caller is
+// responsible for closing conn.client.
+func newSCPBackendFromConn(conn *sshConn, rawURL string, parallel int) (*SCPBackend, error) {
+	b := &SCPBackend{client: conn.client, rawURL: rawURL}
 
 	remotePath := conn.basePath
 	switch {
@@ -57,12 +61,27 @@ func newSCPBackendFromConn(conn *sshConn) (*SCPBackend, error) {
 	}
 	b.base = remotePath
 	b.display = sshDisplayURL(conn, remotePath)
+
+	maxExtras := parallel - 1
+	dial := func() (*ssh.Client, error) {
+		c, err := dialSSH(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		Log.Add("scp", "<<<", "extra connection dialed")
+		return c.client, nil
+	}
+	b.pool = newSSHPool(conn.client, maxExtras, dial, func(c *ssh.Client) { c.Close() })
+
 	return b, nil
 }
 
 func (b *SCPBackend) BasePath() string { return b.display }
 
-func (b *SCPBackend) Close() error { return b.client.Close() }
+func (b *SCPBackend) Close() error {
+	b.pool.close()
+	return b.client.Close()
+}
 
 func (b *SCPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	if b.listCache != nil {
@@ -287,7 +306,9 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	fullPath := path.Join(b.base, relPath)
 	b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(path.Dir(fullPath))))
 
-	session, err := b.client.NewSession()
+	client, release := b.pool.acquire()
+	defer release()
+	session, err := client.NewSession()
 	if err != nil {
 		return err
 	}
@@ -309,7 +330,9 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 		return err
 	}
 	defer rd.Close()
-	session, err := b.client.NewSession()
+	client, release := b.pool.acquire()
+	defer release()
+	session, err := client.NewSession()
 	if err != nil {
 		return err
 	}
@@ -327,23 +350,27 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 }
 
 func (b *SCPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	session, err := b.client.NewSession()
+	client, release := b.pool.acquire()
+	session, err := client.NewSession()
 	if err != nil {
+		release()
 		return nil, err
 	}
 	rd, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
+		release()
 		return nil, err
 	}
 	cmd := fmt.Sprintf("tail -c +%d %s", offset+1, shellQuote(path.Join(b.base, relPath)))
 	Log.Add("scp", ">>>", cmd)
 	if err := session.Start(cmd); err != nil {
 		session.Close()
+		release()
 		return nil, err
 	}
 	stop := cancelCloser(ctx, session)
-	return &sshReadCloser{session: session, Reader: rd, stop: stop}, nil
+	return &sshReadCloser{session: session, Reader: rd, stop: stop, release: release}, nil
 }
 
 func (b *SCPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
@@ -381,21 +408,25 @@ func (b *SCPBackend) RemoveAll(ctx context.Context, relPath string) error {
 }
 
 func (b *SCPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	session, err := b.client.NewSession()
+	client, release := b.pool.acquire()
+	session, err := client.NewSession()
 	if err != nil {
+		release()
 		return nil, err
 	}
 	rd, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
+		release()
 		return nil, err
 	}
 	if err := session.Start(fmt.Sprintf("cat %s", shellQuote(path.Join(b.base, relPath)))); err != nil {
 		session.Close()
+		release()
 		return nil, err
 	}
 	stop := cancelCloser(ctx, session)
-	return &sshReadCloser{session: session, Reader: rd, stop: stop}, nil
+	return &sshReadCloser{session: session, Reader: rd, stop: stop, release: release}, nil
 }
 
 func (b *SCPBackend) sshRun(cmd string) (string, error) {
@@ -438,14 +469,19 @@ func (b *SCPBackend) sshRunCtx(ctx context.Context, cmd string) (string, error) 
 type sshReadCloser struct {
 	session *ssh.Session
 	io.Reader
-	stop func()
+	stop    func()
+	release func()
 }
 
 func (r *sshReadCloser) Close() error {
 	if r.stop != nil {
 		r.stop()
 	}
-	return r.session.Close()
+	err := r.session.Close()
+	if r.release != nil {
+		r.release()
+	}
+	return err
 }
 
 func shellQuote(s string) string {

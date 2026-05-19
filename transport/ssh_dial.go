@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -143,19 +144,21 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
 	}
+	tracked := &trackedConn{Conn: rawConn}
+	tracked.touch()
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
 	}
-	c, chans, reqs, err := ssh.NewClientConn(rawConn, addr, cfg)
+	c, chans, reqs, err := ssh.NewClientConn(tracked, addr, cfg)
 	if err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("ssh handshake %s: %v", addr, err)
 	}
 	client := ssh.NewClient(c, chans, reqs)
-	go sshKeepalive(client, scheme)
+	go sshKeepalive(client, tracked, scheme)
 
 	return &sshConn{
 		client:   client,
@@ -167,10 +170,41 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	}, nil
 }
 
+// trackedConn wraps a net.Conn and records the nanosecond timestamp of the
+// most recent Read that returned bytes. The keepalive goroutine consults
+// this to skip its probe when the peer has been actively talking — under
+// heavy throughput, queueing a SendRequest behind file data can exceed the
+// timeout even on a healthy link, causing false-positive disconnects.
+type trackedConn struct {
+	net.Conn
+	lastReadNano atomic.Int64
+}
+
+func (c *trackedConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.touch()
+	}
+	return n, err
+}
+
+func (c *trackedConn) touch() { c.lastReadNano.Store(time.Now().UnixNano()) }
+
+func (c *trackedConn) idleFor() time.Duration {
+	last := c.lastReadNano.Load()
+	if last == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, last))
+}
+
 // sshKeepalive sends keepalive@openssh.com global requests on an interval.
-// Closes the client if a request errors or times out, so any blocked
-// session/SFTP write unblocks with an error.
-func sshKeepalive(client *ssh.Client, proto string) {
+// Skips the probe when the connection has had read activity within the
+// interval — a recent read is proof the peer is alive, and probing while
+// the transport is saturated risks false-positive timeouts. Closes the
+// client if a probe errors or times out so any blocked session/SFTP write
+// unblocks with an error.
+func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
 	t := time.NewTicker(sshKeepaliveInterval)
 	defer t.Stop()
 	done := make(chan struct{})
@@ -183,6 +217,9 @@ func sshKeepalive(client *ssh.Client, proto string) {
 		case <-done:
 			return
 		case <-t.C:
+			if conn != nil && conn.idleFor() < sshKeepaliveInterval {
+				continue
+			}
 			errCh := make(chan error, 1)
 			go func() {
 				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
