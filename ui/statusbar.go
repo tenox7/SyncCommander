@@ -105,6 +105,7 @@ func formatElapsed(d time.Duration) string {
 func RenderCopyPopup(file string, leftToRight bool,
 	doneFiles, totalFiles int64,
 	inFlight, parallel int64,
+	batched bool,
 	fileBytes, fileSize, fileBaseBytes int64,
 	bytesCopied, totalBytes, baseBytes int64,
 	fileElapsed, totalElapsed time.Duration,
@@ -180,7 +181,10 @@ func RenderCopyPopup(file string, leftToRight bool,
 	}
 
 	line1 := fmt.Sprintf("COPY  %d/%d files", doneFiles, totalFiles)
-	if parallel > 1 {
+	switch {
+	case batched:
+		line1 += "  [BATCH]"
+	case parallel > 1:
 		line1 += fmt.Sprintf("  [%d/%d in flight]", inFlight, parallel)
 	}
 	line2 := progressMark + " " + name

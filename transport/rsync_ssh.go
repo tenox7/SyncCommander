@@ -545,6 +545,111 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 	return rc, nil
 }
 
+// SendLocalTree uploads everything under srcRoot/relPath to b.base/relPath in
+// a single rsync session. Flags omit --ignore-times so rsync's default
+// size+mtime check skips files already at the destination — matching the
+// per-file path, which only forwarded files SC's compare flagged as
+// different. -r recurses; --progress makes the sender emit one filename per
+// line on stdout as each file starts, which we parse for the onFile
+// callback. -W stays on (no delta-sync, see rsyncTransferFlags comment).
+//
+// Edge case: a file with same size + same mtime as dst but different content
+// (rare — non-atomic writers, or VCS checkouts that touch mtime) gets
+// skipped here where the per-file path would have copied it. Use the
+// per-file path or touch the source to force.
+func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
+	srcPath := filepath.Join(srcRoot, relPath)
+	if !strings.HasSuffix(srcPath, string(filepath.Separator)) {
+		srcPath += string(filepath.Separator)
+	}
+	remoteDest := path.Join(b.base, relPath) + "/"
+
+	if _, err := b.sshRunCtx(ctx, fmt.Sprintf("mkdir -p %s", shellQuote(remoteDest))); err != nil {
+		return err
+	}
+
+	flags := []string{"-t", "--inplace", "--partial", "-W", "-r", "--progress"}
+	stdout := &filenameLineParser{onFile: onFile}
+	client, err := rsyncclient.New(flags,
+		rsyncclient.WithSender(),
+		rsyncclient.WithStdout(stdout),
+		rsyncclient.WithStderr(io.Discard))
+	if err != nil {
+		return err
+	}
+
+	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remoteDest))
+	Log.Add("rsync+ssh", ">>>", "BATCH "+srcPath+" via "+serverCmd)
+
+	session, err := b.client.NewSession()
+	if err != nil {
+		return err
+	}
+	stop := cancelCloser(ctx, session)
+	rw, err := b.sessionReadWriter(session)
+	if err != nil {
+		stop()
+		session.Close()
+		return err
+	}
+	if err := session.Start(serverCmd); err != nil {
+		stop()
+		session.Close()
+		Log.Add("rsync+ssh", "ERR", err.Error())
+		return err
+	}
+
+	counter := progressFromContext(ctx)
+	var rwForRun io.ReadWriter = rw
+	if counter != nil {
+		rwForRun = &CountingReadWriter{RW: rw, Adder: NewCappedAdder(counter, 1<<62)}
+	}
+
+	_, err = client.Run(ctx, rwForRun, []string{srcPath})
+	stop()
+	session.Close()
+	b.listCache.invalidateTree(relPath)
+	b.invalidateMD4Tree(relPath)
+	if err != nil {
+		Log.Add("rsync+ssh", "ERR", err.Error())
+		return err
+	}
+	Log.Add("rsync+ssh", "<<<", "BATCH OK")
+	return nil
+}
+
+// filenameLineParser parses gorsync's sender --progress stdout. Per-file the
+// sender writes "<name>\n" followed by progress lines built with \r as the
+// in-line separator and a final \n. Lines containing \r are progress; lines
+// without \r are filenames.
+type filenameLineParser struct {
+	buf    []byte
+	onFile func(name string)
+}
+
+func (p *filenameLineParser) Write(b []byte) (int, error) {
+	p.buf = append(p.buf, b...)
+	for {
+		i := bytes.IndexByte(p.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := p.buf[:i]
+		p.buf = p.buf[i+1:]
+		if bytes.IndexByte(line, '\r') >= 0 {
+			continue
+		}
+		name := strings.TrimSpace(string(line))
+		if name == "" {
+			continue
+		}
+		if p.onFile != nil {
+			p.onFile(name)
+		}
+	}
+	return len(b), nil
+}
+
 // SendLocalFile sends an existing local file via rsync-over-SSH directly,
 // bypassing the per-call tmp dir. Progress: rw is wrapped so bytes written to
 // the SSH session credit progress.Bytes during the push — without this, the

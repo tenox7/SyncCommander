@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -45,6 +47,7 @@ type CopyProgress struct {
 	Done               atomic.Int64
 	InFlight           atomic.Int64
 	Parallel           atomic.Int64
+	Batched            atomic.Bool
 	Bytes              atomic.Int64
 	BaseBytes          atomic.Int64
 	TotalBytes         atomic.Int64
@@ -985,6 +988,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.Done.Store(0)
 		progress.InFlight.Store(0)
 		progress.Parallel.Store(int64(parallel))
+		progress.Batched.Store(false)
 		progress.Bytes.Store(0)
 		progress.BaseBytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
@@ -1003,7 +1007,67 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			changedMu.Unlock()
 		}
 
-		if parallel > 1 {
+		srcBackend := left
+		if !leftToRight {
+			srcBackend = right
+		}
+		batched := false
+		if node.IsDir {
+			if bs, ok := dstBackend.(model.BatchSender); ok {
+				if lp, ok := srcBackend.(model.LocalFS); ok {
+					srcRoot := lp.LocalPath("")
+					srcSubtree := filepath.Join(srcRoot, node.RelPath)
+					var batchFiles, batchBytes int64
+					_ = filepath.WalkDir(srcSubtree, func(_ string, d fs.DirEntry, werr error) error {
+						if werr != nil || d.IsDir() {
+							return nil
+						}
+						info, ierr := d.Info()
+						if ierr != nil {
+							return nil
+						}
+						batchFiles++
+						batchBytes += info.Size()
+						return nil
+					})
+					if batchFiles > 0 {
+						progress.Total.Store(batchFiles)
+						progress.TotalBytes.Store(batchBytes)
+						progress.InFlight.Store(1)
+						progress.Parallel.Store(1)
+						progress.Batched.Store(true)
+						transport.Log.Add("copy", ">>>", fmt.Sprintf("BATCH %s (%d files, %s)", node.RelPath, batchFiles, model.FormatSize(batchBytes)))
+						bctx := transport.ContextWithFileSize(ctx, batchBytes)
+						err := bs.SendLocalTree(bctx, srcRoot, node.RelPath, func(name string) {
+							progress.File.Store(name)
+							if d := progress.Done.Load(); d < progress.Total.Load() {
+								progress.Done.Add(1)
+							}
+						})
+						progress.InFlight.Store(0)
+						progress.Batched.Store(false)
+						if err == nil {
+							progress.Done.Store(progress.Total.Load())
+							for _, f := range files {
+								markChanged(f.RelPath)
+							}
+							batched = true
+							transport.Log.Add("copy", "<<<", "BATCH "+node.RelPath+" OK")
+						} else {
+							if !errors.Is(err, transport.ErrResumeUnsupported) {
+								transport.Log.Add("copy", "ERR", "BATCH "+node.RelPath+": "+err.Error())
+							}
+							progress.Total.Store(int64(len(files)))
+							progress.TotalBytes.Store(totalBytes)
+							progress.Done.Store(0)
+							progress.Bytes.Store(0)
+						}
+					}
+				}
+			}
+		}
+
+		if parallel > 1 && !batched {
 			transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", parallel))
 		}
 		sem := make(chan struct{}, parallel)
@@ -1113,23 +1177,25 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			progress.Done.Add(1)
 		}
 
-	dispatch:
-		for _, f := range files {
-			select {
-			case <-ctx.Done():
-				break dispatch
-			case sem <- struct{}{}:
+		if !batched {
+		dispatch:
+			for _, f := range files {
+				select {
+				case <-ctx.Done():
+					break dispatch
+				case sem <- struct{}{}:
+				}
+				wg.Add(1)
+				progress.InFlight.Add(1)
+				go func(f *model.TreeNode) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					defer progress.InFlight.Add(-1)
+					copyOne(f)
+				}(f)
 			}
-			wg.Add(1)
-			progress.InFlight.Add(1)
-			go func(f *model.TreeNode) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				defer progress.InFlight.Add(-1)
-				copyOne(f)
-			}(f)
+			wg.Wait()
 		}
-		wg.Wait()
 
 		var rescanRoot *model.TreeNode
 		if node.IsDir {
@@ -1895,6 +1961,7 @@ func (m Model) View() string {
 		total := m.copyProgress.Total.Load()
 		inflight := m.copyProgress.InFlight.Load()
 		parallel := m.copyProgress.Parallel.Load()
+		batched := m.copyProgress.Batched.Load()
 		bytes := m.copyProgress.Bytes.Load()
 		baseBytes := m.copyProgress.BaseBytes.Load()
 		totalBytes := m.copyProgress.TotalBytes.Load()
@@ -1910,7 +1977,7 @@ func (m Model) View() string {
 			fileElapsed = time.Since(time.Unix(0, fStart))
 		}
 		progressSpinner := spinnerFrames[m.copySpinFrame]
-		popup := RenderCopyPopup(file, ltr, done, total, inflight, parallel, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
+		popup := RenderCopyPopup(file, ltr, done, total, inflight, parallel, batched, fileBytes, fileSize, fileBaseBytes, bytes, totalBytes, baseBytes, fileElapsed, elapsed, progressSpinner, popupW)
 		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
 		py := (m.height - strings.Count(popup, "\n") - 1) / 2
 		if px < 0 {

@@ -9,9 +9,14 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Troubleshooting, debugging sync issues.
 - Ad hoc downloads/uploads.
 
-## Supported protocols and checksums
+## Features
 
-This app allows to perform **remote** checksum calculation.
+- Manual RSYNC by hand.
+- Remote checksum calculation via variety of protocols.
+- Parallel copies.
+- Batch copies for small files.
+
+## Supported protocols and checksums
 
 - Local dir including remote mounts. SHA/MD5 checksums.
 - ftp://  ftps://  ftpes://  with implicit/explicit TLS. XCRC, XSHA, HASH.

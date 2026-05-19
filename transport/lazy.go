@@ -309,6 +309,27 @@ func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string
 	})
 }
 
+func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
+	inner, err := b.ensureConnected()
+	if err != nil {
+		return err
+	}
+	if _, ok := inner.(model.BatchSender); !ok {
+		return ErrResumeUnsupported
+	}
+	return Retry(ctx, b.proto, "batch send "+relPath, func() error {
+		inner, err := b.ensureConnected()
+		if err != nil {
+			return err
+		}
+		s, ok := inner.(model.BatchSender)
+		if !ok {
+			return ErrResumeUnsupported
+		}
+		return b.markBrokenIf(s.SendLocalTree(ctx, srcRoot, relPath, onFile))
+	})
+}
+
 func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {
 	inner, err := b.ensureConnected()
 	if err != nil {
