@@ -20,23 +20,78 @@ import (
 )
 
 type FTPBackend struct {
-	base     string
-	conn     *ftp.ServerConn
-	rawConn  net.Conn
-	hasher   *ftpHasher
-	display  string
-	addr     string
-	dialOpts []ftp.DialOption
-	user     string
-	pass     string
-	scheme   string
-	host     string
-	port     string
-	tlsCfg   *tls.Config
-	mu       sync.Mutex
+	base    string
+	conn    *ftp.ServerConn
+	rawConn net.Conn
+	hasher  *ftpHasher
+	display string
+	addr    string
+	user    string
+	pass    string
+	scheme  string
+	host    string
+	port    string
+	tlsCfg  *tls.Config
+	pool    *sshPool[*ftpConn]
+	mu      sync.Mutex
 }
 
-func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
+// ftpConn is one extra control+data connection used for a parallel transfer.
+// A single ftp.ServerConn is not safe for concurrent use (one data conn at a
+// time), so each parallel slot gets its own. lastUsed gates a liveness probe
+// on acquire — see acquireExtra.
+type ftpConn struct {
+	conn     *ftp.ServerConn
+	rawConn  net.Conn
+	lastUsed time.Time
+}
+
+func (c *ftpConn) close() {
+	if c != nil && c.conn != nil {
+		c.conn.Quit()
+	}
+}
+
+// dialFTPConn opens one control connection: dial, login, binary mode. The
+// returned net.Conn is the raw control socket, closed on ctx cancel to abort
+// blocked transfers (see abortOnCancel).
+func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config) (*ftp.ServerConn, net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var rawConn net.Conn
+	dialFunc := func(network, address string) (net.Conn, error) {
+		c, err := dialer.Dial(network, address)
+		if err == nil {
+			rawConn = c
+		}
+		return c, err
+	}
+	opts := []ftp.DialOption{
+		ftp.DialWithTimeout(10 * time.Second),
+		ftp.DialWithDialer(*dialer),
+		ftp.DialWithDialFunc(dialFunc),
+	}
+	switch scheme {
+	case "ftps":
+		opts = append(opts, ftp.DialWithTLS(tlsCfg))
+	case "ftpes":
+		opts = append(opts, ftp.DialWithExplicitTLS(tlsCfg))
+	}
+	conn, err := ftp.Dial(addr, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ftp dial %s: %v", addr, err)
+	}
+	if err := conn.Login(user, pass); err != nil {
+		conn.Quit()
+		return nil, nil, fmt.Errorf("ftp login %s@%s: %v", user, addr, err)
+	}
+	if err := conn.Type(ftp.TransferTypeBinary); err != nil {
+		conn.Quit()
+		return nil, nil, fmt.Errorf("ftp binary mode: %v", err)
+	}
+	return conn, rawConn, nil
+}
+
+func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, error) {
 	scheme, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	if user == "" {
 		user = "anonymous"
@@ -64,44 +119,13 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 
 	addr := host + ":" + port
 
-	// Capture the raw control conn at dial time so we can close it on
-	// cancellation. Also propagate Dialer.KeepAlive to both control and
-	// data conns (the library uses the same Dialer for data conns), so
-	// TCP-level keepalive detects dead peers even when sftp/scp wouldn't.
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	var rawConn net.Conn
-	dialFunc := func(network, address string) (net.Conn, error) {
-		c, err := dialer.Dial(network, address)
-		if err == nil {
-			rawConn = c
-		}
-		return c, err
-	}
-	opts := []ftp.DialOption{
-		ftp.DialWithTimeout(10 * time.Second),
-		ftp.DialWithDialer(*dialer),
-		ftp.DialWithDialFunc(dialFunc),
-	}
-	switch scheme {
-	case "ftps":
-		opts = append(opts, ftp.DialWithTLS(tlsCfg))
-	case "ftpes":
-		opts = append(opts, ftp.DialWithExplicitTLS(tlsCfg))
-	}
-
-	conn, err := ftp.Dial(addr, opts...)
+	// dialFTPConn captures the raw control conn so we can close it on
+	// cancellation, and propagates Dialer.KeepAlive to both control and data
+	// conns (the library reuses the Dialer for data conns) so TCP keepalive
+	// detects dead peers.
+	conn, rawConn, err := dialFTPConn(addr, scheme, user, pass, tlsCfg)
 	if err != nil {
-		return nil, fmt.Errorf("ftp dial %s: %v", addr, err)
-	}
-
-	if err := conn.Login(user, pass); err != nil {
-		conn.Quit()
-		return nil, fmt.Errorf("ftp login %s@%s: %v", user, addr, err)
-	}
-
-	if err := conn.Type(ftp.TransferTypeBinary); err != nil {
-		conn.Quit()
-		return nil, fmt.Errorf("ftp binary mode: %v", err)
+		return nil, err
 	}
 
 	if remotePath == "/~" || strings.HasPrefix(remotePath, "/~/") {
@@ -121,21 +145,37 @@ func NewFTPBackend(rawURL string, insecure bool) (*FTPBackend, error) {
 		displayHost = host + ":" + port
 	}
 
-	return &FTPBackend{
-		base:     remotePath,
-		conn:     conn,
-		rawConn:  rawConn,
-		hasher:   hasher,
-		display:  fmt.Sprintf("%s://%s@%s%s", scheme, user, displayHost, remotePath),
-		addr:     addr,
-		dialOpts: opts,
-		user:     user,
-		pass:     pass,
-		scheme:   scheme,
-		host:     host,
-		port:     port,
-		tlsCfg:   tlsCfg,
-	}, nil
+	b := &FTPBackend{
+		base:    remotePath,
+		conn:    conn,
+		rawConn: rawConn,
+		hasher:  hasher,
+		display: fmt.Sprintf("%s://%s@%s%s", scheme, user, displayHost, remotePath),
+		addr:    addr,
+		user:    user,
+		pass:    pass,
+		scheme:  scheme,
+		host:    host,
+		port:    port,
+		tlsCfg:  tlsCfg,
+	}
+
+	// Extra connections for parallel transfers. Primary is nil: when the pool
+	// is at capacity acquireExtra returns false and the caller serializes on
+	// the primary conn under b.mu. maxExtras=0 (parallel<=1) means every
+	// transfer takes the primary path — identical to the pre-pool behavior.
+	maxExtras := parallel - 1
+	dial := func() (*ftpConn, error) {
+		c, raw, derr := dialFTPConn(addr, scheme, user, pass, tlsCfg)
+		if derr != nil {
+			return nil, derr
+		}
+		Log.Add("ftp", "<<<", "extra connection dialed")
+		return &ftpConn{conn: c, rawConn: raw, lastUsed: time.Now()}, nil
+	}
+	b.pool = newSSHPool[*ftpConn](nil, maxExtras, dial, func(c *ftpConn) { c.close() })
+
+	return b, nil
 }
 
 // abortOnCancel returns a stop func that, while running, closes the raw
@@ -156,10 +196,50 @@ func (b *FTPBackend) BasePath() string { return b.display }
 func (b *FTPBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.pool.close()
 	if b.hasher != nil {
 		b.hasher.close()
 	}
 	return b.conn.Quit()
+}
+
+// acquireExtra returns a dedicated transfer connection and its release func,
+// or ok=false when the pool is at capacity (caller must serialize on the
+// primary conn under b.mu). Extras sit idle while the UI scans (which only
+// uses the primary), so a long-idle extra may have been dropped by the
+// server; probe with NoOp and redial before handing it out. SFTP needs no
+// such probe — its multiplexed client keeps the transport alive.
+func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) {
+	c, poolRelease := b.pool.acquire()
+	if c == nil {
+		poolRelease()
+		return nil, nil, false
+	}
+	// On cancel, cancelCloser force-closes this conn's control socket, so it
+	// goes back dead. Zero lastUsed to force a liveness probe on next acquire
+	// rather than handing out a corpse within the 60s trust window.
+	release := func() {
+		if ctx.Err() != nil {
+			c.lastUsed = time.Time{}
+		} else {
+			c.lastUsed = time.Now()
+		}
+		poolRelease()
+	}
+	if time.Since(c.lastUsed) > 60*time.Second && c.conn.NoOp() != nil {
+		conn, raw, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg)
+		if err != nil {
+			Log.Add("ftp", "ERR", "extra reconnect failed: "+err.Error())
+			release()
+			return nil, nil, false
+		}
+		c.conn.Quit()
+		c.conn = conn
+		c.rawConn = raw
+		c.lastUsed = time.Now()
+		Log.Add("ftp", "<<<", "extra reconnected")
+	}
+	return c, release, true
 }
 
 func (b *FTPBackend) connAliveLocked() bool {
@@ -168,37 +248,13 @@ func (b *FTPBackend) connAliveLocked() bool {
 
 func (b *FTPBackend) reconnectLocked() error {
 	b.conn.Quit()
-	b.rawConn = nil
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	dialFunc := func(network, address string) (net.Conn, error) {
-		c, err := dialer.Dial(network, address)
-		if err == nil {
-			b.rawConn = c
-		}
-		return c, err
-	}
-	opts := []ftp.DialOption{
-		ftp.DialWithTimeout(10 * time.Second),
-		ftp.DialWithDialer(*dialer),
-		ftp.DialWithDialFunc(dialFunc),
-	}
-	switch b.scheme {
-	case "ftps":
-		opts = append(opts, ftp.DialWithTLS(b.tlsCfg))
-	case "ftpes":
-		opts = append(opts, ftp.DialWithExplicitTLS(b.tlsCfg))
-	}
-	conn, err := ftp.Dial(b.addr, opts...)
+	conn, rawConn, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg)
 	if err != nil {
+		b.rawConn = nil
 		return err
 	}
-	if err := conn.Login(b.user, b.pass); err != nil {
-		conn.Quit()
-		return err
-	}
-	conn.Type(ftp.TransferTypeBinary)
 	b.conn = conn
-	b.dialOpts = opts
+	b.rawConn = rawConn
 	if b.hasher != nil {
 		algo := b.hasher.algo
 		b.hasher.close()
@@ -313,11 +369,21 @@ func (b *FTPBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ tim
 }
 
 func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+	Log.Add("ftp", ">>>", "STOR "+relPath)
+	fullPath := path.Join(b.base, relPath)
+	if ex, release, ok := b.acquireExtra(ctx); ok {
+		defer release()
+		defer cancelCloser(ctx, ex.rawConn)()
+		mkdirAllOn(ex.conn, path.Dir(fullPath))
+		err := ex.conn.Stor(fullPath, src)
+		if err != nil {
+			Log.Add("ftp", "ERR", err.Error())
+		}
+		return err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	defer b.abortOnCancel(ctx)()
-	Log.Add("ftp", ">>>", "STOR "+relPath)
-	fullPath := path.Join(b.base, relPath)
 	b.mkdirAllLocked(path.Dir(fullPath))
 	err := b.conn.Stor(fullPath, src)
 	if err != nil {
@@ -332,11 +398,21 @@ func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 		return err
 	}
 	defer rd.Close()
+	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
+	fullPath := path.Join(b.base, relPath)
+	if ex, release, ok := b.acquireExtra(ctx); ok {
+		defer release()
+		defer cancelCloser(ctx, ex.rawConn)()
+		mkdirAllOn(ex.conn, path.Dir(fullPath))
+		err = ex.conn.StorFrom(fullPath, rd, uint64(offset))
+		if err != nil {
+			Log.Add("ftp", "ERR", err.Error())
+		}
+		return err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	defer b.abortOnCancel(ctx)()
-	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
-	fullPath := path.Join(b.base, relPath)
 	b.mkdirAllLocked(path.Dir(fullPath))
 	err = b.conn.StorFrom(fullPath, rd, uint64(offset))
 	if err != nil {
@@ -408,6 +484,16 @@ func (b *FTPBackend) removeAllLocked(fullPath string) error {
 }
 
 func (b *FTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
+	if ex, release, ok := b.acquireExtra(ctx); ok {
+		Log.Add("ftp", ">>>", "RETR "+relPath)
+		resp, err := ex.conn.Retr(path.Join(b.base, relPath))
+		if err != nil {
+			release()
+			Log.Add("ftp", "ERR", err.Error())
+			return nil, err
+		}
+		return &ftpPooledReader{rc: resp, release: release, stop: cancelCloser(ctx, ex.rawConn)}, nil
+	}
 	b.mu.Lock()
 	Log.Add("ftp", ">>>", "RETR "+relPath)
 	resp, err := b.conn.Retr(path.Join(b.base, relPath))
@@ -421,6 +507,16 @@ func (b *FTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, e
 }
 
 func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	if ex, release, ok := b.acquireExtra(ctx); ok {
+		Log.Add("ftp", ">>>", fmt.Sprintf("RETR %s @%d", relPath, offset))
+		resp, err := ex.conn.RetrFrom(path.Join(b.base, relPath), uint64(offset))
+		if err != nil {
+			release()
+			Log.Add("ftp", "ERR", err.Error())
+			return nil, err
+		}
+		return &ftpPooledReader{rc: resp, release: release, stop: cancelCloser(ctx, ex.rawConn)}, nil
+	}
 	b.mu.Lock()
 	Log.Add("ftp", ">>>", fmt.Sprintf("RETR %s @%d", relPath, offset))
 	resp, err := b.conn.RetrFrom(path.Join(b.base, relPath), uint64(offset))
@@ -434,14 +530,47 @@ func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (
 }
 
 func (b *FTPBackend) mkdirAllLocked(dir string) {
+	mkdirAllOn(b.conn, dir)
+}
+
+// mkdirAllOn creates dir and any missing parents on conn. Safe to run on an
+// extra connection concurrently with others: MakeDir on an existing dir just
+// errors and the List check then passes, so concurrent creators converge.
+func mkdirAllOn(conn *ftp.ServerConn, dir string) {
 	if dir == "/" || dir == "." || dir == "" {
 		return
 	}
-	b.conn.MakeDir(dir)
-	if _, err := b.conn.List(dir); err != nil {
-		b.mkdirAllLocked(path.Dir(dir))
-		b.conn.MakeDir(dir)
+	conn.MakeDir(dir)
+	if _, err := conn.List(dir); err != nil {
+		mkdirAllOn(conn, path.Dir(dir))
+		conn.MakeDir(dir)
 	}
+}
+
+// ftpPooledReader wraps a RETR response served by an extra connection. Close
+// stops the cancel watcher, closes the data stream, and returns the conn to
+// the pool — exactly once, since the copy layer may Close more than once.
+type ftpPooledReader struct {
+	rc      io.ReadCloser
+	release func()
+	stop    func()
+	once    sync.Once
+}
+
+func (r *ftpPooledReader) Read(p []byte) (int, error) {
+	return r.rc.Read(p)
+}
+
+func (r *ftpPooledReader) Close() error {
+	var err error
+	r.once.Do(func() {
+		if r.stop != nil {
+			r.stop()
+		}
+		err = r.rc.Close()
+		r.release()
+	})
+	return err
 }
 
 type lockedFTPReader struct {

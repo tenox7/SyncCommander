@@ -53,7 +53,7 @@ func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error)
 		return openSSHBackend(arg, parallel)
 	}
 	if strings.HasPrefix(arg, "ftp://") || strings.HasPrefix(arg, "ftps://") || strings.HasPrefix(arg, "ftpes://") {
-		return NewFTPBackend(arg, insecure)
+		return NewFTPBackend(arg, insecure, parallel)
 	}
 	if strings.HasPrefix(arg, "rsync+ssh://") {
 		return NewRsyncSSHBackend(arg)
