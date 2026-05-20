@@ -452,6 +452,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		if child.SubtreeChecksumAnyDiff {
 			anyDiff = true
 		}
+		l, r := child.Left, child.Right
 		if child.IsDir {
 			lt += child.LeftTotalSize
 			rt += child.RightTotalSize
@@ -459,19 +460,19 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 			rf += child.RightTotalFiles
 			ld += child.LeftTotalDirs
 			rd += child.RightTotalDirs
-			if child.Left != nil {
+			if l != nil {
 				ld++
 			}
-			if child.Right != nil {
+			if r != nil {
 				rd++
 			}
 		} else {
-			if child.Left != nil {
-				lt += child.Left.Size
+			if l != nil {
+				lt += l.Size
 				lf++
 			}
-			if child.Right != nil {
-				rt += child.Right.Size
+			if r != nil {
+				rt += r.Size
 				rf++
 			}
 		}

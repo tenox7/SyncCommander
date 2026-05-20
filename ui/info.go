@@ -29,22 +29,23 @@ func computeTreeStats(root *model.TreeNode) TreeStats {
 
 func walkStats(node *model.TreeNode, s *TreeStats) {
 	for _, child := range node.Children {
-		leftIsDir := child.Left != nil && child.Left.IsDir
-		rightIsDir := child.Right != nil && child.Right.IsDir
-		if child.Left != nil {
+		l, r := child.Left, child.Right
+		leftIsDir := l != nil && l.IsDir
+		rightIsDir := r != nil && r.IsDir
+		if l != nil {
 			if leftIsDir {
 				s.LeftDirs++
 			} else {
 				s.LeftFiles++
-				s.LeftSize += child.Left.Size
+				s.LeftSize += l.Size
 			}
 		}
-		if child.Right != nil {
+		if r != nil {
 			if rightIsDir {
 				s.RightDirs++
 			} else {
 				s.RightFiles++
-				s.RightSize += child.Right.Size
+				s.RightSize += r.Size
 			}
 		}
 		if child.IsDir {
@@ -53,10 +54,10 @@ func walkStats(node *model.TreeNode, s *TreeStats) {
 			continue
 		}
 		s.TotalFiles++
-		if child.Left != nil {
-			s.TotalSize += child.Left.Size
-		} else if child.Right != nil {
-			s.TotalSize += child.Right.Size
+		if l != nil {
+			s.TotalSize += l.Size
+		} else if r != nil {
+			s.TotalSize += r.Size
 		}
 		switch child.Compare.Presence {
 		case model.PresenceBoth:

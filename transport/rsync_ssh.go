@@ -292,6 +292,12 @@ func (b *RsyncSSHBackend) invalidateMD4Tree(prefix string) {
 	}
 }
 
+func (b *RsyncSSHBackend) invalidateAfterTreeSend(relPath string) {
+	b.listCache.invalidateTree(relPath)
+	b.listCache.invalidateAncestors(relPath)
+	b.invalidateMD4Tree(relPath)
+}
+
 func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
 	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
 	if err != nil {
@@ -608,8 +614,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	_, err = client.Run(ctx, rwForRun, []string{srcPath})
 	stop()
 	session.Close()
-	b.listCache.invalidateTree(relPath)
-	b.invalidateMD4Tree(relPath)
+	b.invalidateAfterTreeSend(relPath)
 	if err != nil {
 		Log.Add("rsync+ssh", "ERR", err.Error())
 		return err
