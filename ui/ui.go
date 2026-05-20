@@ -61,6 +61,7 @@ type CopyProgress struct {
 	FileStartBaseBytes atomic.Int64
 	LeftToRight        atomic.Bool
 	Cancel             atomic.Pointer[cancelFn]
+	Sem                atomic.Pointer[dynSem]
 
 	slotsMu sync.RWMutex
 	slots   []*ProgressSlot
@@ -217,7 +218,8 @@ type Model struct {
 	openDlg        *OpenDialog
 	insecure       bool
 	deepScan       bool
-	copyParallel   int
+	copyParallel   *int
+	parallelMax    int
 	batchTransfer  *bool
 	tickActive     bool
 	cachedStats    *TreeStats
@@ -239,7 +241,8 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
-		copyParallel:   copyParallel,
+		copyParallel:   &copyParallel,
+		parallelMax:    copyParallel,
 		batchTransfer:  &batchTransfer,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
@@ -269,6 +272,7 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
 		{Label: "Ignore TZ/DST (hour-modulo)", Value: &m.cmpOpts.IgnoreTZDST},
 		{Label: "Batch rsync+ssh transfer", Value: m.batchTransfer},
+		{Label: "Parallel copies", IntValue: m.copyParallel, IntMin: 1, IntMax: m.parallelMax},
 	})
 	return m
 }
@@ -441,6 +445,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "~", "`":
 			m.logView.Open()
+		case "-":
+			m.adjustCopyParallel(-1)
+		case "+", "=":
+			m.adjustCopyParallel(+1)
 		}
 		return m, nil
 	}
@@ -766,6 +774,29 @@ func readAll(ctx context.Context, backend model.Backend, relPath string) ([]byte
 	return io.ReadAll(rc)
 }
 
+func (m *Model) adjustCopyParallel(delta int) {
+	if m.copyProgress.Batched.Load() {
+		return
+	}
+	cur := *m.copyParallel
+	next := cur + delta
+	if next < 1 {
+		next = 1
+	}
+	if next > m.parallelMax {
+		next = m.parallelMax
+	}
+	if next == cur {
+		return
+	}
+	*m.copyParallel = next
+	m.copyProgress.Parallel.Store(int64(next))
+	if s := m.copyProgress.Sem.Load(); s != nil {
+		s.Resize(next)
+	}
+	transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", next))
+}
+
 func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c", "s", "q":
@@ -774,6 +805,10 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settings.MoveUp()
 	case "down", "j":
 		m.settings.MoveDown()
+	case "left", "h", "-":
+		m.settings.Adjust(-1)
+	case "right", "l", "+", "=":
+		m.settings.Adjust(1)
 	case " ", "enter":
 		m.settings.Toggle()
 	}
@@ -797,13 +832,13 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	var err error
 
 	if leftPath != m.left.BasePath() {
-		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
+		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, *m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
 	if rightPath != m.right.BasePath() {
-		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
+		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, *m.copyParallel)
 		if err != nil {
 			if newLeft != nil {
 				transport.CloseBackend(newLeft)
@@ -1032,9 +1067,13 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	scanner := m.scanner
 	opts := *m.cmpOpts
 	progress := m.copyProgress
-	parallel := m.copyParallel
+	parallel := *m.copyParallel
 	if parallel < 1 {
 		parallel = 1
+	}
+	parallelMax := m.parallelMax
+	if parallelMax < parallel {
+		parallelMax = parallel
 	}
 	batchEnabled := m.batchTransfer != nil && *m.batchTransfer
 	baseCtx, cancel := context.WithCancel(context.Background())
@@ -1108,7 +1147,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		progress.FileStartBytes.Store(0)
 		progress.FileStartBaseBytes.Store(0)
 		progress.FileStart.Store(0)
-		progress.ResetSlots(parallel)
+		progress.ResetSlots(parallelMax)
 
 		dstChanged := make(map[string]bool)
 		var changedMu sync.Mutex
@@ -1185,7 +1224,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		if parallel > 1 && !batched {
 			transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", parallel))
 		}
-		sem := make(chan struct{}, parallel)
+		sem := newDynSem(parallel)
+		progress.Sem.Store(sem)
+		defer progress.Sem.Store(nil)
 		var wg sync.WaitGroup
 
 		copyOne := func(f *model.TreeNode) {
@@ -1311,16 +1352,14 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		if !batched {
 		dispatch:
 			for _, f := range files {
-				select {
-				case <-ctx.Done():
+				if err := sem.Acquire(ctx); err != nil {
 					break dispatch
-				case sem <- struct{}{}:
 				}
 				wg.Add(1)
 				progress.InFlight.Add(1)
 				go func(f *model.TreeNode) {
 					defer wg.Done()
-					defer func() { <-sem }()
+					defer sem.Release()
 					defer progress.InFlight.Add(-1)
 					copyOne(f)
 				}(f)

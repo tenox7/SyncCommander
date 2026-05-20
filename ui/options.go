@@ -8,8 +8,11 @@ import (
 )
 
 type Option struct {
-	Label string
-	Value *bool
+	Label    string
+	Value    *bool
+	IntValue *int
+	IntMin   int
+	IntMax   int
 }
 
 type SettingsDialog struct {
@@ -62,10 +65,32 @@ func (d *SettingsDialog) UpdateChecksumLabel(algo string) {
 }
 
 func (d *SettingsDialog) Toggle() {
-	if d.cursor >= 0 && d.cursor < len(d.options) {
-		opt := &d.options[d.cursor]
-		*opt.Value = !*opt.Value
+	if d.cursor < 0 || d.cursor >= len(d.options) {
+		return
 	}
+	opt := &d.options[d.cursor]
+	if opt.IntValue != nil {
+		return
+	}
+	*opt.Value = !*opt.Value
+}
+
+func (d *SettingsDialog) Adjust(delta int) {
+	if d.cursor < 0 || d.cursor >= len(d.options) {
+		return
+	}
+	opt := &d.options[d.cursor]
+	if opt.IntValue == nil {
+		return
+	}
+	v := *opt.IntValue + delta
+	if v < opt.IntMin {
+		v = opt.IntMin
+	}
+	if v > opt.IntMax {
+		v = opt.IntMax
+	}
+	*opt.IntValue = v
 }
 
 var (
@@ -76,6 +101,7 @@ var (
 	styleDialogTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	styleOptOn       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleOptOff      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleOptInt      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
 func (d *SettingsDialog) View(width, height int) string {
@@ -92,15 +118,20 @@ func (d *SettingsDialog) View(width, height int) string {
 		if i == d.cursor {
 			marker = "▶ "
 		}
-		state := styleOptOff.Render("[off]")
-		if *opt.Value {
+		var state string
+		switch {
+		case opt.IntValue != nil:
+			state = styleOptInt.Render(fmt.Sprintf("[%2d]", *opt.IntValue))
+		case *opt.Value:
 			state = styleOptOn.Render("[ on]")
+		default:
+			state = styleOptOff.Render("[off]")
 		}
 		sb.WriteString(fmt.Sprintf("%s%s  %s\n", marker, state, opt.Label))
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Space=toggle  Esc=close"))
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Space=toggle  ←/→=adjust  Esc=close"))
 
 	dialog := styleDialogBorder.Render(sb.String())
 
