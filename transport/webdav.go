@@ -54,7 +54,7 @@ func webdavIdle() time.Duration {
 }
 
 func protoManagesLiveness(proto string) bool {
-	return proto == "webdav" || proto == "webdavs"
+	return proto == "webdav" || proto == "webdavs" || proto == "restic" || proto == "restics"
 }
 
 type idleTimeoutConn struct {

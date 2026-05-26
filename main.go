@@ -27,12 +27,13 @@ func main() {
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
+	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
-		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs}://[user[:pass]@]host/path\n")
+		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs,restic,restics}://[user[:pass]@]host/path\n")
 		fmt.Fprintf(os.Stderr, "compare flags (use --flag=false to disable defaults):\n")
 		flag.PrintDefaults()
 	}
@@ -40,6 +41,7 @@ func main() {
 
 	transport.SetMaxRetries(*maxRetries)
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
+	transport.SetResticIdleTimeout(*resticTimeout)
 
 	var leftPath, rightPath string
 	switch flag.NArg() {

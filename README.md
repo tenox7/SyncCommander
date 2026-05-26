@@ -21,5 +21,6 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - sftp:// scp:// ssh://. SHA/MD5 over ssh.
 - rsync://, rsync+ssh://. Rsync MD4 and SHA/MD5 over ssh.
 - webdav://, webdavs://. MD5/SHA1 via owncloud checksums (`rclone serve webdav --etag-hash md5`).
+- restic://, restics://. restic REST API (`rclone serve restic`, restic rest-server). SHA256 from content-addressed object names.
 
 

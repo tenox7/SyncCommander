@@ -13,7 +13,7 @@ import (
 )
 
 func IsRemote(arg string) bool {
-	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://"} {
+	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://"} {
 		if strings.HasPrefix(arg, p) {
 			return true
 		}
@@ -63,6 +63,9 @@ func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error)
 	}
 	if strings.HasPrefix(arg, "webdav://") || strings.HasPrefix(arg, "webdavs://") {
 		return NewWebDAVBackend(arg, insecure, parallel)
+	}
+	if strings.HasPrefix(arg, "restic://") || strings.HasPrefix(arg, "restics://") {
+		return NewResticBackend(arg, insecure, parallel)
 	}
 	return NewLocalBackend(arg), nil
 }
