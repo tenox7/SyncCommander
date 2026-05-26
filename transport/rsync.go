@@ -744,15 +744,50 @@ func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) 
 	return fmt.Errorf("rsync: set times not supported")
 }
 
-// SendLocalFile sends an existing local file directly to the rsync daemon
-// without writing to a tmp dir first. Progress: --progress drives the
-// in-process rsync sender to emit byte-offset lines on stdout; we parse them
-// into the counter so the stall guard sees movement. On error in-band credit
-// is rolled back; on success a cap-bounded top-up brings the total to
-// fileSize.
+// stageUploadPath builds, under tmpDir, the full relPath directory chain with
+// an empty leaf, returning the top-level staging component and the leaf path.
+// The rsync daemon protocol has no mkdir: a recursive (-r) send of the top
+// component is the only way to recreate relPath's leading dirs on the remote,
+// the same trick Mkdir uses. Callers populate leaf, then send stageTop to the
+// module root with -r.
+func stageUploadPath(tmpDir, relPath string) (stageTop, leaf string, err error) {
+	clean := strings.Trim(path.Clean(relPath), "/")
+	leaf = filepath.Join(tmpDir, filepath.FromSlash(clean))
+	if err := os.MkdirAll(filepath.Dir(leaf), 0755); err != nil {
+		return "", "", err
+	}
+	return filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0]), leaf, nil
+}
+
+// SendLocalFile sends an existing local file to the rsync daemon. Progress:
+// --progress drives the in-process rsync sender to emit byte-offset lines on
+// stdout; we parse them into the counter so the stall guard sees movement. On
+// error in-band credit is rolled back; on success a cap-bounded top-up brings
+// the total to fileSize.
 func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
-	dest := b.remoteURL(path.Dir(relPath)) + "/"
-	args := rsyncFlagsForCtx(ctx)
+	tmpDir, err := os.MkdirTemp("", "rsync-send-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	parentRel := path.Dir(relPath)
+	if parentRel == "." {
+		parentRel = ""
+	}
+
+	// Stage srcPath under its full relPath and recursively send the top
+	// component so -r recreates the leading dirs (the daemon can't mkdir). A
+	// hardlink avoids copying the (often large) body; across filesystems
+	// os.Link fails, so fall back to a recursive mkdir then a flat send.
+	src, dest := srcPath, b.remoteURL(parentRel)+"/"
+	if stageTop, link, perr := stageUploadPath(tmpDir, relPath); perr == nil && os.Link(srcPath, link) == nil {
+		src, dest = stageTop, b.remoteURL("")+"/"
+	} else if err := b.Mkdir(ctx, parentRel, 0o755); err != nil {
+		return err
+	}
+
+	args := append(rsyncFlagsForCtx(ctx), "-r")
 	if b.useChecksum {
 		args = append(args, "-c")
 	}
@@ -765,9 +800,9 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 		stdout = &rsyncProgressWriter{adder: adder}
 		args = append(args, "--progress")
 	}
-	args = append(args, srcPath, dest)
+	args = append(args, src, dest)
 	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
-	err := b.rsyncRunStdout(ctx, stdout, args...)
+	err = b.rsyncRunStdout(ctx, stdout, args...)
 	b.listCache.invalidateAncestors(relPath)
 	b.invalidateMD4(relPath)
 	if err != nil {
@@ -845,7 +880,10 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	}
 	defer os.RemoveAll(tmpDir)
 
-	tmpFile := filepath.Join(tmpDir, filepath.Base(relPath))
+	stageTop, tmpFile, err := stageUploadPath(tmpDir, relPath)
+	if err != nil {
+		return err
+	}
 	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
@@ -877,8 +915,8 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	}
 	f.Close()
 
-	dest := b.remoteURL(path.Dir(relPath)) + "/"
-	sendArgs := rsyncFlagsForCtx(ctx)
+	dest := b.remoteURL("") + "/"
+	sendArgs := append(rsyncFlagsForCtx(ctx), "-r")
 	if b.useChecksum {
 		sendArgs = append(sendArgs, "-c")
 	}
@@ -887,7 +925,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		stdout = &rsyncProgressWriter{adder: pushAdder}
 		sendArgs = append(sendArgs, "--progress")
 	}
-	sendArgs = append(sendArgs, tmpFile, dest)
+	sendArgs = append(sendArgs, stageTop, dest)
 	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
 	err = b.rsyncRunStdout(ctx, stdout, sendArgs...)
 	b.listCache.invalidateAncestors(relPath)
