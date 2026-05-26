@@ -14,8 +14,8 @@ import (
 
 var styleCopyPopup = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
-	BorderForeground(lipgloss.Color("4")).
-	Background(lipgloss.Color("0")).
+	BorderForeground(lipgloss.Color("14")).
+	Background(lipgloss.Color("4")).
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
