@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -51,14 +52,14 @@ type CompareResult struct {
 }
 
 type TreeNode struct {
-	RelPath         string
-	Name            string
-	IsDir           bool
-	Left            *FileEntry
-	Right           *FileEntry
-	Parent          *TreeNode
-	Compare         CompareResult
-	Children        []*TreeNode
+	RelPath                string
+	Name                   string
+	IsDir                  bool
+	Left                   *FileEntry
+	Right                  *FileEntry
+	Parent                 *TreeNode
+	Compare                CompareResult
+	Children               []*TreeNode
 	Expanded               bool
 	Listed                 bool
 	SubtreePending         bool
@@ -76,10 +77,10 @@ type TreeNode struct {
 	SubtreeBothFiles       int
 	SubtreeChecksumPending int
 	SubtreeChecksumAnyDiff bool
-	Depth           int
-	ChildStatus     AttrStatus
-	LeftChecksum    string
-	RightChecksum   string
+	Depth                  int
+	ChildStatus            AttrStatus
+	LeftChecksum           string
+	RightChecksum          string
 	// CksumFingerprint stores (size, mtime) snapshots at the moment Left/RightChecksum
 	// were computed. The preserving merge used by rescan paths consults these to
 	// decide whether to keep cached CRC: if the new entry's (size, mtime) match,
@@ -88,24 +89,24 @@ type TreeNode struct {
 	LeftCksumModTime  time.Time
 	RightCksumSize    int64
 	RightCksumModTime time.Time
-	LeftTotalSize   int64
-	RightTotalSize  int64
-	LeftTotalFiles  int
-	RightTotalFiles int
-	LeftTotalDirs   int
-	RightTotalDirs  int
-	Guides          []bool
-	IsLast          bool
-	IsAttr          bool
-	AttrLabel       string
-	AttrLeftVal     string
-	AttrRightVal    string
-	AttrLeftRaw     string
-	AttrRightRaw    string
-	AttrStatus      AttrStatus
-	AttrInactive    bool
-	AttrWinner      int
-	AttrPresence    Presence
+	LeftTotalSize     int64
+	RightTotalSize    int64
+	LeftTotalFiles    int
+	RightTotalFiles   int
+	LeftTotalDirs     int
+	RightTotalDirs    int
+	Guides            []bool
+	IsLast            bool
+	IsAttr            bool
+	AttrLabel         string
+	AttrLeftVal       string
+	AttrRightVal      string
+	AttrLeftRaw       string
+	AttrRightRaw      string
+	AttrStatus        AttrStatus
+	AttrInactive      bool
+	AttrWinner        int
+	AttrPresence      Presence
 }
 
 // SubtreeChecksumScanned reports whether every PresenceBoth file in n's
@@ -155,6 +156,21 @@ func (c *ChangedPaths) hasLeft(relPath string) bool {
 
 func (c *ChangedPaths) hasRight(relPath string) bool {
 	return c != nil && c.Right[relPath]
+}
+
+func (c *ChangedPaths) touchesSubtree(dir string) bool {
+	if c == nil || dir == "" {
+		return false
+	}
+	prefix := dir + "/"
+	for _, set := range []map[string]bool{c.Left, c.Right} {
+		for p := range set {
+			if p == dir || strings.HasPrefix(p, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mergeChildrenPreserving merges fresh entries into parent's children while

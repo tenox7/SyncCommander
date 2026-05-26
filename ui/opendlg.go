@@ -157,7 +157,7 @@ func (d *OpenDialog) View(width, height int) string {
 
 	sb.WriteString("\n\n")
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	sb.WriteString(hintStyle.Render("/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://"))
+	sb.WriteString(hintStyle.Render("/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://"))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("Enter=open  Esc=cancel"))
 

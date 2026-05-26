@@ -1289,6 +1289,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			fileCtx := transport.ContextWithProgress(ctx, slotBytes)
 			fileCtx = transport.ContextWithBaseProgress(fileCtx, slotBase)
 			fileCtx = transport.ContextWithFileSize(fileCtx, srcEntry.Size)
+			fileCtx = transport.ContextWithModTime(fileCtx, srcEntry.ModTime)
 
 			// Resume first when a partial dst body exists: append the missing
 			// tail rather than overwrite the whole file. tryResumeCopy

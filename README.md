@@ -22,5 +22,6 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - ftp://  ftps://  ftpes://  with implicit/explicit TLS. XCRC, XSHA, HASH.
 - sftp:// scp:// ssh://. SHA/MD5 over ssh.
 - rsync://, rsync+ssh://. Rsync MD4 and SHA/MD5 over ssh.
+- webdav://, webdavs://. MD5/SHA1 via owncloud checksums (e.g. `rclone serve webdav --etag-hash md5`).
 
 

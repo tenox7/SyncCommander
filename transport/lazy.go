@@ -47,11 +47,12 @@ func isConnLost(err error) bool {
 var ErrResumeUnsupported = errors.New("resume not supported by this backend")
 
 type lazyBackend struct {
-	factory func() (model.Backend, error)
-	inner   model.Backend
-	mu      sync.Mutex
-	display string
-	proto   string
+	factory         func() (model.Backend, error)
+	inner           model.Backend
+	mu              sync.Mutex
+	display         string
+	proto           string
+	managesLiveness bool
 }
 
 func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
@@ -59,8 +60,10 @@ func NewLazyBackend(display string, factory func() (model.Backend, error)) model
 	if idx := strings.Index(display, "://"); idx > 0 {
 		proto = display[:idx]
 	}
-	return &lazyBackend{factory: factory, display: display, proto: proto}
+	return &lazyBackend{factory: factory, display: display, proto: proto, managesLiveness: protoManagesLiveness(proto)}
 }
+
+func (b *lazyBackend) ManagesLiveness() bool { return b.managesLiveness }
 
 func (b *lazyBackend) ensureConnected() (model.Backend, error) {
 	b.mu.Lock()

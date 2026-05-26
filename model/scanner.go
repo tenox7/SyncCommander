@@ -462,28 +462,29 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		}
 		setp("scanning...")
 
-		descend := depthLimit == 0 || job.depth+1 <= depthLimit
-		if descend {
-			for i := len(children) - 1; i >= 0; i-- {
-				child := children[i]
-				if !child.IsDir {
-					continue
-				}
-				leftIsDir := child.Left != nil && child.Left.IsDir
-				rightIsDir := child.Right != nil && child.Right.IsDir
-				listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
-				listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
-				if !listLeft && !listRight {
-					continue
-				}
-				queue = append(queue, dirJob{
-					relDir:    child.RelPath,
-					parent:    child,
-					depth:     job.depth + 1,
-					listLeft:  listLeft,
-					listRight: listRight,
-				})
+		withinDepth := depthLimit == 0 || job.depth+1 <= depthLimit
+		for i := len(children) - 1; i >= 0; i-- {
+			child := children[i]
+			if !child.IsDir {
+				continue
 			}
+			if !withinDepth && !changed.touchesSubtree(child.RelPath) {
+				continue
+			}
+			leftIsDir := child.Left != nil && child.Left.IsDir
+			rightIsDir := child.Right != nil && child.Right.IsDir
+			listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
+			listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
+			if !listLeft && !listRight {
+				continue
+			}
+			queue = append(queue, dirJob{
+				relDir:    child.RelPath,
+				parent:    child,
+				depth:     job.depth + 1,
+				listLeft:  listLeft,
+				listRight: listRight,
+			})
 		}
 
 		// After listing the rescan root, kick off the recursive preload in
@@ -744,20 +745,29 @@ func updateDescendantPaths(children []*TreeNode, oldPrefix, newPrefix string) {
 	}
 }
 
+func (s *Scanner) listCtx(parent context.Context, b Backend) (context.Context, context.CancelFunc) {
+	if lm, ok := b.(LivenessManaged); ok && lm.ManagesLiveness() {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, s.stallTimeout)
+}
+
 func (s *Scanner) listBoth(ctx context.Context, relDir string) ([]FileEntry, []FileEntry) {
-	ctx, cancel := context.WithTimeout(ctx, s.stallTimeout)
-	defer cancel()
 	type result struct {
 		entries []FileEntry
 		side    int
 	}
 	ch := make(chan result, 2)
 	go func() {
-		e, _ := s.left.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.left)
+		defer cancel()
+		e, _ := s.left.List(c, relDir)
 		ch <- result{e, 0}
 	}()
 	go func() {
-		e, _ := s.right.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.right)
+		defer cancel()
+		e, _ := s.right.List(c, relDir)
 		ch <- result{e, 1}
 	}()
 	var left, right []FileEntry
@@ -998,14 +1008,16 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 	if !listLeft && !listRight {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.stallTimeout)
-	defer cancel()
 	if !listLeft {
-		e, _ := s.right.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.right)
+		defer cancel()
+		e, _ := s.right.List(c, relDir)
 		return nil, e
 	}
 	if !listRight {
-		e, _ := s.left.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.left)
+		defer cancel()
+		e, _ := s.left.List(c, relDir)
 		return e, nil
 	}
 	type result struct {
@@ -1014,11 +1026,15 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 	}
 	ch := make(chan result, 2)
 	go func() {
-		e, _ := s.left.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.left)
+		defer cancel()
+		e, _ := s.left.List(c, relDir)
 		ch <- result{e, 0}
 	}()
 	go func() {
-		e, _ := s.right.List(ctx, relDir)
+		c, cancel := s.listCtx(ctx, s.right)
+		defer cancel()
+		e, _ := s.right.List(c, relDir)
 		ch <- result{e, 1}
 	}()
 	var left, right []FileEntry

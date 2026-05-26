@@ -52,6 +52,20 @@ func fileSizeFromContext(ctx context.Context) int64 {
 	return s
 }
 
+type modTimeKey struct{}
+
+func ContextWithModTime(ctx context.Context, mtime time.Time) context.Context {
+	if mtime.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, modTimeKey{}, mtime)
+}
+
+func modTimeFromContext(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(modTimeKey{}).(time.Time)
+	return t, ok
+}
+
 type PreCounted interface {
 	preCounted()
 }

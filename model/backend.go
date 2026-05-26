@@ -177,3 +177,7 @@ func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 type RecursivePreloader interface {
 	PreloadRecursive(ctx context.Context, scope string) error
 }
+
+type LivenessManaged interface {
+	ManagesLiveness() bool
+}
