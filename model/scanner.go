@@ -643,7 +643,7 @@ func findNode(root *TreeNode, relPath string) *TreeNode {
 	return nil
 }
 
-func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string) {
+func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, subSecond, timeGrace, ignoreTZDST bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	node.Name = newName
@@ -658,14 +658,68 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string) {
 	}
 	updateDescendantPaths(node.Children, oldRel, newRel)
 	parent := findNode(s.tree, DirOf(newRel))
-	if parent != nil {
-		sort.Slice(parent.Children, func(i, j int) bool {
-			a, b := parent.Children[i], parent.Children[j]
-			if a.IsDir != b.IsDir {
-				return a.IsDir
-			}
-			return a.Name < b.Name
-		})
+	if parent == nil {
+		return
+	}
+	mergeRenamedCollision(parent, node, subSecond, timeGrace, ignoreTZDST)
+	sort.Slice(parent.Children, func(i, j int) bool {
+		a, b := parent.Children[i], parent.Children[j]
+		if a.IsDir != b.IsDir {
+			return a.IsDir
+		}
+		return a.Name < b.Name
+	})
+}
+
+// mergeRenamedCollision folds a sibling into node when a rename has made node
+// share a name and type with an existing sibling that holds the side node is
+// missing — e.g. renaming a right-only entry to match a left-only one. Without
+// this the two would keep rendering as separate single-sided rows. The sibling
+// is removed and node becomes PresenceBoth. A merged directory is re-listed
+// lazily, since its subtree must now reflect both sides.
+func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
+	for i, sib := range parent.Children {
+		if sib == node || sib.IsAttr {
+			continue
+		}
+		if sib.Name != node.Name || sib.IsDir != node.IsDir {
+			continue
+		}
+		merged := false
+		if node.Left == nil && sib.Left != nil {
+			node.Left = sib.Left
+			node.LeftChecksum = sib.LeftChecksum
+			node.LeftCksumSize = sib.LeftCksumSize
+			node.LeftCksumModTime = sib.LeftCksumModTime
+			merged = true
+		}
+		if node.Right == nil && sib.Right != nil {
+			node.Right = sib.Right
+			node.RightChecksum = sib.RightChecksum
+			node.RightCksumSize = sib.RightCksumSize
+			node.RightCksumModTime = sib.RightCksumModTime
+			merged = true
+		}
+		if !merged {
+			continue
+		}
+		parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
+		compareNode(node, subSecond, timeGrace, ignoreTZDST)
+		if node.IsDir {
+			node.Listed = false
+			node.Expanded = false
+			node.Children = nil
+			return
+		}
+		switch {
+		case node.LeftChecksum == "" || node.RightChecksum == "":
+			node.Compare.Checksum = AttrUnknown
+		case node.LeftChecksum == node.RightChecksum:
+			node.Compare.Checksum = AttrEqual
+		default:
+			node.Compare.Checksum = AttrDifferent
+		}
+		return
 	}
 }
 

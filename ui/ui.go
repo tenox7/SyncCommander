@@ -1702,7 +1702,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 				_ = m.left.Rename(ctx, oldRel, newRel)
 				_ = m.right.Rename(ctx, oldRel, newRel)
 			}
-			m.scanner.RenameNode(node, newName, newRel, oldRel)
+			m.scanner.RenameNode(node, newName, newRel, oldRel, m.cmpOpts.SubSecond, m.cmpOpts.TimeGrace, m.cmpOpts.IgnoreTZDST)
 		}()
 	})
 }
