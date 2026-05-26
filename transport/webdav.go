@@ -117,6 +117,8 @@ type WebDAVBackend struct {
 	cksumAlgo  string
 	availAlgos []string
 	sums       *wdSumCache
+	listCache  *rsyncListCache
+	noInfinity atomic.Bool
 }
 
 func NewWebDAVBackend(rawURL string, insecure bool, parallel int) (*WebDAVBackend, error) {
@@ -389,6 +391,21 @@ func parseWDTime(s string) time.Time {
 }
 
 func (b *WebDAVBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	if b.listCache != nil {
+		entries, hit, active, done := b.listCache.lookup(relDir)
+		if hit {
+			return entries, nil
+		}
+		if active && !done {
+			if e, ok := b.listCache.await(relDir); ok {
+				return e, nil
+			}
+		}
+	}
+	return b.liveList(ctx, relDir)
+}
+
+func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	Log.Add("webdav", ">>>", "PROPFIND "+b.pathFor(relDir))
 	ms, err := b.propfind(ctx, relDir, defaultWDDepth)
 	if err != nil {
@@ -407,6 +424,123 @@ func (b *WebDAVBackend) List(ctx context.Context, relDir string) ([]model.FileEn
 	}
 	Log.Add("webdav", "<<<", fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
+}
+
+// PreloadRecursive fires a single PROPFIND Depth:infinity in the background,
+// streaming entries into the cache grouped by parent dir. Returns immediately;
+// subsequent List calls under scope hit or wait on the cache. Servers may
+// refuse Depth:infinity (RFC 4918 §9.1, 403 + propfind-finite-depth); on that
+// rejection we latch noInfinity so every later scan goes straight to per-dir
+// Depth:1 without retrying. A second preload while one is in flight is a no-op.
+func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	if b.noInfinity.Load() {
+		return nil
+	}
+	if b.listCache == nil {
+		b.listCache = newRsyncListCache()
+	}
+	c := b.listCache
+	c.mu.Lock()
+	if c.active && !c.done {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	c.reset(ctx, scope)
+
+	go func() {
+		_ = b.runRecursiveList(ctx, scope, c.emit)
+		c.finish()
+	}()
+	return nil
+}
+
+func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+	Log.Add("webdav", ">>>", "RPROPFIND "+b.pathFor(scope))
+	resp, err := b.do(ctx, "PROPFIND", b.urlFor(scope, true), strings.NewReader(wdPropfindBody), map[string]string{
+		"Depth":        "infinity",
+		"Content-Type": "application/xml",
+	})
+	if err != nil {
+		return err
+	}
+	defer drainClose(resp.Body)
+	if resp.StatusCode == http.StatusForbidden {
+		b.noInfinity.Store(true)
+		Log.Add("webdav", "ERR", "RPROPFIND rejected ("+resp.Status+"); falling back to per-dir Depth:1")
+		return fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
+	}
+	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
+		Log.Add("webdav", "ERR", "RPROPFIND: "+err.Error())
+		return err
+	}
+
+	// rsync's recursive output revisits parents, so emit appends rather than
+	// replaces; we flush a parent's batch whenever the running parent changes.
+	// WebDAV multistatus ordering isn't guaranteed grouped, but append keeps
+	// it correct either way (just more flushes when parents interleave).
+	var current string
+	var haveCurrent bool
+	var batch []model.FileEntry
+	var seenDirs []string
+	flush := func() {
+		if !haveCurrent {
+			return
+		}
+		emit(current, batch)
+		batch = nil
+		haveCurrent = false
+	}
+
+	dec := xml.NewDecoder(resp.Body)
+	n := 0
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			flush()
+			Log.Add("webdav", "ERR", "RPROPFIND decode: "+err.Error())
+			return err
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "response" {
+			continue
+		}
+		var r wdResponse
+		if err := dec.DecodeElement(&r, &se); err != nil {
+			flush()
+			return err
+		}
+		e, sums, isSelf, ok := b.entryFromResponse(r, scope)
+		if !ok || isSelf {
+			continue
+		}
+		if sums != nil {
+			b.sums.put(e.RelPath, sums)
+		}
+		parent := parentDir(e.RelPath)
+		if !haveCurrent || parent != current {
+			flush()
+			current = parent
+			haveCurrent = true
+		}
+		batch = append(batch, e)
+		if e.IsDir {
+			seenDirs = append(seenDirs, e.RelPath)
+		}
+		n++
+	}
+	flush()
+	// Register every dir we saw so an empty leaf reports a cache hit (with no
+	// children) instead of falling through to a live per-dir PROPFIND.
+	for _, d := range seenDirs {
+		emit(d, nil)
+	}
+	Log.Add("webdav", "<<<", fmt.Sprintf("RPROPFIND %d entries", n))
+	return nil
 }
 
 func (b *WebDAVBackend) Checksum(ctx context.Context, relPath string) (string, error) {
@@ -542,12 +676,17 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 		return err
 	}
 	b.sums.invalidate(relPath)
+	b.listCache.invalidateAncestors(relPath)
 	return nil
 }
 
 func (b *WebDAVBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
 	Log.Add("webdav", ">>>", "MKCOL "+relPath)
-	return b.mkdirAll(ctx, relPath)
+	if err := b.mkdirAll(ctx, relPath); err != nil {
+		return err
+	}
+	b.listCache.invalidateAncestors(relPath)
+	return nil
 }
 
 func (b *WebDAVBackend) mkdirAll(ctx context.Context, dir string) error {
@@ -597,6 +736,9 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 		return err
 	}
 	b.sums.invalidate(oldRelPath)
+	b.listCache.invalidateTree(oldRelPath)
+	b.listCache.invalidateAncestors(oldRelPath)
+	b.listCache.invalidateAncestors(newRelPath)
 	return nil
 }
 
@@ -621,6 +763,8 @@ func (b *WebDAVBackend) delete(ctx context.Context, relPath string) error {
 		return err
 	}
 	b.sums.invalidate(relPath)
+	b.listCache.invalidateTree(relPath)
+	b.listCache.invalidateAncestors(relPath)
 	return nil
 }
 

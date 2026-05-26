@@ -1,7 +1,6 @@
 # TODO
 
 - in rsync module name require and module not found are fatal errors should not retry
-- in webdav we should be able to get PROPFIND for entire subdir off root like in rsync
 
 ## Tech debt
 
@@ -9,7 +8,9 @@
 
 ## Features
 
-- symlink support
+- symlink support ?
+  rclone webdav: Can't follow symlink without -L/--copy-links
+  currently using --local-links - needs more testing especially with --copy-links
 - select multiple files with tab or something and copy all at once
 - detect renames via CRC on and rename files (no rsync)
 - sort 
