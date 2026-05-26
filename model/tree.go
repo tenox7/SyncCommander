@@ -228,6 +228,9 @@ func mergeChildrenPreservingWithChanged(parent *TreeNode, leftEntries, rightEntr
 	for _, n := range byKey {
 		compareNode(n, subSecond, timeGrace, ignoreTZDST)
 		revalidateChecksum(n, changed)
+		if n.IsDir && len(n.Children) > 0 && n.Compare.Presence != PresenceBoth {
+			n.Children = pruneSubtreeToSide(n.Children, n.Compare.Presence == PresenceLeftOnly, subSecond, timeGrace, ignoreTZDST)
+		}
 		nodes = append(nodes, n)
 	}
 	sort.Slice(nodes, func(i, j int) bool {
@@ -238,6 +241,39 @@ func mergeChildrenPreservingWithChanged(parent *TreeNode, leftEntries, rightEntr
 		return a.Name < b.Name
 	})
 	return nodes
+}
+
+func pruneSubtreeToSide(children []*TreeNode, keepLeft, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
+	kept := children[:0]
+	for _, c := range children {
+		if keepLeft {
+			c.Right = nil
+			c.RightChecksum = ""
+			c.RightCksumSize = 0
+			c.RightCksumModTime = time.Time{}
+			c.ChecksumPendingRight = false
+			c.ChecksumActiveRight = false
+		} else {
+			c.Left = nil
+			c.LeftChecksum = ""
+			c.LeftCksumSize = 0
+			c.LeftCksumModTime = time.Time{}
+			c.ChecksumPendingLeft = false
+			c.ChecksumActiveLeft = false
+		}
+		if c.Left == nil && c.Right == nil {
+			continue
+		}
+		compareNode(c, subSecond, timeGrace, ignoreTZDST)
+		if !c.IsDir {
+			c.Compare.Checksum = AttrNA
+		}
+		if c.IsDir && len(c.Children) > 0 {
+			c.Children = pruneSubtreeToSide(c.Children, keepLeft, subSecond, timeGrace, ignoreTZDST)
+		}
+		kept = append(kept, c)
+	}
+	return kept
 }
 
 // revalidateChecksum drops cached Left/RightChecksum if the new entry's

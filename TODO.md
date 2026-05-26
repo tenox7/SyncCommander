@@ -1,6 +1,7 @@
 # TODO
 
-in rsync module name require and module not found are fatal errors should not retry
+- in rsync module name require and module not found are fatal errors should not retry
+- in webdav we should be able to get PROPFIND for entire subdir off root like in rsync
 
 ## Tech debt
 
