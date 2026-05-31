@@ -983,6 +983,19 @@ func (b *RsyncBackend) Rename(_ context.Context, _, _ string) error {
 	return fmt.Errorf("rsync: rename not supported")
 }
 
+func rsyncFilterEscape(name string) string {
+	if !strings.ContainsAny(name, "*?[") {
+		return name
+	}
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`?`, `\?`,
+		`[`, `\[`,
+		`]`, `\]`,
+	).Replace(name)
+}
+
 func (b *RsyncBackend) Remove(ctx context.Context, relPath string) error {
 	return b.remove(ctx, relPath, false)
 }
@@ -1009,9 +1022,10 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	defer os.RemoveAll(tmpDir)
 
 	dest := b.remoteURL(parent) + "/"
-	args := []string{"-r", "--delete", "--include=/" + base}
+	esc := rsyncFilterEscape(base)
+	args := []string{"-r", "--delete", "--include=/" + esc}
 	if recursive {
-		args = append(args, "--include=/"+base+"/***")
+		args = append(args, "--include=/"+esc+"/***")
 	}
 	args = append(args, "--exclude=*", tmpDir+"/", dest)
 

@@ -62,11 +62,13 @@ func TestRsyncRemoteDelete(t *testing.T) {
 	ctx := context.Background()
 
 	seed := map[string]string{
-		"Gedit.tmTheme": "theme",
-		"keep1.txt":     "a",
-		"keep2.csv":     "b",
-		"sub/keep3.txt": "c",
-		"sub/gone.txt":  "d",
+		"Gedit.tmTheme":    "theme",
+		"keep1.txt":        "a",
+		"keep2.csv":        "b",
+		"sub/keep3.txt":    "c",
+		"sub/gone.txt":     "d",
+		"AppPkg [TNT].dmg": "tnt",
+		"AppPkg T.dmg":     "decoy",
 	}
 	for rel, body := range seed {
 		full := filepath.Join(moduleDir, rel)
@@ -95,6 +97,16 @@ func TestRsyncRemoteDelete(t *testing.T) {
 		if !exists(rel) {
 			t.Fatalf("Remove deleted unrelated path %q", rel)
 		}
+	}
+
+	if err := b.Remove(ctx, "AppPkg [TNT].dmg"); err != nil {
+		t.Fatalf("Remove bracketed file: %v", err)
+	}
+	if exists("AppPkg [TNT].dmg") {
+		t.Fatal("AppPkg [TNT].dmg was not deleted")
+	}
+	if !exists("AppPkg T.dmg") {
+		t.Fatal("Remove deleted glob-decoy AppPkg T.dmg")
 	}
 
 	// File inside a subdirectory: delete one entry, keep its sibling.
