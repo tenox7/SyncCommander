@@ -8,6 +8,7 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Manual comparison, touch up and maintenance.
 - Troubleshooting, debugging sync issues.
 - Ad hoc downloads/uploads. Touch up.
+- Remote checksum generation and comparison.
 
 ## Features
 
@@ -18,11 +19,16 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 
 ## Supported protocols and checksums
 
-- Local dir including remote mounts. SHA/MD5 checksums.
-- ftp://  ftps://  ftpes://  with implicit/explicit TLS. XCRC, XSHA, HASH.
-- sftp:// scp:// ssh://. SHA/MD5 over ssh.
-- rsync://, rsync+ssh://. Rsync MD4 and SHA/MD5 over ssh.
-- webdav://, webdavs://. MD5/SHA1 via owncloud checksums (`rclone serve webdav --etag-hash md5`).
-- restic://, restics://. restic REST API (`rclone serve restic`, restic rest-server). SHA256 from content-addressed object names.
+| Protocol | Checksum |
+| --- | --- |
+| Local dir including remote mounts | SHA/MD5 |
+| ftp:// ftps:// ftpes:// with implicit/explicit TLS | XCRC, XSHA, HASH |
+| sftp:// scp:// ssh:// | SHA/MD5 (over ssh) |
+| rsync://, rsync+ssh:// | Rsync MD4 (internal), SHA/MD5 (over ssh) |
+| webdav://, webdavs:// | MD5/SHA1 via `--etag-hash` |
+| restic://, restics:// | SHA256 |
 
+## Server examples
 
+- `rclone serve webdav --etag-hash md5`
+- `rclone serve restic`
