@@ -2,6 +2,8 @@
 
 A tool for manual comparison, inspection, verification and troubleshooting of file/directory tree synchronization. Like Norton Commander or Midnight Commander but for sync.
 
+![SyncCommander](sc.png)
+
 - Out of band verification and inspection of dir sync tree.
 - Manual comparison, touch up and maintenance.
 - Troubleshooting, debugging sync issues.
