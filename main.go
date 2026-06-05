@@ -13,6 +13,8 @@ import (
 	"sc/ui"
 )
 
+var version = "dev"
+
 func main() {
 	size := flag.Bool("size", true, "compare file size")
 	modtime := flag.Bool("modtime", true, "compare modify time")
@@ -31,6 +33,7 @@ func main() {
 	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs,restic,restics}://[user[:pass]@]host/path\n")
@@ -38,6 +41,11 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("sc", version)
+		return
+	}
 
 	transport.SetMaxRetries(*maxRetries)
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
