@@ -1,13 +1,13 @@
 module sc
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/gokrazy/rsync v0.3.4-0.20260213163329-f85bc9b98cdd
-	github.com/jlaffaye/ftp v0.2.0
+	github.com/jlaffaye/ftp v0.2.1
 	github.com/mmcloughlin/md4 v0.1.2
 	github.com/pkg/sftp v1.13.10
 	github.com/sergi/go-diff v1.4.0
