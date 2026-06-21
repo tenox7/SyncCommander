@@ -11,6 +11,7 @@ require (
 	github.com/mmcloughlin/md4 v0.1.2
 	github.com/pkg/sftp v1.13.10
 	github.com/sergi/go-diff v1.4.0
+	github.com/zeebo/xxh3 v1.1.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
 )
@@ -27,8 +28,7 @@ require (
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/google/renameio/v2 v2.0.2 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/hashicorp/errwrap v1.1.0 // indirect
-	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/landlock-lsm/go-landlock v0.9.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect

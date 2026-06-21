@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mmcloughlin/md4"
+	"github.com/zeebo/xxh3"
 
 	"sc/model"
 )
@@ -77,6 +78,8 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 
 	var h hash.Hash
 	switch b.cksumAlgo {
+	case "xxh3":
+		h = xxh3.New()
 	case "sha1":
 		h = sha1.New()
 	case "md5":
@@ -106,7 +109,7 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 }
 
 func (b *LocalBackend) ProbeChecksums() []string {
-	return []string{"sha256", "sha1", "md5", "md4"}
+	return []string{"xxh3", "sha256", "sha1", "md5", "md4"}
 }
 
 func (b *LocalBackend) SetChecksumAlgo(algo string) {
