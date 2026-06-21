@@ -21,7 +21,7 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 
 | Protocol | Checksum |
 | --- | --- |
-| Local dir including remote mounts | SHA/MD5 |
+| Local dir including remote mounts | XXH3, SHA256, MD5 |
 | ftp:// ftps:// ftpes:// with implicit/explicit TLS | XCRC, XSHA, HASH |
 | sftp:// scp:// ssh:// | SHA/MD5 (over ssh) |
 | rsync://, rsync+ssh:// | Rsync MD4 (internal), SHA/MD5 (over ssh) |
