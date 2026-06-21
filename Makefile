@@ -21,7 +21,7 @@ test:
 	go test ./...
 
 release:
-	goreleaser release --snapshot --clean
+	goreleaser build --snapshot --clean
 
 check:
 	goreleaser check

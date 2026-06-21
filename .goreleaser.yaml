@@ -9,7 +9,8 @@ before:
 builds:
   - id: sc
     main: .
-    binary: sc
+    binary: sc_{{ .Os }}_{{ .Arch }}
+    no_unique_dist_dir: true
     env:
       - CGO_ENABLED=0
     flags:
@@ -25,29 +26,5 @@ builds:
       - amd64
       - arm64
 
-archives:
-  - id: sc
-    formats:
-      - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
-
-checksum:
-  name_template: checksums.txt
-
-release:
-  disable: "true"
-
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
-
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
