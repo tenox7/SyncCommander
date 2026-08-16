@@ -12,8 +12,10 @@ import (
 	"sc/model"
 )
 
+const fakeScheme = "fake://"
+
 func IsRemote(arg string) bool {
-	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://"} {
+	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://", fakeScheme} {
 		if strings.HasPrefix(arg, p) {
 			return true
 		}
@@ -67,6 +69,9 @@ func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error)
 	if strings.HasPrefix(arg, "restic://") || strings.HasPrefix(arg, "restics://") {
 		return NewResticBackend(arg, insecure, parallel)
 	}
+	if strings.HasPrefix(arg, fakeScheme) {
+		return NewFakeBackend(arg)
+	}
 	return NewLocalBackend(arg), nil
 }
 
@@ -115,7 +120,17 @@ func probeSFTP(client *ssh.Client) bool {
 	return true
 }
 
+// fake:// is built eagerly: it has no connection to defer, and the lazy
+// wrapper's per-call retry plumbing would only add noise to profiles.
 func OpenBackendLazy(arg string, insecure bool, parallel int) model.Backend {
+	if strings.HasPrefix(arg, fakeScheme) {
+		b, err := NewFakeBackend(arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return b
+	}
 	if !IsRemote(arg) {
 		info, err := os.Stat(arg)
 		if err != nil {
@@ -134,6 +149,9 @@ func OpenBackendLazy(arg string, insecure bool, parallel int) model.Backend {
 }
 
 func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
+	if strings.HasPrefix(arg, fakeScheme) {
+		return NewFakeBackend(arg)
+	}
 	if !IsRemote(arg) {
 		info, err := os.Stat(arg)
 		if err != nil {

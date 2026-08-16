@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -33,10 +35,12 @@ func main() {
 	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
+	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
 		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs,restic,restics}://[user[:pass]@]host/path\n")
+		fmt.Fprintf(os.Stderr, "  fake://{tiny,small,medium,large,huge,insane}[?dirs=8&files=25&depth=5&seed=1&diff=0.1&drop=0.02&latency=2ms] synthetic tree\n")
 		fmt.Fprintf(os.Stderr, "compare flags (use --flag=false to disable defaults):\n")
 		flag.PrintDefaults()
 	}
@@ -45,6 +49,16 @@ func main() {
 	if *showVersion {
 		fmt.Println("sc", version)
 		return
+	}
+
+	if *pprofAddr != "" {
+		go func() {
+			// Errors go to the in-app log: stderr would corrupt the TUI.
+			transport.Log.Add("pprof", "<<<", "listening on "+*pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				transport.Log.Add("pprof", "ERR", err.Error())
+			}
+		}()
 	}
 
 	transport.SetMaxRetries(*maxRetries)
