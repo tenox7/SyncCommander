@@ -33,7 +33,10 @@ type diffLoadDoneMsg struct {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-type renameDoneMsg struct{ err error }
+type renameDoneMsg struct {
+	err    error
+	rescan *model.TreeNode
+}
 type deleteDoneMsg struct{}
 type copyDoneMsg struct {
 	rescanRoot *model.TreeNode
@@ -348,7 +351,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTreeNow()
 		return m, nil
 	case renameDoneMsg:
+		if msg.err != nil {
+			m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
+		}
 		m.refreshTreeNow()
+		if msg.rescan != nil && !m.scanning {
+			m.scanning = true
+			return m, tea.Batch(m.rescanNode(msg.rescan, nil), m.ensureTick())
+		}
 		return m, nil
 	case touchDoneMsg:
 		m.refreshTreeNow()
@@ -829,7 +839,7 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.input.Close()
 	case "enter":
-		m.input.Confirm()
+		return m, m.input.Confirm()
 	default:
 		m.input.HandleKey(msg)
 	}
@@ -1691,9 +1701,9 @@ func startCancelCloser(ctx context.Context, c io.Closer) func() {
 }
 
 func (m *Model) openRename(node *model.TreeNode) {
-	m.input.Open("Rename: "+node.Name, node.Name, func(newName string) {
+	m.input.Open("Rename: "+node.Name, node.Name, func(newName string) tea.Cmd {
 		if newName == "" || newName == node.Name {
-			return
+			return nil
 		}
 		oldRel := node.RelPath
 		newRel := model.DirOf(oldRel)
@@ -1701,19 +1711,29 @@ func (m *Model) openRename(node *model.TreeNode) {
 			newRel += "/"
 		}
 		newRel += newName
-		go func() {
+		return func() tea.Msg {
 			ctx := context.Background()
+			var err error
 			switch node.Compare.Presence {
 			case model.PresenceLeftOnly:
-				_ = m.left.Rename(ctx, oldRel, newRel)
+				err = m.left.Rename(ctx, oldRel, newRel)
 			case model.PresenceRightOnly:
-				_ = m.right.Rename(ctx, oldRel, newRel)
+				err = m.right.Rename(ctx, oldRel, newRel)
 			default:
-				_ = m.left.Rename(ctx, oldRel, newRel)
-				_ = m.right.Rename(ctx, oldRel, newRel)
+				err = m.left.Rename(ctx, oldRel, newRel)
+				if rerr := m.right.Rename(ctx, oldRel, newRel); err == nil {
+					err = rerr
+				}
 			}
-			m.scanner.RenameNode(node, newName, newRel, oldRel, m.cmpOpts.SubSecond, m.cmpOpts.TimeGrace, m.cmpOpts.IgnoreTZDST)
-		}()
+			if err != nil {
+				transport.Log.Add("rename", "ERR", oldRel+" -> "+newRel+": "+err.Error())
+				return renameDoneMsg{err: err}
+			}
+			if m.scanner.RenameNode(node, newName, newRel, oldRel, m.cmpOpts.SubSecond, m.cmpOpts.TimeGrace, m.cmpOpts.IgnoreTZDST) {
+				return renameDoneMsg{rescan: node}
+			}
+			return renameDoneMsg{}
+		}
 	})
 }
 
@@ -1756,15 +1776,16 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 }
 
 func (m *Model) openSearch() {
-	m.input.Open("Search (regex):", "", func(query string) {
+	m.input.Open("Search (regex):", "", func(query string) tea.Cmd {
 		if query == "" {
-			return
+			return nil
 		}
 		re, err := regexp.Compile(query)
 		if err != nil {
-			return
+			return nil
 		}
 		m.findAndJump(re)
+		return nil
 	})
 }
 

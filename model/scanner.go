@@ -667,7 +667,10 @@ func findNode(root *TreeNode, relPath string) *TreeNode {
 	return nil
 }
 
-func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, subSecond, timeGrace, ignoreTZDST bool) {
+// RenameNode renames a node in place. It reports whether the rename collided
+// with a sibling that got merged in, in which case the node was left unlisted
+// and the caller must re-scan it.
+func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, subSecond, timeGrace, ignoreTZDST bool) bool {
 	s.lockTree()
 	defer s.unlockTree()
 	node.Name = newName
@@ -683,9 +686,9 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, sub
 	updateDescendantPaths(node.Children, oldRel, newRel)
 	parent := findNode(s.tree, DirOf(newRel))
 	if parent == nil {
-		return
+		return false
 	}
-	mergeRenamedCollision(parent, node, subSecond, timeGrace, ignoreTZDST)
+	merged := mergeRenamedCollision(parent, node, subSecond, timeGrace, ignoreTZDST)
 	sort.Slice(parent.Children, func(i, j int) bool {
 		a, b := parent.Children[i], parent.Children[j]
 		if a.IsDir != b.IsDir {
@@ -693,15 +696,17 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, sub
 		}
 		return a.Name < b.Name
 	})
+	return merged
 }
 
 // mergeRenamedCollision folds a sibling into node when a rename has made node
 // share a name and type with an existing sibling that holds the side node is
 // missing — e.g. renaming a right-only entry to match a left-only one. Without
 // this the two would keep rendering as separate single-sided rows. The sibling
-// is removed and node becomes PresenceBoth. A merged directory is re-listed
-// lazily, since its subtree must now reflect both sides.
-func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
+// is removed and node becomes PresenceBoth. A merged directory is dropped to
+// unlisted, since its subtree must now reflect both sides; it reports true so
+// the caller re-scans it.
+func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreTZDST bool) bool {
 	for i, sib := range parent.Children {
 		if sib == node || sib.IsAttr {
 			continue
@@ -731,9 +736,8 @@ func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreT
 		compareNode(node, subSecond, timeGrace, ignoreTZDST)
 		if node.IsDir {
 			node.Listed = false
-			node.Expanded = false
 			node.Children = nil
-			return
+			return true
 		}
 		switch {
 		case node.LeftChecksum == "" || node.RightChecksum == "":
@@ -743,8 +747,9 @@ func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreT
 		default:
 			node.Compare.Checksum = AttrDifferent
 		}
-		return
+		return true
 	}
+	return false
 }
 
 // SwapSides exchanges the left and right backends and their checksum probe results.

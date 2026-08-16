@@ -13,14 +13,14 @@ type InputDialog struct {
 	title   string
 	value   string
 	cursor  int
-	onDone  func(string)
+	onDone  func(string) tea.Cmd
 }
 
 func NewInputDialog() *InputDialog {
 	return &InputDialog{}
 }
 
-func (d *InputDialog) Open(title, initial string, onDone func(string)) {
+func (d *InputDialog) Open(title, initial string, onDone func(string) tea.Cmd) {
 	d.visible = true
 	d.title = title
 	d.value = initial
@@ -37,11 +37,13 @@ func (d *InputDialog) IsOpen() bool {
 	return d.visible
 }
 
-func (d *InputDialog) Confirm() {
+func (d *InputDialog) Confirm() tea.Cmd {
+	var cmd tea.Cmd
 	if d.onDone != nil {
-		d.onDone(d.value)
+		cmd = d.onDone(d.value)
 	}
 	d.Close()
+	return cmd
 }
 
 func (d *InputDialog) HandleKey(msg tea.KeyMsg) {

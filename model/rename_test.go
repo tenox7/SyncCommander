@@ -80,7 +80,9 @@ func TestRenameDirMergesAndRelists(t *testing.T) {
 	d2.Children = []*TreeNode{{Name: "inner", RelPath: "d2/inner", Parent: d2}}
 
 	s := &Scanner{tree: root}
-	s.RenameNode(d2, "d1", "d1", "d2", false, false, false)
+	if !s.RenameNode(d2, "d1", "d1", "d2", false, false, false) {
+		t.Error("merging rename must report true so the caller re-scans")
+	}
 
 	if len(root.Children) != 1 {
 		t.Fatalf("want 1 merged dir, got %d", len(root.Children))
@@ -102,7 +104,9 @@ func TestRenameNoCollision(t *testing.T) {
 
 	a := findChild(root.Children, "a")
 	s := &Scanner{tree: root}
-	s.RenameNode(a, "b", "b", "a", false, false, false)
+	if s.RenameNode(a, "b", "b", "a", false, false, false) {
+		t.Error("plain rename must not report a merge")
+	}
 
 	if len(root.Children) != 1 {
 		t.Fatalf("want 1 child, got %d", len(root.Children))
