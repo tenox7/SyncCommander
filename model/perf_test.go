@@ -37,7 +37,7 @@ func TestPerfScan(t *testing.T) {
 	}
 
 	opts := &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true, IgnoreTZDST: true}
-	scanner := model.NewScanner(lb, rb, 4, true)
+	scanner := model.NewScanner(lb, rb, 4, 8, true)
 
 	var m0, m1 runtime.MemStats
 	runtime.GC()
@@ -58,10 +58,15 @@ func TestPerfScan(t *testing.T) {
 	t.Logf("heap:      %d MB in use, %d MB allocated during scan",
 		m1.HeapInuse>>20, (m1.TotalAlloc-m0.TotalAlloc)>>20)
 
+	t1 := time.Now()
+	stats := model.PropagateStatus(tree, opts)
+	t.Logf("propagate: %v for the whole tree (%d files, %d dirs) — throttled to 1/4 duty cycle",
+		time.Since(t1).Round(time.Microsecond), stats.TotalFiles, stats.TotalDirs)
+
 	timeFlatten := func(label string) {
-		t1 := time.Now()
-		flat := model.FlattenTree(tree, opts)
-		d := time.Since(t1)
+		t2 := time.Now()
+		flat := model.FlattenTree(tree, opts, 0)
+		d := time.Since(t2)
 		t.Logf("%-10s %v for %d visible rows (%.1f ticks/s at 100ms budget)",
 			label+":", d.Round(time.Microsecond), len(flat), 1/d.Seconds())
 	}

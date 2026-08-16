@@ -9,70 +9,9 @@ import (
 	"sc/model"
 )
 
-type TreeStats struct {
-	LeftFiles, RightFiles int
-	LeftDirs, RightDirs   int
-	LeftSize, RightSize   int64
-	FilesEqual, FilesDiff int
-	FilesLeftOnly         int
-	FilesRightOnly        int
-	TotalDirs             int64
-	TotalFiles            int64
-	TotalSize             int64
-}
-
-func computeTreeStats(root *model.TreeNode) TreeStats {
-	var s TreeStats
-	walkStats(root, &s)
-	return s
-}
-
-func walkStats(node *model.TreeNode, s *TreeStats) {
-	for _, child := range node.Children {
-		l, r := child.Left, child.Right
-		leftIsDir := l != nil && l.IsDir
-		rightIsDir := r != nil && r.IsDir
-		if l != nil {
-			if leftIsDir {
-				s.LeftDirs++
-			} else {
-				s.LeftFiles++
-				s.LeftSize += l.Size
-			}
-		}
-		if r != nil {
-			if rightIsDir {
-				s.RightDirs++
-			} else {
-				s.RightFiles++
-				s.RightSize += r.Size
-			}
-		}
-		if child.IsDir {
-			s.TotalDirs++
-			walkStats(child, s)
-			continue
-		}
-		s.TotalFiles++
-		if l != nil {
-			s.TotalSize += l.Size
-		} else if r != nil {
-			s.TotalSize += r.Size
-		}
-		switch child.Compare.Presence {
-		case model.PresenceBoth:
-			if child.Compare.Size == model.AttrEqual && child.Compare.ModTime == model.AttrEqual {
-				s.FilesEqual++
-			} else {
-				s.FilesDiff++
-			}
-		case model.PresenceLeftOnly:
-			s.FilesLeftOnly++
-		case model.PresenceRightOnly:
-			s.FilesRightOnly++
-		}
-	}
-}
+// TreeStats is accumulated by model.PropagateStatus during the rollup walk —
+// the UI never walks the tree a second time just to count it.
+type TreeStats = model.TreeStats
 
 type InfoDialog struct {
 	visible    bool

@@ -28,10 +28,12 @@ type Scanner struct {
 	left         Backend
 	right        Backend
 	concurrency  int
+	listWidth    int
 	stallTimeout time.Duration
 	maxDepth     int
 	progress     atomic.Value
 	tree         *TreeNode
+	rev          atomic.Uint64
 	mu           sync.Mutex
 	cancel       context.CancelFunc
 	cksumOnce    sync.Once
@@ -42,9 +44,15 @@ type Scanner struct {
 	cksumRight   []string
 }
 
-func NewScanner(left, right Backend, concurrency int, deepScan bool) *Scanner {
+// concurrency caps per-side checksum parallelism; listWidth caps how many
+// directories are listed at once (both sides of one directory always go in
+// parallel, so the backends see up to 2*listWidth concurrent List calls).
+func NewScanner(left, right Backend, concurrency, listWidth int, deepScan bool) *Scanner {
 	if concurrency < 1 {
 		concurrency = 4
+	}
+	if listWidth < 1 {
+		listWidth = 8
 	}
 	maxDepth := 0
 	if !deepScan {
@@ -54,6 +62,7 @@ func NewScanner(left, right Backend, concurrency int, deepScan bool) *Scanner {
 		left:         left,
 		right:        right,
 		concurrency:  concurrency,
+		listWidth:    listWidth,
 		stallTimeout: 120 * time.Second,
 		maxDepth:     maxDepth,
 	}
@@ -75,6 +84,21 @@ func (s *Scanner) Tree() *TreeNode {
 	return s.tree
 }
 
+// Rev counts tree mutations. The UI compares it against the revision it last
+// rendered to decide whether the O(tree) rollup walk has to run again — on a
+// million-node tree that walk is far too expensive to repeat per frame.
+func (s *Scanner) Rev() uint64 { return s.rev.Load() }
+
+// lockTree guards a tree mutation; unlockTree bumps the revision counter on the
+// way out. Every mutating section goes through this pair, so no change can slip
+// past the UI's staleness check.
+func (s *Scanner) lockTree() { s.mu.Lock() }
+
+func (s *Scanner) unlockTree() {
+	s.rev.Add(1)
+	s.mu.Unlock()
+}
+
 func (s *Scanner) Cancel() {
 	if s.cancel != nil {
 		s.cancel()
@@ -85,22 +109,22 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	root := NewRootNode()
-	s.mu.Lock()
+	s.lockTree()
 	s.tree = root
-	s.mu.Unlock()
+	s.unlockTree()
 
-	preloadFired := false
+	var preloadOnce sync.Once
 
 	var stats struct {
 		totalFiles, totalDirs                        atomic.Int64
 		dirsListed, dirsTotal                        atomic.Int64
 		filesEqual, filesDiff, filesLeft, filesRight atomic.Int64
+		leftPending, rightPending                    atomic.Int64
 	}
 
-	queue := []dirJob{{relDir: "", parent: root, depth: 1, listLeft: true, listRight: true}}
 	stats.dirsTotal.Store(1)
-	leftPending := 1
-	rightPending := 1
+	stats.leftPending.Store(1)
+	stats.rightPending.Store(1)
 
 	s.setProgress(ScanProgress{Phase: "scanning...", DirsTotal: 1, LeftActive: true, RightActive: true})
 
@@ -115,100 +139,99 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 			FilesDifferent: stats.filesDiff.Load(),
 			FilesLeftOnly:  stats.filesLeft.Load(),
 			FilesRightOnly: stats.filesRight.Load(),
-			LeftActive:     leftPending > 0,
-			RightActive:    rightPending > 0,
+			LeftActive:     stats.leftPending.Load() > 0,
+			RightActive:    stats.rightPending.Load() > 0,
 		}
 	}
 
-	for len(queue) > 0 {
-		if ctx.Err() != nil {
-			return
-		}
+	walkDirs(ctx, s.listWidth, []dirJob{{relDir: "", parent: root, depth: 1, listLeft: true, listRight: true}},
+		func(job dirJob) []dirJob {
+			s.setProgress(progress("scanning..."))
 
-		job := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
+			leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 
-		s.setProgress(progress("scanning..."))
-
-		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
-
-		if job.listLeft {
-			leftPending--
-		}
-		if job.listRight {
-			rightPending--
-		}
-
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
-
-		s.mu.Lock()
-		job.parent.Children = children
-		job.parent.Listed = true
-		s.mu.Unlock()
-
-		stats.dirsListed.Add(1)
-		descend := s.maxDepth == 0 || job.depth+1 <= s.maxDepth
-		for _, child := range children {
-			if child.IsDir {
-				stats.totalDirs.Add(1)
-				stats.dirsTotal.Add(1)
-				if descend {
-					if child.Compare.Presence != PresenceRightOnly {
-						leftPending++
-					}
-					if child.Compare.Presence != PresenceLeftOnly {
-						rightPending++
-					}
-				}
-				continue
+			if job.listLeft {
+				stats.leftPending.Add(-1)
 			}
-			stats.totalFiles.Add(1)
-			switch child.Compare.Presence {
-			case PresenceLeftOnly:
-				stats.filesLeft.Add(1)
-			case PresenceRightOnly:
-				stats.filesRight.Add(1)
-			case PresenceBoth:
-				if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
-					stats.filesEqual.Add(1)
-				} else {
-					stats.filesDiff.Add(1)
-				}
+			if job.listRight {
+				stats.rightPending.Add(-1)
 			}
-		}
 
-		if descend {
-			for i := len(children) - 1; i >= 0; i-- {
-				child := children[i]
-				if !child.IsDir {
+			children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
+
+			s.lockTree()
+			job.parent.Children = children
+			job.parent.Listed = true
+			s.unlockTree()
+
+			stats.dirsListed.Add(1)
+			descend := s.maxDepth == 0 || job.depth+1 <= s.maxDepth
+			for _, child := range children {
+				if child.IsDir {
+					stats.totalDirs.Add(1)
+					stats.dirsTotal.Add(1)
+					if descend {
+						if child.Compare.Presence != PresenceRightOnly {
+							stats.leftPending.Add(1)
+						}
+						if child.Compare.Presence != PresenceLeftOnly {
+							stats.rightPending.Add(1)
+						}
+					}
 					continue
 				}
-				leftIsDir := child.Left != nil && child.Left.IsDir
-				rightIsDir := child.Right != nil && child.Right.IsDir
-				listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
-				listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
-				if !listLeft && !listRight {
-					continue
+				stats.totalFiles.Add(1)
+				switch child.Compare.Presence {
+				case PresenceLeftOnly:
+					stats.filesLeft.Add(1)
+				case PresenceRightOnly:
+					stats.filesRight.Add(1)
+				case PresenceBoth:
+					if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
+						stats.filesEqual.Add(1)
+					} else {
+						stats.filesDiff.Add(1)
+					}
 				}
-				queue = append(queue, dirJob{
-					relDir:    child.RelPath,
-					parent:    child,
-					depth:     job.depth + 1,
-					listLeft:  listLeft,
-					listRight: listRight,
-				})
 			}
-		}
 
-		// After listing the root, kick off the recursive preload in the
-		// background so the user sees the top-level entries first while
-		// the deep listing fills the cache for subsequent dirs.
-		if !preloadFired && s.maxDepth == 0 {
-			s.preloadRecursive(ctx, "", true, true)
-			preloadFired = true
-		}
+			var next []dirJob
+			if descend {
+				for i := len(children) - 1; i >= 0; i-- {
+					child := children[i]
+					if !child.IsDir {
+						continue
+					}
+					leftIsDir := child.Left != nil && child.Left.IsDir
+					rightIsDir := child.Right != nil && child.Right.IsDir
+					listLeft := leftIsDir && child.Compare.Presence != PresenceRightOnly
+					listRight := rightIsDir && child.Compare.Presence != PresenceLeftOnly
+					if !listLeft && !listRight {
+						continue
+					}
+					next = append(next, dirJob{
+						relDir:    child.RelPath,
+						parent:    child,
+						depth:     job.depth + 1,
+						listLeft:  listLeft,
+						listRight: listRight,
+					})
+				}
+			}
 
-		s.setProgress(progress("scanning..."))
+			// After listing the root, kick off the recursive preload in the
+			// background so the user sees the top-level entries first while
+			// the deep listing fills the cache for subsequent dirs.
+			if job.parent == root && s.maxDepth == 0 {
+				preloadOnce.Do(func() { s.preloadRecursive(ctx, "", true, true) })
+			}
+
+			s.setProgress(progress("scanning..."))
+			return next
+		})
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	if !withChecksum || !s.negotiateChecksum() {
@@ -286,10 +309,10 @@ func (s *Scanner) RefreshTopLevel(ctx context.Context, subSecond, timeGrace, ign
 	setp("scanning...")
 	leftEntries, rightEntries := s.listBoth(ctx, "")
 
-	s.mu.Lock()
+	s.lockTree()
 	root.Children = mergeChildrenPreserving(root, leftEntries, rightEntries, root.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	root.Listed = true
-	s.mu.Unlock()
+	s.unlockTree()
 	setp("done")
 }
 
@@ -324,10 +347,10 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	children := mergeChildrenPreserving(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	restoreExpanded(children, oldExpanded)
 
-	s.mu.Lock()
+	s.lockTree()
 	node.Children = children
 	node.Listed = true
-	s.mu.Unlock()
+	s.unlockTree()
 	setp("done")
 }
 
@@ -361,12 +384,12 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 		}
 	}
 
-	s.mu.Lock()
+	s.lockTree()
 	node.Left = le
 	node.Right = re
 	compareNode(node, subSecond, timeGrace, ignoreTZDST)
 	revalidateChecksum(node, changed)
-	s.mu.Unlock()
+	s.unlockTree()
 
 	totalFiles = 1
 	setp("scanning...")
@@ -385,14 +408,15 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 }
 
 func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bool, subSecond, timeGrace, ignoreTZDST bool, depthLimit int, changed *ChangedPaths) {
-	preloadFired := false
-	var dirsListed, totalFiles, ckTotal int64
+	var preloadOnce sync.Once
+	var dirsListed, totalFiles atomic.Int64
+	var ckTotal int64
 	var ckDone atomic.Int64
 	setp := func(phase string) {
 		s.setProgress(ScanProgress{
 			Phase:         phase,
-			DirsListed:    dirsListed,
-			TotalFiles:    totalFiles,
+			DirsListed:    dirsListed.Load(),
+			TotalFiles:    totalFiles.Load(),
 			ChecksumFiles: ckTotal,
 			ChecksumDone:  ckDone.Load(),
 			LeftActive:    phase != "done",
@@ -418,11 +442,11 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 				break
 			}
 		}
-		s.mu.Lock()
+		s.lockTree()
 		node.Left = le
 		node.Right = re
 		compareNode(node, subSecond, timeGrace, ignoreTZDST)
-		s.mu.Unlock()
+		s.unlockTree()
 	}
 
 	oldExpanded := make(map[string]bool)
@@ -436,32 +460,27 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		rootListLeft = node.Left != nil && node.Left.IsDir
 		rootListRight = node.Right != nil && node.Right.IsDir
 	}
-	queue := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: rootListLeft, listRight: rootListRight}}
+	seed := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: rootListLeft, listRight: rootListRight}}
 
-	for len(queue) > 0 {
-		if ctx.Err() != nil {
-			return
-		}
-		job := queue[len(queue)-1]
-		queue = queue[:len(queue)-1]
-
+	walkDirs(ctx, s.listWidth, seed, func(job dirJob) []dirJob {
 		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 		children := mergeChildrenPreservingWithChanged(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST, changed)
 		restoreExpanded(children, oldExpanded)
 
-		s.mu.Lock()
+		s.lockTree()
 		job.parent.Children = children
 		job.parent.Listed = true
-		s.mu.Unlock()
+		s.unlockTree()
 
-		dirsListed++
+		dirsListed.Add(1)
 		for _, child := range children {
 			if !child.IsDir {
-				totalFiles++
+				totalFiles.Add(1)
 			}
 		}
 		setp("scanning...")
 
+		var next []dirJob
 		withinDepth := depthLimit == 0 || job.depth+1 <= depthLimit
 		for i := len(children) - 1; i >= 0; i-- {
 			child := children[i]
@@ -478,7 +497,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 			if !listLeft && !listRight {
 				continue
 			}
-			queue = append(queue, dirJob{
+			next = append(next, dirJob{
 				relDir:    child.RelPath,
 				parent:    child,
 				depth:     job.depth + 1,
@@ -490,10 +509,14 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		// After listing the rescan root, kick off the recursive preload in
 		// the background so the user sees this dir's entries first while
 		// the deep listing fills the cache for the rest of the subtree.
-		if !preloadFired && depthLimit == 0 {
-			s.preloadRecursive(ctx, node.RelPath, rootListLeft, rootListRight)
-			preloadFired = true
+		if job.parent == node && depthLimit == 0 {
+			preloadOnce.Do(func() { s.preloadRecursive(ctx, node.RelPath, rootListLeft, rootListRight) })
 		}
+		return next
+	})
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	groups := groupFilesByTopLevel(node, true)
@@ -603,10 +626,10 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecon
 		return
 	}
 	children := mergeChildrenPreserving(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
-	s.mu.Lock()
+	s.lockTree()
 	parent.Children = children
 	parent.Listed = true
-	s.mu.Unlock()
+	s.unlockTree()
 }
 
 func collectExpanded(node *TreeNode, m map[string]bool) {
@@ -645,8 +668,8 @@ func findNode(root *TreeNode, relPath string) *TreeNode {
 }
 
 func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, subSecond, timeGrace, ignoreTZDST bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockTree()
+	defer s.unlockTree()
 	node.Name = newName
 	node.RelPath = newRel
 	if node.Left != nil {
@@ -726,8 +749,8 @@ func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreT
 
 // SwapSides exchanges the left and right backends and their checksum probe results.
 func (s *Scanner) SwapSides() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockTree()
+	defer s.unlockTree()
 	s.left, s.right = s.right, s.left
 	s.cksumLeft, s.cksumRight = s.cksumRight, s.cksumLeft
 }
@@ -810,8 +833,8 @@ func (s *Scanner) checksumNode(ctx context.Context, node *TreeNode) {
 // per-dir pending flags so the UI shows ≈ on each top-level dir that still
 // has work scheduled for that side.
 func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockTree()
+	defer s.unlockTree()
 	for _, g := range groups {
 		for _, f := range g.files {
 			f.LeftChecksum = ""
@@ -868,13 +891,13 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			continue
 		}
 		if g.dir != nil {
-			s.mu.Lock()
+			s.lockTree()
 			if isLeft {
 				g.dir.ChecksumActiveLeft = true
 			} else {
 				g.dir.ChecksumActiveRight = true
 			}
-			s.mu.Unlock()
+			s.unlockTree()
 		}
 
 		if prefetcher != nil && g.dir != nil {
@@ -906,7 +929,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		wg.Wait()
 
 		if g.dir != nil {
-			s.mu.Lock()
+			s.lockTree()
 			if isLeft {
 				g.dir.ChecksumActiveLeft = false
 				g.dir.ChecksumPendingLeft = false
@@ -914,7 +937,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 				g.dir.ChecksumActiveRight = false
 				g.dir.ChecksumPendingRight = false
 			}
-			s.mu.Unlock()
+			s.unlockTree()
 		}
 	}
 }
@@ -947,8 +970,8 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft b
 		markChecksumInFlight(node, isLeft, -1)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockTree()
+	defer s.unlockTree()
 	if isLeft {
 		if entry == nil {
 			// nothing to do
@@ -1002,6 +1025,71 @@ type dirJob struct {
 	depth     int
 	listLeft  bool
 	listRight bool
+}
+
+// walkDirs drains a directory queue with up to workers goroutines. process
+// lists one directory and returns the subdirectories to descend into; it runs
+// concurrently on distinct parents, so anything shared it touches must be
+// atomic or locked. Returns once the queue is empty and every worker is idle,
+// or as soon as ctx is cancelled.
+//
+// Directory listing is latency-bound on every remote backend, and doing it one
+// directory at a time meant a scan of N dirs cost N round trips end to end.
+func walkDirs(ctx context.Context, workers int, seed []dirJob, process func(dirJob) []dirJob) {
+	if workers < 1 {
+		workers = 1
+	}
+	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
+	queue := append([]dirJob(nil), seed...)
+	active := 0
+	stop := false
+
+	// Workers park on cond, not on ctx, so cancellation has to wake them.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			mu.Lock()
+			stop = true
+			mu.Unlock()
+			cond.Broadcast()
+		case <-done:
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				mu.Lock()
+				for len(queue) == 0 && active > 0 && !stop {
+					cond.Wait()
+				}
+				if stop || len(queue) == 0 {
+					mu.Unlock()
+					cond.Broadcast() // nothing left to hand out: release the others
+					return
+				}
+				job := queue[len(queue)-1]
+				queue = queue[:len(queue)-1]
+				active++
+				mu.Unlock()
+
+				next := process(job)
+
+				mu.Lock()
+				queue = append(queue, next...)
+				active--
+				mu.Unlock()
+				cond.Broadcast()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRight bool) ([]FileEntry, []FileEntry) {

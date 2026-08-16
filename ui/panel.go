@@ -497,18 +497,22 @@ func (p *Panel) nodeStyle(node *model.TreeNode) lipgloss.Style {
 	return styleEqual
 }
 
-func renderGuides(node *model.TreeNode) string {
-	var sb strings.Builder
-	for i, cont := range node.Guides {
-		if i == 0 {
+// guideColumns writes the ancestor guide columns — bits [1, Depth) of the
+// node's guide mask — leaving the caller to add this row's own corner.
+func guideColumns(sb *strings.Builder, node *model.TreeNode) {
+	depth := min(node.Depth, 64)
+	for i := 1; i < depth; i++ {
+		if node.Guides&(1<<uint(i)) != 0 {
+			sb.WriteString("│")
 			continue
 		}
-		if cont {
-			sb.WriteString("│")
-		} else {
-			sb.WriteString(" ")
-		}
+		sb.WriteString(" ")
 	}
+}
+
+func renderGuides(node *model.TreeNode) string {
+	var sb strings.Builder
+	guideColumns(&sb, node)
 	if node.IsLast {
 		sb.WriteString("└")
 	} else {
@@ -519,16 +523,7 @@ func renderGuides(node *model.TreeNode) string {
 
 func renderGuidesOnly(node *model.TreeNode) string {
 	var sb strings.Builder
-	for i, cont := range node.Guides {
-		if i == 0 {
-			continue
-		}
-		if cont {
-			sb.WriteString("│")
-		} else {
-			sb.WriteString(" ")
-		}
-	}
+	guideColumns(&sb, node)
 	if !node.IsLast {
 		sb.WriteString("│")
 	} else {

@@ -95,18 +95,21 @@ type TreeNode struct {
 	RightTotalFiles   int
 	LeftTotalDirs     int
 	RightTotalDirs    int
-	Guides            []bool
-	IsLast            bool
-	IsAttr            bool
-	AttrLabel         string
-	AttrLeftVal       string
-	AttrRightVal      string
-	AttrLeftRaw       string
-	AttrRightRaw      string
-	AttrStatus        AttrStatus
-	AttrInactive      bool
-	AttrWinner        int
-	AttrPresence      Presence
+	// Guides is a bitmask of the vertical tree-guide columns to the left of
+	// this row: bit i is set when the ancestor at depth i has more siblings
+	// below it. Valid bits are [0, Depth); depths past 64 render unguided.
+	Guides       uint64
+	IsLast       bool
+	IsAttr       bool
+	AttrLabel    string
+	AttrLeftVal  string
+	AttrRightVal string
+	AttrLeftRaw  string
+	AttrRightRaw string
+	AttrStatus   AttrStatus
+	AttrInactive bool
+	AttrWinner   int
+	AttrPresence Presence
 }
 
 // SubtreeChecksumScanned reports whether every PresenceBoth file in n's
@@ -433,24 +436,57 @@ func cmpAttr(equal bool) AttrStatus {
 	return AttrDifferent
 }
 
-func FlattenTree(root *TreeNode, opts *CompareOpts) []*TreeNode {
-	propagateStatus(root, opts)
-	var flat []*TreeNode
+// TreeStats are whole-tree totals, accumulated by PropagateStatus so the UI
+// gets them without a second full walk.
+type TreeStats struct {
+	LeftFiles, RightFiles int
+	LeftDirs, RightDirs   int
+	LeftSize, RightSize   int64
+	FilesEqual, FilesDiff int
+	FilesLeftOnly         int
+	FilesRightOnly        int
+	TotalDirs             int64
+	TotalFiles            int64
+	TotalSize             int64
+}
+
+// PropagateStatus recomputes every subtree rollup (sizes, counts, child status,
+// checksum pending) and returns whole-tree totals. O(all nodes) — call it when
+// the tree has changed, not once per frame.
+func PropagateStatus(root *TreeNode, opts *CompareOpts) TreeStats {
+	var s TreeStats
+	propagateStatus(root, opts, &s)
+	return s
+}
+
+// FlattenTree returns the visible rows, walking only expanded nodes. It does
+// not refresh rollups — see PropagateStatus. hint sizes the result up front;
+// pass the previous result's length.
+func FlattenTree(root *TreeNode, opts *CompareOpts, hint int) []*TreeNode {
+	flat := make([]*TreeNode, 0, hint+1)
 	root.IsLast = true
-	root.Guides = nil
+	root.Guides = 0
 	flat = append(flat, root)
 	if !root.Expanded {
 		return flat
 	}
-	childGuides := []bool{false}
 	for i, child := range root.Children {
 		child.IsLast = i == len(root.Children)-1
-		flattenNode(child, childGuides, opts, &flat)
+		flattenNode(child, 0, opts, &flat)
 	}
 	return flat
 }
 
-func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
+// childGuides returns the guide mask for the children of a node at depth,
+// extending it with this node's own continuation bit.
+func childGuides(guides uint64, depth int, isLast bool) uint64 {
+	if depth >= 64 || isLast {
+		return guides
+	}
+	return guides | 1<<uint(depth)
+}
+
+func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatus {
 	if !node.IsDir {
 		node.SubtreePending = false
 		node.SubtreeBothFiles = 0
@@ -490,7 +526,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	cksumPending := 0
 	anyDiff := false
 	for _, child := range node.Children {
-		s := propagateStatus(child, opts)
+		s := propagateStatus(child, opts, st)
 		if s == AttrDifferent {
 			result = AttrDifferent
 		} else if s == AttrUnknown && result != AttrDifferent {
@@ -505,7 +541,24 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 			anyDiff = true
 		}
 		l, r := child.Left, child.Right
+		if l != nil {
+			if l.IsDir {
+				st.LeftDirs++
+			} else {
+				st.LeftFiles++
+				st.LeftSize += l.Size
+			}
+		}
+		if r != nil {
+			if r.IsDir {
+				st.RightDirs++
+			} else {
+				st.RightFiles++
+				st.RightSize += r.Size
+			}
+		}
 		if child.IsDir {
+			st.TotalDirs++
 			lt += child.LeftTotalSize
 			rt += child.RightTotalSize
 			lf += child.LeftTotalFiles
@@ -518,15 +571,31 @@ func propagateStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 			if r != nil {
 				rd++
 			}
-		} else {
-			if l != nil {
-				lt += l.Size
-				lf++
+			continue
+		}
+		st.TotalFiles++
+		if l != nil {
+			lt += l.Size
+			lf++
+			st.TotalSize += l.Size
+		} else if r != nil {
+			st.TotalSize += r.Size
+		}
+		if r != nil {
+			rt += r.Size
+			rf++
+		}
+		switch child.Compare.Presence {
+		case PresenceBoth:
+			if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
+				st.FilesEqual++
+			} else {
+				st.FilesDiff++
 			}
-			if r != nil {
-				rt += r.Size
-				rf++
-			}
+		case PresenceLeftOnly:
+			st.FilesLeftOnly++
+		case PresenceRightOnly:
+			st.FilesRightOnly++
 		}
 	}
 	node.LeftTotalSize = lt
@@ -591,29 +660,25 @@ func nodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	return AttrEqual
 }
 
-func flattenNode(node *TreeNode, parentGuides []bool, opts *CompareOpts, flat *[]*TreeNode) {
-	node.Guides = parentGuides
+func flattenNode(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*TreeNode) {
+	node.Guides = guides
 	*flat = append(*flat, node)
 	if !node.Expanded {
 		return
 	}
 	if node.IsDir {
-		childGuides := make([]bool, len(parentGuides)+1)
-		copy(childGuides, parentGuides)
-		childGuides[len(parentGuides)] = !node.IsLast
+		kg := childGuides(guides, node.Depth, node.IsLast)
 		for i, child := range node.Children {
 			child.IsLast = i == len(node.Children)-1
-			flattenNode(child, childGuides, opts, flat)
+			flattenNode(child, kg, opts, flat)
 		}
 		return
 	}
-	flattenFileAttrs(node, parentGuides, opts, flat)
+	flattenFileAttrs(node, guides, opts, flat)
 }
 
-func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, flat *[]*TreeNode) {
-	childGuides := make([]bool, len(parentGuides)+1)
-	copy(childGuides, parentGuides)
-	childGuides[len(parentGuides)] = !node.IsLast
+func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*TreeNode) {
+	kg := childGuides(guides, node.Depth, node.IsLast)
 
 	type attr struct {
 		label    string
@@ -732,7 +797,7 @@ func flattenFileAttrs(node *TreeNode, parentGuides []bool, opts *CompareOpts, fl
 			AttrInactive: a.inactive,
 			AttrWinner:   a.winner,
 			AttrPresence: node.Compare.Presence,
-			Guides:       childGuides,
+			Guides:       kg,
 			IsLast:       i == len(attrs)-1,
 			Depth:        node.Depth + 1,
 		}

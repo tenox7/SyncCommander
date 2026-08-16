@@ -33,6 +33,7 @@ func main() {
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
+	scanParallel := flag.Int("scan-parallel", 8, "max directories listed concurrently during a scan")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
@@ -102,7 +103,7 @@ func main() {
 	right := transport.OpenBackendLazy(rightPath, *insecure, *parallel)
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
-	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *batch)
+	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch)
 	p := tea.NewProgram(mdl, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

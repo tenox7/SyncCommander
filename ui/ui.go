@@ -220,14 +220,22 @@ type Model struct {
 	deepScan       bool
 	copyParallel   *int
 	parallelMax    int
+	scanParallel   int
 	batchTransfer  *bool
 	tickActive     bool
 	cachedStats    *TreeStats
+	statsRev       uint64
+	lastPropagate  time.Time
+	propagateEvery time.Duration
+	lastFlatLen    int
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel int, batchTransfer bool) Model {
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer bool) Model {
 	if copyParallel < 1 {
 		copyParallel = 1
+	}
+	if scanParallel < 1 {
+		scanParallel = 1
 	}
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
@@ -237,12 +245,13 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		rightPanel:     rp,
 		left:           left,
 		right:          right,
-		scanner:        model.NewScanner(left, right, 4, deepScan),
+		scanner:        model.NewScanner(left, right, 4, scanParallel, deepScan),
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
 		copyParallel:   &copyParallel,
 		parallelMax:    copyParallel,
+		scanParallel:   scanParallel,
 		batchTransfer:  &batchTransfer,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
@@ -328,21 +337,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickCmd()
 	case scanDoneMsg:
 		m.scanning = false
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case rescanDoneMsg:
 		m.scanning = false
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case checksumDoneMsg:
 		m.checksumming = false
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case renameDoneMsg:
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case touchDoneMsg:
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case deleteDoneMsg:
 		m.deleting = false
@@ -350,7 +359,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.f()
 		}
 		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
-		m.refreshTree()
+		m.refreshTreeNow()
 		return m, nil
 	case copyDoneMsg:
 		m.copying = false
@@ -358,7 +367,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.f()
 		}
 		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
-		m.refreshTree()
+		m.refreshTreeNow()
 		if msg.rescanRoot != nil {
 			m.scanning = true
 			return m, tea.Batch(m.rescanNode(msg.rescanRoot, msg.changed), m.ensureTick())
@@ -658,7 +667,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		tree := m.scanner.Tree()
 		if tree != nil {
 			cl, cr := m.scanner.ChecksumInfo()
-			m.info.Open(computeTreeStats(tree), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
+			m.info.Open(model.PropagateStatus(tree, m.cmpOpts), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
 		}
 	case "y":
 		if m.copying || m.deleting {
@@ -860,7 +869,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 		m.right = newRight
 	}
 
-	m.scanner = model.NewScanner(m.left, m.right, 4, m.deepScan)
+	m.scanner = model.NewScanner(m.left, m.right, 4, m.scanParallel, m.deepScan)
 	m.leftPanel.title = m.left.BasePath()
 	m.rightPanel.title = m.right.BasePath()
 	m.leftPanel.SetNodes(nil)
@@ -1946,17 +1955,38 @@ func timeScan(op, target string, fn func()) {
 	transport.Log.Add("scan", "<<<", fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
 }
 
+// refreshTree rebuilds the visible rows. The rollup walk behind them is
+// O(whole tree) — at a million nodes it costs tens of milliseconds — so it runs
+// only when the scanner has actually changed something, and never more often
+// than four times its own cost. That caps it at a quarter of the frame budget
+// no matter how big the tree gets; the flatten itself only touches expanded
+// nodes and stays cheap.
 func (m *Model) refreshTree() {
 	tree := m.scanner.Tree()
 	if tree == nil {
 		m.cachedStats = nil
 		return
 	}
-	flat := model.FlattenTree(tree, m.cmpOpts)
+	if rev := m.scanner.Rev(); rev != m.statsRev && time.Since(m.lastPropagate) >= m.propagateEvery {
+		t0 := time.Now()
+		s := model.PropagateStatus(tree, m.cmpOpts)
+		m.lastPropagate = time.Now()
+		m.propagateEvery = min(4*m.lastPropagate.Sub(t0), 2*time.Second)
+		m.statsRev = rev
+		m.cachedStats = &s
+	}
+	flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
+	m.lastFlatLen = len(flat)
 	m.leftPanel.SetNodes(flat)
 	m.rightPanel.SetNodes(flat)
-	s := computeTreeStats(tree)
-	m.cachedStats = &s
+}
+
+// refreshTreeNow bypasses the throttle. Used when an operation finishes or the
+// user acts on the tree: no further tick may be coming, so a skipped rollup
+// would leave stale numbers on screen until the next keypress.
+func (m *Model) refreshTreeNow() {
+	m.propagateEvery = 0
+	m.refreshTree()
 }
 
 func (m *Model) swapSides() {
@@ -1973,7 +2003,7 @@ func (m *Model) swapSides() {
 	tree := m.scanner.Tree()
 	if tree != nil {
 		swapTreeData(tree)
-		m.refreshTree()
+		m.refreshTreeNow()
 	}
 }
 

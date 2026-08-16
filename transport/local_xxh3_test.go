@@ -43,7 +43,7 @@ func TestLocalXXH3NegotiatedAndCompared(t *testing.T) {
 	write(left, "diff", "alpha")
 	write(right, "diff", "beta")
 
-	s := model.NewScanner(NewLocalBackend(left), NewLocalBackend(right), 4, true)
+	s := model.NewScanner(NewLocalBackend(left), NewLocalBackend(right), 4, 8, true)
 	s.Scan(context.Background(), true, false, false, false)
 
 	if algo := s.ChecksumAlgo(); algo != "xxh3" {
