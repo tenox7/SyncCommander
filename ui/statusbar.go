@@ -402,25 +402,27 @@ func formatSizeDelta(d int64) string {
 }
 
 type StatusInfo struct {
-	State         string
-	DirsListed    int64
-	DirsTotal     int64
-	FilesScanned  int64
-	TotalSize     int64
-	ChecksumDone  int64
-	ChecksumTotal int64
-	FilesDone     int64
-	FilesTotal    int64
-	BytesCopied   int64
-	BaseBytes     int64
-	Elapsed       time.Duration
-	Errors        int
-	Retries       int
-	Recovered     int
-	Failed        int
+	State           string
+	DirsListed      int64
+	DirsTotal       int64
+	FilesScanned    int64
+	TotalSize       int64
+	ChecksumDone    int64
+	ChecksumTotal   int64
+	FilesDone       int64
+	FilesTotal      int64
+	BytesCopied     int64
+	BaseBytes       int64
+	Elapsed         time.Duration
+	Errors          int
+	Retries         int
+	Recovered       int
+	Failed          int
 	ChecksumAlgo    string
 	ChecksumEnabled bool
 	Spinner         string
+	Mem             MemUsage
+	Objects         int64 // tree nodes behind Mem.Live, for the per-object figure
 }
 
 func crcLabel(algo string, enabled bool) string {
@@ -473,21 +475,39 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		left = info.Spinner + " " + left
 	}
 
-	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d",
-		crcLabel(info.ChecksumAlgo, info.ChecksumEnabled), info.Errors, info.Retries, info.Recovered, info.Failed)
+	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d  mem:%s/%s gc:%d",
+		crcLabel(info.ChecksumAlgo, info.ChecksumEnabled), info.Errors, info.Retries, info.Recovered, info.Failed,
+		model.FormatSize(info.Mem.Live), model.FormatSize(info.Mem.Resident), info.Mem.GCCycles)
 
 	right := "?=help"
 
-	leftW := lipgloss.Width(left) + lipgloss.Width(counters)
 	rightW := lipgloss.Width(right)
 	inner := width - 2
 	if inner < 0 {
 		inner = 0
 	}
-	gap := inner - leftW - rightW
+
+	// Bytes-per-object is the number that matters when tuning for huge trees,
+	// but it is the first thing to go when the bar runs out of room.
+	if info.Objects > 0 {
+		wide := counters + fmt.Sprintf(" (%s/obj)", model.FormatSize(info.Mem.Live/info.Objects))
+		if inner-lipgloss.Width(left)-lipgloss.Width(wide)-rightW >= 1 {
+			counters = wide
+		}
+	}
+
+	gap := inner - lipgloss.Width(left) - lipgloss.Width(counters) - rightW
 	if gap < 1 {
-		content := ansi.Truncate(left+counters, inner, "")
-		return styleBar.Width(width).Render(content)
+		// Counters are the fixed part and the part worth keeping — trim the
+		// variable-length detail text instead of letting it push them off.
+		if room := inner - lipgloss.Width(counters); room > 0 {
+			left = ansi.Truncate(left, room, "")
+			gap = inner - lipgloss.Width(left) - lipgloss.Width(counters)
+		}
+		if gap < 0 {
+			return styleBar.Width(width).Render(ansi.Truncate(left+counters, inner, ""))
+		}
+		return styleBar.Width(width).Render(left + counters + strings.Repeat(" ", gap))
 	}
 	content := left + counters + strings.Repeat(" ", gap) + right
 	return styleBar.Width(width).Render(content)

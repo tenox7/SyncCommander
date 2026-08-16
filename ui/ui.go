@@ -2066,6 +2066,10 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		Failed:          transport.Log.FailedCount(),
 		ChecksumAlgo:    m.scanner.ChecksumAlgo(),
 		ChecksumEnabled: m.cmpOpts.Checksum,
+		Mem:             readMemUsage(),
+	}
+	if m.cachedStats != nil {
+		info.Objects = m.cachedStats.TotalFiles + m.cachedStats.TotalDirs
 	}
 	switch {
 	case m.copying:
