@@ -90,12 +90,16 @@ type TreeNode struct {
 	LeftCksumModTime  time.Time
 	RightCksumSize    int64
 	RightCksumModTime time.Time
-	LeftTotalSize     int64
-	RightTotalSize    int64
-	LeftTotalFiles    int
-	RightTotalFiles   int
-	LeftTotalDirs     int
-	RightTotalDirs    int
+	// The rollup fields below, plus SubtreeXxx, ChildStatus, Guides and IsLast,
+	// are written only by PropagateStatus and FlattenTree on the UI goroutine.
+	// The scanner never touches them, which is why the UI may refresh them
+	// while holding only Scanner.ReadTree's shared lock.
+	LeftTotalSize   int64
+	RightTotalSize  int64
+	LeftTotalFiles  int
+	RightTotalFiles int
+	LeftTotalDirs   int
+	RightTotalDirs  int
 	// Guides is a bitmask of the vertical tree-guide columns to the left of
 	// this row: bit i is set when the ancestor at depth i has more siblings
 	// below it. Valid bits are [0, Depth); depths past 64 render unguided.
@@ -476,6 +480,11 @@ type TreeStats struct {
 // PropagateStatus recomputes every subtree rollup (sizes, counts, child status,
 // checksum pending) and returns whole-tree totals. O(all nodes) — call it when
 // the tree has changed, not once per frame.
+//
+// It writes the rollup fields of every node, but those belong to the single UI
+// goroutine and the scanner never touches them, so Scanner.ReadTree's shared
+// lock is enough: it excludes the scanner without serializing the UI against
+// the other readers (a copy enumerating the same tree).
 func PropagateStatus(root *TreeNode, opts *CompareOpts) TreeStats {
 	var s TreeStats
 	propagateStatus(root, opts, &s)
@@ -484,7 +493,8 @@ func PropagateStatus(root *TreeNode, opts *CompareOpts) TreeStats {
 
 // FlattenTree returns the visible rows, walking only expanded nodes. It does
 // not refresh rollups — see PropagateStatus. hint sizes the result up front;
-// pass the previous result's length.
+// pass the previous result's length. Writes Guides/IsLast under the same
+// UI-goroutine ownership rule as PropagateStatus.
 func FlattenTree(root *TreeNode, opts *CompareOpts, hint int) []*TreeNode {
 	flat := make([]*TreeNode, 0, hint+1)
 	root.IsLast = true

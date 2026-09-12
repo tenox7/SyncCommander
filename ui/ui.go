@@ -510,19 +510,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncPanels()
 	case "enter", "right", "l":
 		node := m.activePanel().CursorNode()
-		if node != nil && node.IsDir && !node.Listed && !m.scanning {
+		lazyList := false
+		m.mutateTree(func(*model.TreeNode) {
+			if node != nil && node.IsDir && !node.Listed && !m.scanning {
+				node.Expanded = true
+				lazyList = true
+				return
+			}
+			m.activePanel().Toggle()
+		})
+		if lazyList {
 			m.scanning = true
-			node.Expanded = true
 			return m, tea.Batch(m.listNode(node), m.ensureTick())
 		}
-		m.activePanel().Toggle()
 		m.refreshTree()
 	case "left", "h":
 		node := m.activePanel().CursorNode()
-		if node != nil && !node.IsAttr && node.Expanded {
-			node.Expanded = false
-			m.refreshTree()
-		} else if node != nil {
+		collapsed := false
+		m.mutateTree(func(*model.TreeNode) {
+			if node == nil {
+				return
+			}
+			if !node.IsAttr && node.Expanded {
+				node.Expanded = false
+				collapsed = true
+				return
+			}
 			p := m.activePanel()
 			depth := node.Depth
 			if node.IsAttr {
@@ -535,10 +548,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					n.Expanded = false
 					p.clampOffset()
 					m.syncPanels()
-					m.refreshTree()
+					collapsed = true
 					break
 				}
 			}
+		})
+		if collapsed {
+			m.refreshTree()
 		}
 	case "n":
 		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
@@ -547,18 +563,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.openSearch()
 	case "}":
-		tree := m.scanner.Tree()
-		if tree != nil {
-			model.SetExpandedAll(tree, true)
-			m.refreshTree()
-		}
+		m.mutateTree(func(tree *model.TreeNode) {
+			if tree != nil {
+				model.SetExpandedAll(tree, true)
+			}
+		})
+		m.refreshTree()
 	case "{":
-		tree := m.scanner.Tree()
-		if tree != nil {
+		m.mutateTree(func(tree *model.TreeNode) {
+			if tree == nil {
+				return
+			}
 			model.SetExpandedAll(tree, false)
 			tree.Expanded = true
-			m.refreshTree()
-		}
+		})
+		m.refreshTree()
 	case "r":
 		node := m.activePanel().CursorNode()
 		if node != nil && node.IsAttr {
@@ -573,6 +592,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.scanning = true
 		return m, tea.Batch(m.deepRescanNode(tree), m.ensureTick())
+	case "t":
+		node := m.activePanel().CursorNode()
+		touch := false
+		m.readTree(func(*model.TreeNode) {
+			touch = node != nil && !node.IsAttr && node.Compare.Presence == model.PresenceBoth
+		})
+		if touch {
+			return m, m.touchNode(node)
+		}
 	case "c":
 		if m.checksumming {
 			break
@@ -590,11 +618,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node != nil && !node.IsAttr {
 			m.openRename(node)
 		}
-	case "t":
-		node := m.activePanel().CursorNode()
-		if node != nil && !node.IsAttr && node.Compare.Presence == model.PresenceBoth {
-			return m, m.touchNode(node)
-		}
 	case "d":
 		if m.deleting {
 			break
@@ -608,10 +631,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceRightOnly {
+		if node == nil || node.IsAttr || m.presence(node) == model.PresenceRightOnly {
 			break
 		}
-		if lines, ok := copyConfirmLines(node, true); ok {
+		if lines, ok := m.copyConfirmLines(node, true); ok {
 			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: true}
 			m.confirm.Open("\u26a0 COPY LEFT \u2192 RIGHT", lines, true)
 			break
@@ -623,10 +646,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || node.Compare.Presence == model.PresenceLeftOnly {
+		if node == nil || node.IsAttr || m.presence(node) == model.PresenceLeftOnly {
 			break
 		}
-		if lines, ok := copyConfirmLines(node, false); ok {
+		if lines, ok := m.copyConfirmLines(node, false); ok {
 			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: false}
 			m.confirm.Open("\u26a0 COPY RIGHT \u2192 LEFT", lines, true)
 			break
@@ -649,11 +672,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "~", "`":
 		m.logView.Open()
 	case "i":
-		tree := m.scanner.Tree()
-		if tree != nil {
-			cl, cr := m.scanner.ChecksumInfo()
-			m.info.Open(model.PropagateStatus(tree, m.cmpOpts), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
-		}
+		cl, cr := m.scanner.ChecksumInfo()
+		algo := m.scanner.ChecksumAlgo()
+		m.readTree(func(tree *model.TreeNode) {
+			if tree == nil {
+				return
+			}
+			m.info.Open(model.PropagateStatus(tree, m.cmpOpts), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), algo, cl, cr)
+		})
 	case "y":
 		if m.copying || m.deleting {
 			break
@@ -678,8 +704,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node = m.parentFileNode()
 		}
 		if node != nil && !node.IsDir {
-			m.diffView.Open(node.Name)
-			return m, m.loadDiffContent(node)
+			var cmd tea.Cmd
+			m.readTree(func(*model.TreeNode) {
+				m.diffView.Open(node.Name)
+				cmd = m.loadDiffContent(node)
+			})
+			return m, cmd
 		}
 	case "b":
 		if m.copying || m.deleting {
@@ -689,16 +719,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node == nil || !node.IsDir || node.IsAttr {
 			break
 		}
-		if node.Left == nil && node.Right == nil {
-			break
-		}
 		leftPath := m.left.BasePath()
 		rightPath := m.right.BasePath()
-		if node.Left != nil {
-			leftPath = leftPath + "/" + node.RelPath
-		}
-		if node.Right != nil {
-			rightPath = rightPath + "/" + node.RelPath
+		descend := false
+		m.readTree(func(*model.TreeNode) {
+			if node.Left == nil && node.Right == nil {
+				return
+			}
+			descend = true
+			if node.Left != nil {
+				leftPath = leftPath + "/" + node.RelPath
+			}
+			if node.Right != nil {
+				rightPath = rightPath + "/" + node.RelPath
+			}
+		})
+		if !descend {
+			break
 		}
 		cmd, _ := m.reopenBackends(leftPath, rightPath)
 		if cmd != nil {
@@ -921,7 +958,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, tea.Batch(m.deleteNode(node, node.Compare.Presence), m.ensureTick())
+			return m, tea.Batch(m.deleteNode(node, m.presence(node)), m.ensureTick())
 		}
 		if m.pendingCopy != nil {
 			pc := m.pendingCopy
@@ -935,6 +972,23 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingCopy = nil
 	}
 	return m, nil
+}
+
+// presence reads one node's compare presence under the read lock; the scanner
+// rewrites it whenever the node's directory is re-listed.
+func (m *Model) presence(node *model.TreeNode) model.Presence {
+	var p model.Presence
+	m.readTree(func(*model.TreeNode) { p = node.Compare.Presence })
+	return p
+}
+
+// copyConfirmLines counts collisions and mirror deletes across the subtree, so
+// it runs the free function of the same name under the read lock.
+func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool) ([]string, bool) {
+	var lines []string
+	var ok bool
+	m.readTree(func(*model.TreeNode) { lines, ok = copyConfirmLines(node, leftToRight) })
+	return lines, ok
 }
 
 // copyConfirmLines builds the destructive-copy confirmation body, or reports
@@ -974,7 +1028,10 @@ func copyConfirmLines(node *model.TreeNode, leftToRight bool) ([]string, bool) {
 
 func (m *Model) openDelete(node *model.TreeNode) {
 	m.pendingDelete = node
+	m.readTree(func(*model.TreeNode) { m.buildDeleteConfirm(node) })
+}
 
+func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
 	if node.Compare.Presence != model.PresenceBoth {
 		sides := "← left side only"
 		if node.Compare.Presence == model.PresenceRightOnly {
@@ -1017,7 +1074,12 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	timeGrace := m.cmpOpts.TimeGrace
 	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	isDir := node.IsDir
-	relPath := node.RelPath
+	var relPath string
+	var files, dirs int
+	m.readTree(func(*model.TreeNode) {
+		relPath = node.RelPath
+		files, dirs, _ = model.CountDescendants(node)
+	})
 	progress := m.deleteProgress
 	delLeft := side != model.PresenceRightOnly
 	delRight := side != model.PresenceLeftOnly
@@ -1036,7 +1098,6 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	progress.Start.Store(time.Now().UnixNano())
 	progress.Enumerating.Store(false)
 
-	files, dirs, _ := model.CountDescendants(node)
 	perSide := int64(files + dirs)
 	if isDir {
 		perSide++
@@ -1092,6 +1153,20 @@ func removeOne(ctx context.Context, backend model.Backend, relPath string, isDir
 	return backend.Remove(ctx, relPath)
 }
 
+// copyItem and treeEntry are the snapshots a copy works from: the live tree is
+// only readable under the scanner's lock, which a transfer cannot hold. Entry
+// pointers are safe to keep — a rescan swaps a node's entry for a new one
+// rather than rewriting the old.
+type copyItem struct {
+	relPath  string
+	src, dst *model.FileEntry
+}
+
+type treeEntry struct {
+	relPath string
+	isDir   bool
+}
+
 func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) tea.Cmd {
 	left := m.left
 	right := m.right
@@ -1112,6 +1187,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
 	progress.Failed.Store(0)
+	nodeIsDir := node.IsDir
+	var nodeRel string
+	m.readTree(func(*model.TreeNode) { nodeRel = node.RelPath })
 	return func() tea.Msg {
 		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
 		ctx = transport.ContextWithBaseProgress(ctx, &progress.BaseBytes)
@@ -1119,8 +1197,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		// Copy and mirror-delete enumerate the in-memory tree, which shows an
 		// unlisted dir as empty. List the whole subtree first or the copy
 		// silently skips it and mirror under-counts what to delete.
-		if node.IsDir && !scanner.EnsureSubtreeListed(ctx, node, opts.SubSecond, opts.TimeGrace, opts.IgnoreTZDST) {
-			transport.Log.Add("copy", "ERR", "aborted "+node.RelPath+": subtree could not be fully listed")
+		if nodeIsDir && !scanner.EnsureSubtreeListed(ctx, node, opts.SubSecond, opts.TimeGrace, opts.IgnoreTZDST) {
+			transport.Log.Add("copy", "ERR", "aborted "+nodeRel+": subtree could not be fully listed")
 			return copyDoneMsg{}
 		}
 
@@ -1130,48 +1208,58 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		} else {
 			dstBackend = left
 		}
-		for _, c := range model.CollectTypeCollisions(node, leftToRight) {
+		// A copy outlives any lock it could sensibly hold, so both enumerations
+		// snapshot what they need from the live tree in one locked pass and the
+		// transfer below never touches a node again.
+		var collisions []treeEntry
+		var files []copyItem
+		var totalBytes int64
+		scanner.ReadTree(func(*model.TreeNode) {
+			for _, c := range model.CollectTypeCollisions(node, leftToRight) {
+				dstEntry := c.Right
+				if !leftToRight {
+					dstEntry = c.Left
+				}
+				if dstEntry == nil {
+					continue
+				}
+				collisions = append(collisions, treeEntry{relPath: c.RelPath, isDir: dstEntry.IsDir})
+			}
+			nodes := []*model.TreeNode{node}
+			if nodeIsDir {
+				nodes = model.CollectCopyFiles(node, &opts, leftToRight)
+			}
+			files = make([]copyItem, 0, len(nodes))
+			for _, f := range nodes {
+				it := copyItem{relPath: f.RelPath, src: f.Left, dst: f.Right}
+				if !leftToRight {
+					it.src, it.dst = f.Right, f.Left
+				}
+				if it.src != nil {
+					totalBytes += it.src.Size
+				}
+				files = append(files, it)
+			}
+		})
+
+		for _, c := range collisions {
 			if ctx.Err() != nil {
 				break
 			}
-			dstEntry := c.Right
-			if !leftToRight {
-				dstEntry = c.Left
-			}
-			if dstEntry == nil {
-				continue
-			}
 			var err error
-			if dstEntry.IsDir {
-				err = dstBackend.RemoveAll(ctx, c.RelPath)
+			if c.isDir {
+				err = dstBackend.RemoveAll(ctx, c.relPath)
 			} else {
-				err = dstBackend.Remove(ctx, c.RelPath)
+				err = dstBackend.Remove(ctx, c.relPath)
 			}
 			if err != nil {
 				progress.Failed.Add(1)
-				transport.Log.Add("copy", "ERR", "type-collision cleanup "+c.RelPath+": "+err.Error())
+				transport.Log.Add("copy", "ERR", "type-collision cleanup "+c.relPath+": "+err.Error())
 			} else {
-				transport.Log.Add("copy", "<<<", "type-collision cleanup "+c.RelPath)
+				transport.Log.Add("copy", "<<<", "type-collision cleanup "+c.relPath)
 			}
 		}
 
-		var files []*model.TreeNode
-		if node.IsDir {
-			files = model.CollectCopyFiles(node, &opts, leftToRight)
-		} else {
-			files = []*model.TreeNode{node}
-		}
-
-		var totalBytes int64
-		for _, f := range files {
-			entry := f.Left
-			if !leftToRight {
-				entry = f.Right
-			}
-			if entry != nil {
-				totalBytes += entry.Size
-			}
-		}
 		progress.Total.Store(int64(len(files)))
 		progress.TotalBytes.Store(totalBytes)
 		progress.Done.Store(0)
@@ -1205,11 +1293,11 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			srcBackend = right
 		}
 		batched := false
-		if batchEnabled && node.IsDir {
+		if batchEnabled && nodeIsDir {
 			if bs, ok := dstBackend.(model.BatchSender); ok {
 				if lp, ok := srcBackend.(model.LocalFS); ok {
 					srcRoot := lp.LocalPath("")
-					srcSubtree := filepath.Join(srcRoot, node.RelPath)
+					srcSubtree := filepath.Join(srcRoot, nodeRel)
 					var batchFiles, batchBytes int64
 					_ = filepath.WalkDir(srcSubtree, func(_ string, d fs.DirEntry, werr error) error {
 						if werr != nil || d.IsDir() {
@@ -1229,9 +1317,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 						progress.InFlight.Store(1)
 						progress.Parallel.Store(1)
 						progress.Batched.Store(true)
-						transport.Log.Add("copy", ">>>", fmt.Sprintf("BATCH %s (%d files, %s)", node.RelPath, batchFiles, model.FormatSize(batchBytes)))
+						transport.Log.Add("copy", ">>>", fmt.Sprintf("BATCH %s (%d files, %s)", nodeRel, batchFiles, model.FormatSize(batchBytes)))
 						bctx := transport.ContextWithFileSize(ctx, batchBytes)
-						err := bs.SendLocalTree(bctx, srcRoot, node.RelPath, func(name string) {
+						err := bs.SendLocalTree(bctx, srcRoot, nodeRel, func(name string) {
 							progress.File.Store(name)
 							if d := progress.Done.Load(); d < progress.Total.Load() {
 								progress.Done.Add(1)
@@ -1245,12 +1333,12 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							// Batch rewrites every file in the subtree, not just
 							// the diff set, so invalidate cached CRC for the whole
 							// subtree rather than the diff paths alone.
-							changedDir = node.RelPath
+							changedDir = nodeRel
 							batched = true
-							transport.Log.Add("copy", "<<<", "BATCH "+node.RelPath+" OK")
+							transport.Log.Add("copy", "<<<", "BATCH "+nodeRel+" OK")
 						} else {
 							if !errors.Is(err, transport.ErrResumeUnsupported) {
-								transport.Log.Add("copy", "ERR", "BATCH "+node.RelPath+": "+err.Error())
+								transport.Log.Add("copy", "ERR", "BATCH "+nodeRel+": "+err.Error())
 							}
 							progress.Total.Store(int64(len(files)))
 							progress.TotalBytes.Store(totalBytes)
@@ -1273,28 +1361,24 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		defer progress.Sem.Store(nil)
 		var wg sync.WaitGroup
 
-		copyOne := func(f *model.TreeNode) {
-			var src, dst model.Backend
-			var srcEntry, dstEntry *model.FileEntry
-			if leftToRight {
-				src, dst = left, right
-				srcEntry, dstEntry = f.Left, f.Right
-			} else {
+		copyOne := func(f copyItem) {
+			src, dst := left, right
+			if !leftToRight {
 				src, dst = right, left
-				srcEntry, dstEntry = f.Right, f.Left
 			}
+			srcEntry, dstEntry := f.src, f.dst
 			if srcEntry == nil {
 				progress.Done.Add(1)
 				return
 			}
 			if srcEntry.IsDir {
-				progress.File.Store(f.RelPath)
+				progress.File.Store(f.relPath)
 				progress.BeginFile(0)
-				if err := dst.Mkdir(ctx, f.RelPath, srcEntry.Mode); err != nil {
+				if err := dst.Mkdir(ctx, f.relPath, srcEntry.Mode); err != nil {
 					progress.Failed.Add(1)
-					transport.Log.Add("copy", "ERR", "mkdir "+f.RelPath+": "+err.Error())
+					transport.Log.Add("copy", "ERR", "mkdir "+f.relPath+": "+err.Error())
 				} else {
-					transport.Log.Add("copy", "<<<", "mkdir "+f.RelPath)
+					transport.Log.Add("copy", "<<<", "mkdir "+f.relPath)
 				}
 				progress.Done.Add(1)
 				return
@@ -1302,29 +1386,29 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
 				var clearErr error
 				if dstEntry.IsDir {
-					clearErr = dst.RemoveAll(ctx, f.RelPath)
+					clearErr = dst.RemoveAll(ctx, f.relPath)
 				} else {
-					clearErr = dst.Remove(ctx, f.RelPath)
+					clearErr = dst.Remove(ctx, f.relPath)
 				}
 				if clearErr != nil {
 					progress.Failed.Add(1)
-					transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.RelPath+": "+clearErr.Error())
+					transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.relPath+": "+clearErr.Error())
 					progress.Done.Add(1)
 					return
 				}
-				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.RelPath)
+				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.relPath)
 				dstEntry = nil
 			}
 			slot := progress.ClaimSlot()
 			defer progress.ReleaseSlot(slot)
 			if slot != nil {
-				slot.File.Store(f.RelPath)
+				slot.File.Store(f.relPath)
 				slot.Size.Store(srcEntry.Size)
 				slot.Start.Store(time.Now().UnixNano())
 			}
-			progress.File.Store(f.RelPath)
+			progress.File.Store(f.relPath)
 			progress.BeginFile(srcEntry.Size)
-			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.RelPath, model.FormatSize(srcEntry.Size)))
+			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.relPath, model.FormatSize(srcEntry.Size)))
 
 			slotBytes := &progress.Bytes
 			slotBase := &progress.BaseBytes
@@ -1337,10 +1421,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			fileCtx = transport.ContextWithFileSize(fileCtx, srcEntry.Size)
 			fileCtx = transport.ContextWithModTime(fileCtx, srcEntry.ModTime)
 
-			verify := resumeVerifier(verifyResume, scanner, src, dst, f.RelPath, srcEntry.Size)
+			verify := resumeVerifier(verifyResume, scanner, src, dst, f.relPath, srcEntry.Size)
 			setTimes := func() {
-				if err := dst.SetTimes(fileCtx, f.RelPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
-					transport.Log.Add("copy", "ERR", "settimes "+f.RelPath+": "+err.Error())
+				if err := dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
+					transport.Log.Add("copy", "ERR", "settimes "+f.relPath+": "+err.Error())
 				}
 			}
 
@@ -1350,38 +1434,38 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 			// prefix is never read back, so verify checks it afterwards.
 			var resumeOK bool
 			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.RelPath, srcEntry, dstEntry, slotBytes, slotBase, verify)
+				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.relPath, srcEntry, dstEntry, slotBytes, slotBase, verify)
 				return nil
 			})
 			if resumeOK {
 				setTimes()
-				markChanged(f.RelPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK (resumed)")
+				markChanged(f.relPath)
+				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK (resumed)")
 				progress.Done.Add(1)
 				return
 			}
 
 			var directOK bool
 			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				directOK = tryDirectTransfer(attemptCtx, src, dst, f.RelPath, srcEntry)
+				directOK = tryDirectTransfer(attemptCtx, src, dst, f.relPath, srcEntry)
 				return nil
 			})
 			if directOK {
 				setTimes()
-				markChanged(f.RelPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
+				markChanged(f.relPath)
+				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK")
 				progress.Done.Add(1)
 				return
 			}
 
 			attempt := 0
-			err := transport.Retry(fileCtx, "copy", "copy "+f.RelPath, func() error {
+			err := transport.Retry(fileCtx, "copy", "copy "+f.relPath, func() error {
 				return transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 					attempt++
 					if attempt > 1 {
-						offset := peekDstSize(attemptCtx, dst, f.RelPath)
+						offset := peekDstSize(attemptCtx, dst, f.relPath)
 						if offset > 0 && offset < srcEntry.Size {
-							err := resumeAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, offset, slotBytes, slotBase, verify)
+							err := resumeAttempt(attemptCtx, src, dst, f.relPath, srcEntry, offset, slotBytes, slotBase, verify)
 							if err == nil {
 								return nil
 							}
@@ -1390,16 +1474,16 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							}
 						}
 					}
-					return fullCopyAttempt(attemptCtx, src, dst, f.RelPath, srcEntry, slotBytes)
+					return fullCopyAttempt(attemptCtx, src, dst, f.relPath, srcEntry, slotBytes)
 				})
 			})
 			if err == nil {
 				setTimes()
-				markChanged(f.RelPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.RelPath+" OK")
+				markChanged(f.relPath)
+				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK")
 			} else {
 				progress.Failed.Add(1)
-				transport.Log.Add("copy", "ERR", "COPY "+f.RelPath+": "+err.Error())
+				transport.Log.Add("copy", "ERR", "COPY "+f.relPath+": "+err.Error())
 			}
 			progress.Done.Add(1)
 		}
@@ -1412,7 +1496,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				}
 				wg.Add(1)
 				progress.InFlight.Add(1)
-				go func(f *model.TreeNode) {
+				go func(f copyItem) {
 					defer wg.Done()
 					defer sem.Release()
 					defer progress.InFlight.Add(-1)
@@ -1423,7 +1507,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		}
 
 		var rescanRoot *model.TreeNode
-		if node.IsDir {
+		if nodeIsDir {
 			// Mirror deletes destination-only files, so it must only run once
 			// every copy landed. A partial copy plus a full delete pass would
 			// destroy data the source still holds.
@@ -1439,27 +1523,32 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 				if !leftToRight {
 					delBackend = left
 				}
-				for _, d := range model.CollectMirrorDeletes(node, leftToRight) {
+				var deletes []treeEntry
+				scanner.ReadTree(func(*model.TreeNode) {
+					for _, d := range model.CollectMirrorDeletes(node, leftToRight) {
+						deletes = append(deletes, treeEntry{relPath: d.RelPath, isDir: d.IsDir})
+					}
+				})
+				for _, d := range deletes {
 					if ctx.Err() != nil {
 						break
 					}
 					var err error
-					if d.IsDir {
-						err = delBackend.RemoveAll(ctx, d.RelPath)
+					if d.isDir {
+						err = delBackend.RemoveAll(ctx, d.relPath)
 					} else {
-						err = delBackend.Remove(ctx, d.RelPath)
+						err = delBackend.Remove(ctx, d.relPath)
 					}
 					if err != nil {
-						transport.Log.Add("copy", "ERR", "mirror delete "+d.RelPath+": "+err.Error())
+						transport.Log.Add("copy", "ERR", "mirror delete "+d.relPath+": "+err.Error())
 						continue
 					}
-					transport.Log.Add("copy", "<<<", "mirror delete "+d.RelPath)
+					transport.Log.Add("copy", "<<<", "mirror delete "+d.relPath)
 				}
 			}
 			rescanRoot = node
 		} else {
-			parentDir := model.DirOf(node.RelPath)
-			rescanRoot = scanner.FindNearestDestNode(parentDir, leftToRight)
+			rescanRoot = scanner.FindNearestDestNode(model.DirOf(nodeRel), leftToRight)
 		}
 		if failed := progress.Failed.Load(); failed > 0 {
 			transport.Log.Add("copy", "ERR", fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, progress.Total.Load()))
@@ -1793,11 +1882,18 @@ func startCancelCloser(ctx context.Context, c io.Closer) func() {
 }
 
 func (m *Model) openRename(node *model.TreeNode) {
-	m.input.Open("Rename: "+node.Name, node.Name, func(newName string) tea.Cmd {
-		if newName == "" || newName == node.Name {
+	var oldName string
+	m.readTree(func(*model.TreeNode) { oldName = node.Name })
+	m.input.Open("Rename: "+oldName, oldName, func(newName string) tea.Cmd {
+		if newName == "" || newName == oldName {
 			return nil
 		}
-		oldRel := node.RelPath
+		var oldRel string
+		var presence model.Presence
+		m.readTree(func(*model.TreeNode) {
+			oldRel = node.RelPath
+			presence = node.Compare.Presence
+		})
 		newRel := model.DirOf(oldRel)
 		if newRel != "" {
 			newRel += "/"
@@ -1806,7 +1902,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 		return func() tea.Msg {
 			ctx := context.Background()
 			var err error
-			switch node.Compare.Presence {
+			switch presence {
 			case model.PresenceLeftOnly:
 				err = m.left.Rename(ctx, oldRel, newRel)
 			case model.PresenceRightOnly:
@@ -1838,7 +1934,9 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	ignoreTZDST := m.cmpOpts.IgnoreTZDST
 	return func() tea.Msg {
 		ctx := context.Background()
-		l, r := node.Left, node.Right
+		var l, r *model.FileEntry
+		var relPath string
+		scanner.ReadTree(func(*model.TreeNode) { l, r, relPath = node.Left, node.Right, node.RelPath })
 		if l == nil || r == nil {
 			return touchDoneMsg{}
 		}
@@ -1854,13 +1952,15 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			// Touch only changes metadata; the file body is unchanged. Roll the
 			// cached CRC fingerprint forward to the new mtime so the preserving
 			// merge below treats CRC as still valid.
-			if touchedLeft {
-				node.LeftCksumModTime = newer.ModTime
-			} else {
+			scanner.MutateTree(func(*model.TreeNode) {
+				if touchedLeft {
+					node.LeftCksumModTime = newer.ModTime
+					return
+				}
 				node.RightCksumModTime = newer.ModTime
-			}
+			})
 		}
-		parentDir := model.DirOf(node.RelPath)
+		parentDir := model.DirOf(relPath)
 		le, re, err := scanner.ListBothDir(ctx, parentDir)
 		if err == nil {
 			scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace, ignoreTZDST)
@@ -1884,16 +1984,21 @@ func (m *Model) openSearch() {
 }
 
 func (m *Model) findAndJump(re *regexp.Regexp) {
-	tree := m.scanner.Tree()
-	if tree == nil {
-		return
-	}
-	target := model.FindByName(tree, nil, re)
+	var target *model.TreeNode
+	m.mutateTree(func(tree *model.TreeNode) {
+		if tree == nil {
+			return
+		}
+		target = model.FindByName(tree, nil, re)
+		if target == nil {
+			return
+		}
+		for n := target.Parent; n != nil; n = n.Parent {
+			n.Expanded = true
+		}
+	})
 	if target == nil {
 		return
-	}
-	for n := target.Parent; n != nil; n = n.Parent {
-		n.Expanded = true
 	}
 	m.refreshTree()
 	p := m.activePanel()
@@ -1908,10 +2013,6 @@ func (m *Model) findAndJump(re *regexp.Regexp) {
 }
 
 func (m *Model) jumpToNextDiff() {
-	tree := m.scanner.Tree()
-	if tree == nil {
-		return
-	}
 	p := m.activePanel()
 	var after *model.TreeNode
 	for i := p.cursor; i >= 0 && i < len(p.nodes); i-- {
@@ -1920,14 +2021,23 @@ func (m *Model) jumpToNextDiff() {
 			break
 		}
 	}
-	target := model.FindNextDiff(tree, after, m.cmpOpts)
+	var target *model.TreeNode
+	m.mutateTree(func(tree *model.TreeNode) {
+		if tree == nil {
+			return
+		}
+		target = model.FindNextDiff(tree, after, m.cmpOpts)
+		if target == nil {
+			return
+		}
+		for n := target.Parent; n != nil; n = n.Parent {
+			n.Expanded = true
+		}
+		target.Expanded = true
+	})
 	if target == nil {
 		return
 	}
-	for n := target.Parent; n != nil; n = n.Parent {
-		n.Expanded = true
-	}
-	target.Expanded = true
 	m.refreshTree()
 	for i, n := range p.nodes {
 		if n == target {
@@ -2070,6 +2180,15 @@ func timeScan(op, target string, fn func()) {
 	transport.Log.Add("scan", "<<<", fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
 }
 
+// readTree and mutateTree fence the UI goroutine's tree access against the
+// scanner's: readTree for walks and rendering, mutateTree for the edits the UI
+// makes itself (expand/collapse, side swap). Neither is reentrant — nothing
+// inside fn may call back into a Scanner method that locks, refreshTree
+// included.
+func (m *Model) readTree(fn func(root *model.TreeNode)) { m.scanner.ReadTree(fn) }
+
+func (m *Model) mutateTree(fn func(root *model.TreeNode)) { m.scanner.MutateTree(fn) }
+
 // refreshTree rebuilds the visible rows. The rollup walk behind them is
 // O(whole tree) — at a million nodes it costs tens of milliseconds — so it runs
 // only when the scanner has actually changed something, and never more often
@@ -2077,23 +2196,25 @@ func timeScan(op, target string, fn func()) {
 // no matter how big the tree gets; the flatten itself only touches expanded
 // nodes and stays cheap.
 func (m *Model) refreshTree() {
-	tree := m.scanner.Tree()
-	if tree == nil {
-		m.cachedStats = nil
-		return
-	}
-	if rev := m.scanner.Rev(); rev != m.statsRev && time.Since(m.lastPropagate) >= m.propagateEvery {
-		t0 := time.Now()
-		s := model.PropagateStatus(tree, m.cmpOpts)
-		m.lastPropagate = time.Now()
-		m.propagateEvery = min(4*m.lastPropagate.Sub(t0), 2*time.Second)
-		m.statsRev = rev
-		m.cachedStats = &s
-	}
-	flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
-	m.lastFlatLen = len(flat)
-	m.leftPanel.SetNodes(flat)
-	m.rightPanel.SetNodes(flat)
+	rev := m.scanner.Rev()
+	m.scanner.ReadTree(func(tree *model.TreeNode) {
+		if tree == nil {
+			m.cachedStats = nil
+			return
+		}
+		if rev != m.statsRev && time.Since(m.lastPropagate) >= m.propagateEvery {
+			t0 := time.Now()
+			s := model.PropagateStatus(tree, m.cmpOpts)
+			m.lastPropagate = time.Now()
+			m.propagateEvery = min(4*m.lastPropagate.Sub(t0), 2*time.Second)
+			m.statsRev = rev
+			m.cachedStats = &s
+		}
+		flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
+		m.lastFlatLen = len(flat)
+		m.leftPanel.SetNodes(flat)
+		m.rightPanel.SetNodes(flat)
+	})
 }
 
 // refreshTreeNow bypasses the throttle. Used when an operation finishes or the
@@ -2115,9 +2236,15 @@ func (m *Model) swapSides() {
 
 	m.scanner.SwapSides()
 
-	tree := m.scanner.Tree()
-	if tree != nil {
+	swapped := false
+	m.mutateTree(func(tree *model.TreeNode) {
+		if tree == nil {
+			return
+		}
 		swapTreeData(tree)
+		swapped = true
+	})
+	if swapped {
 		m.refreshTreeNow()
 	}
 }
@@ -2261,8 +2388,11 @@ func (m Model) View() string {
 			m.rightPanel.spinner = spinner
 		}
 	}
-	left := m.leftPanel.View()
-	right := m.rightPanel.View()
+	var left, right string
+	m.scanner.ReadTree(func(*model.TreeNode) {
+		left = m.leftPanel.View()
+		right = m.rightPanel.View()
+	})
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, bottomBar)

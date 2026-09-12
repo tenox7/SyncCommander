@@ -2,10 +2,6 @@
 
 - in rsync module name require and module not found are fatal errors should not retry
 
-## Tech debt
-
-- UI reads the live tree (refreshTree: FlattenTree/walkStats, panel View) unsynchronized while scanner goroutines mutate it. Pointer-snapshot locals stop the crash but `go test -race` still flags the loads; a real fix needs a shared lock or a UI snapshot that fits the 1M-object scale.
-
 ## Features
 
 - symlink support ?

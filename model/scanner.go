@@ -47,9 +47,10 @@ type Scanner struct {
 	progress     atomic.Value
 	tree         *TreeNode
 	rev          atomic.Uint64
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	cancel       context.CancelFunc
 	cksumOnce    sync.Once
+	cksumMu      sync.RWMutex // guards the probe results below
 	cksumOK      bool
 	cksumAlgo    string
 	cksumProbed  bool
@@ -92,8 +93,8 @@ func (s *Scanner) Progress() ScanProgress {
 }
 
 func (s *Scanner) Tree() *TreeNode {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.tree
 }
 
@@ -110,6 +111,27 @@ func (s *Scanner) lockTree() { s.mu.Lock() }
 func (s *Scanner) unlockTree() {
 	s.rev.Add(1)
 	s.mu.Unlock()
+}
+
+// ReadTree runs fn with the tree pinned under the shared read lock, so scanner
+// goroutines cannot mutate it while fn walks. Readers do not exclude each
+// other, so fn may only write the rollup and guide fields that PropagateStatus
+// and FlattenTree own — those belong to the single UI goroutine and the scanner
+// never touches them. Not reentrant: fn must not call another Scanner method
+// that locks.
+func (s *Scanner) ReadTree(fn func(root *TreeNode)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	fn(s.tree)
+}
+
+// MutateTree runs fn under the exclusive lock and bumps the revision, for the
+// edits the UI makes itself (expand/collapse, side swap). Same reentrancy rule
+// as ReadTree.
+func (s *Scanner) MutateTree(fn func(root *TreeNode)) {
+	s.lockTree()
+	defer s.unlockTree()
+	fn(s.tree)
 }
 
 func (s *Scanner) Cancel() {
@@ -262,7 +284,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		return
 	}
 
-	groups := groupFilesByTopLevel(root, false)
+	groups := s.groupFiles(root, false)
 	var checksumTotal int64
 	for _, g := range groups {
 		checksumTotal += int64(len(g.files))
@@ -379,14 +401,15 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 		return
 	}
 
+	// The preserving merge reuses and rewrites the live child nodes, so it is a
+	// mutation like the assignment that follows it — both go under the lock.
+	s.lockTree()
 	oldExpanded := make(map[string]bool)
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
 	}
 	children := mergeChildrenPreserving(node, leftEntries, rightEntries, node.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	restoreExpanded(children, oldExpanded)
-
-	s.lockTree()
 	node.Children = children
 	node.Listed = true
 	node.ListErr = false
@@ -499,17 +522,18 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		s.unlockTree()
 	}
 
+	s.mu.RLock()
 	oldExpanded := make(map[string]bool)
 	for _, child := range node.Children {
 		collectExpanded(child, oldExpanded)
 	}
-
 	rootListLeft := true
 	rootListRight := true
 	if node.RelPath != "" {
 		rootListLeft = node.Left != nil && node.Left.IsDir
 		rootListRight = node.Right != nil && node.Right.IsDir
 	}
+	s.mu.RUnlock()
 	seed := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: rootListLeft, listRight: rootListRight}}
 
 	walkDirs(ctx, s.listWidth, seed, func(job dirJob) []dirJob {
@@ -521,10 +545,9 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 			s.unlockTree()
 			return nil
 		}
+		s.lockTree()
 		children := mergeChildrenPreservingWithChanged(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST, changed)
 		restoreExpanded(children, oldExpanded)
-
-		s.lockTree()
 		job.parent.Children = children
 		job.parent.Listed = true
 		job.parent.ListErr = false
@@ -577,7 +600,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 		return
 	}
 
-	groups := groupFilesByTopLevel(node, true)
+	groups := s.groupFiles(node, true)
 	if !withChecksum {
 		groups = filterPartialCRCGroups(groups)
 	}
@@ -603,7 +626,7 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	}
 	var groups []checksumGroup
 	if node.IsDir {
-		groups = groupFilesByTopLevel(node, false)
+		groups = s.groupFiles(node, false)
 	} else if node.Compare.Presence == PresenceBoth {
 		groups = []checksumGroup{{dir: nil, files: []*TreeNode{node}}}
 	}
@@ -670,15 +693,20 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, subSe
 	if node == nil || !node.IsDir {
 		return true
 	}
-	if UnlistedDir(node) == nil {
+	if s.subtreeListed(node) {
 		return true
 	}
+	s.mu.RLock()
 	leftIsDir := node.RelPath == "" || (node.Left != nil && node.Left.IsDir)
 	rightIsDir := node.RelPath == "" || (node.Right != nil && node.Right.IsDir)
+	s.mu.RUnlock()
 	s.preloadRecursive(ctx, node.RelPath, leftIsDir, rightIsDir)
 
 	var failed atomic.Bool
+	// Callers hold no lock; every read of the live tree below takes its own.
 	jobFor := func(n *TreeNode, depth int) (dirJob, bool) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		listLeft := n.Left != nil && n.Left.IsDir && n.Compare.Presence != PresenceRightOnly
 		listRight := n.Right != nil && n.Right.IsDir && n.Compare.Presence != PresenceLeftOnly
 		if n.RelPath == "" {
@@ -696,7 +724,10 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, subSe
 
 	walkDirs(ctx, s.listWidth, []dirJob{seed}, func(job dirJob) []dirJob {
 		parent := job.parent
-		if !parent.Listed || parent.ListErr {
+		s.mu.RLock()
+		needList := !parent.Listed || parent.ListErr
+		s.mu.RUnlock()
+		if needList {
 			left, right, err := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 			if err != nil {
 				logScanErr(err)
@@ -706,15 +737,17 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, subSe
 				s.unlockTree()
 				return nil
 			}
-			children := mergeChildrenPreserving(parent, left, right, job.depth, subSecond, timeGrace, ignoreTZDST)
 			s.lockTree()
-			parent.Children = children
+			parent.Children = mergeChildrenPreserving(parent, left, right, job.depth, subSecond, timeGrace, ignoreTZDST)
 			parent.Listed = true
 			parent.ListErr = false
 			s.unlockTree()
 		}
+		s.mu.RLock()
+		children := parent.Children
+		s.mu.RUnlock()
 		var next []dirJob
-		for _, child := range parent.Children {
+		for _, child := range children {
 			if !child.IsDir || child.IsAttr {
 				continue
 			}
@@ -727,14 +760,22 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, subSe
 	// Re-check rather than trust the walk: the caller is about to enumerate
 	// this subtree for a destructive operation, and a dir still unlisted here
 	// would enumerate as empty.
-	return !failed.Load() && ctx.Err() == nil && UnlistedDir(node) == nil
+	return !failed.Load() && ctx.Err() == nil && s.subtreeListed(node)
+}
+
+func (s *Scanner) subtreeListed(node *TreeNode) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return UnlistedDir(node) == nil
 }
 
 // FindNearestDestNode walks up from relPath and returns the deepest tree node
 // that has an entry on the copy destination side. Used to find the correct
 // rescan root when intermediate directories are created during a copy.
 func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNode {
-	tree := s.Tree()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree := s.tree
 	if tree == nil {
 		return nil
 	}
@@ -750,19 +791,17 @@ func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNod
 }
 
 func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, subSecond, timeGrace, ignoreTZDST bool) {
-	tree := s.Tree()
-	if tree == nil {
+	s.lockTree()
+	defer s.unlockTree()
+	if s.tree == nil {
 		return
 	}
-	parent := findNode(tree, parentDir)
+	parent := findNode(s.tree, parentDir)
 	if parent == nil {
 		return
 	}
-	children := mergeChildrenPreserving(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
-	s.lockTree()
-	parent.Children = children
+	parent.Children = mergeChildrenPreserving(parent, left, right, parent.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	parent.Listed = true
-	s.unlockTree()
 }
 
 func collectExpanded(node *TreeNode, m map[string]bool) {
@@ -888,9 +927,11 @@ func mergeRenamedCollision(parent, node *TreeNode, subSecond, timeGrace, ignoreT
 // SwapSides exchanges the left and right backends and their checksum probe results.
 func (s *Scanner) SwapSides() {
 	s.lockTree()
-	defer s.unlockTree()
 	s.left, s.right = s.right, s.left
+	s.unlockTree()
+	s.cksumMu.Lock()
 	s.cksumLeft, s.cksumRight = s.cksumRight, s.cksumLeft
+	s.cksumMu.Unlock()
 }
 
 func updateDescendantPaths(children []*TreeNode, oldPrefix, newPrefix string) {
@@ -1272,6 +1313,14 @@ type checksumGroup struct {
 	files []*TreeNode
 }
 
+// groupFiles walks the live tree, so it holds the read lock: a scan or a copy
+// may still be listing directories underneath.
+func (s *Scanner) groupFiles(root *TreeNode, onlyPending bool) []checksumGroup {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return groupFilesByTopLevel(root, onlyPending)
+}
+
 // groupFilesByTopLevel splits PresenceBoth files under root into groups,
 // one per top-level child dir (plus one with dir=nil for files directly under
 // root). The scanner processes each group independently so the rsync MD4
@@ -1339,35 +1388,50 @@ func filterPartialCRCGroups(groups []checksumGroup) []checksumGroup {
 	return out
 }
 
+// negotiateChecksum probes both backends once. The UI polls the results every
+// tick from its own goroutine, so they are published under cksumMu rather than
+// left to the Once — only callers of Do get its happens-before.
 func (s *Scanner) negotiateChecksum() bool {
 	s.cksumOnce.Do(func() {
-		s.cksumProbed = true
-		s.cksumLeft = probeBackend(s.left)
-		s.cksumRight = probeBackend(s.right)
-		leftSet := toSet(s.cksumLeft)
-		rightSet := toSet(s.cksumRight)
-		for _, algo := range []string{"xxh3", "sha256", "sha1", "md5", "md4", "rsync"} {
-			if leftSet[algo] && rightSet[algo] {
-				setBackendAlgo(s.left, algo)
-				setBackendAlgo(s.right, algo)
-				s.cksumAlgo = algo
-				s.cksumOK = true
-				return
+		left := probeBackend(s.left)
+		right := probeBackend(s.right)
+		leftSet := toSet(left)
+		rightSet := toSet(right)
+		algo, ok := "", false
+		for _, a := range []string{"xxh3", "sha256", "sha1", "md5", "md4", "rsync"} {
+			if leftSet[a] && rightSet[a] {
+				setBackendAlgo(s.left, a)
+				setBackendAlgo(s.right, a)
+				algo, ok = a, true
+				break
 			}
 		}
+		s.cksumMu.Lock()
+		s.cksumProbed = true
+		s.cksumLeft, s.cksumRight = left, right
+		s.cksumAlgo, s.cksumOK = algo, ok
+		s.cksumMu.Unlock()
 	})
+	s.cksumMu.RLock()
+	defer s.cksumMu.RUnlock()
 	return s.cksumOK
 }
 
 func (s *Scanner) ChecksumAlgo() string {
+	s.cksumMu.RLock()
+	defer s.cksumMu.RUnlock()
 	return s.cksumAlgo
 }
 
 func (s *Scanner) ChecksumProbed() bool {
+	s.cksumMu.RLock()
+	defer s.cksumMu.RUnlock()
 	return s.cksumProbed
 }
 
 func (s *Scanner) ChecksumInfo() (left, right []string) {
+	s.cksumMu.RLock()
+	defer s.cksumMu.RUnlock()
 	return s.cksumLeft, s.cksumRight
 }
 
