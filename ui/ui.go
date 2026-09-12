@@ -1739,9 +1739,9 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 		dstOwnsProgress = true
 	}
 	var added atomic.Int64
-	var srcReader io.Reader = reader
+	var srcReader io.Reader = sizedReader{Reader: reader, size: srcEntry.Size}
 	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
-		srcReader = &trackedReader{r: reader, target: counter, added: &added}
+		srcReader = &trackedReader{r: srcReader, target: counter, added: &added}
 	}
 	srcReader = &cancelReader{r: srcReader, ctx: ctx}
 	if err := dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode); err != nil {
@@ -2526,3 +2526,25 @@ func (m Model) View() string {
 
 	return screen
 }
+
+// Size forwards the source length through the copy reader chain so
+// destinations that must declare it up front (model.Sized) still see it.
+func (t *trackedReader) Size() int64 { return sizeOf(t.r) }
+
+func (c *cancelReader) Size() int64 { return sizeOf(c.r) }
+
+func sizeOf(r io.Reader) int64 {
+	if s, ok := r.(model.Sized); ok {
+		return s.Size()
+	}
+	return -1
+}
+
+// sizedReader carries the known source length alongside the stream. Only the
+// scanned entry knows it — Backend.Open returns a plain io.ReadCloser.
+type sizedReader struct {
+	io.Reader
+	size int64
+}
+
+func (s sizedReader) Size() int64 { return s.size }

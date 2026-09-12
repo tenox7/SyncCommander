@@ -32,6 +32,15 @@ type Backend interface {
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
 }
 
+// Sized is implemented by readers handed to Backend.CopyFrom that know the
+// total length of the source. Backends whose upload API needs the length up
+// front (rclone's Put) use it to avoid spooling the stream to a temp file.
+// Every reader wrapper between the source and the destination must forward
+// it, or the size is lost.
+type Sized interface {
+	Size() int64
+}
+
 // ChecksumProber is implemented by backends that support content checksums.
 type ChecksumProber interface {
 	ProbeChecksums() []string

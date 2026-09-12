@@ -4,12 +4,16 @@ DIST    := dist
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build install run test release check clean
+.PHONY: all build build-all install run test release check clean
 
 all: build
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BINARY) $(PACKAGE)
+
+# every rclone backend instead of the default subset
+build-all:
+	CGO_ENABLED=0 go build -trimpath -tags rclone_all -ldflags '$(LDFLAGS)' -o $(BINARY) $(PACKAGE)
 
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags '$(LDFLAGS)' $(PACKAGE)

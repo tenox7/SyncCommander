@@ -15,7 +15,7 @@ import (
 const fakeScheme = "fake://"
 
 func IsRemote(arg string) bool {
-	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://", fakeScheme} {
+	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://", rcloneScheme, fakeScheme} {
 		if strings.HasPrefix(arg, p) {
 			return true
 		}
@@ -24,6 +24,9 @@ func IsRemote(arg string) bool {
 }
 
 func MaskURLPassword(rawURL string) string {
+	if strings.HasPrefix(rawURL, rcloneScheme) {
+		return rcloneScheme + maskRcloneSecrets(strings.TrimPrefix(rawURL, rcloneScheme))
+	}
 	idx := strings.Index(rawURL, "://")
 	if idx < 0 {
 		return rawURL
@@ -68,6 +71,9 @@ func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error)
 	}
 	if strings.HasPrefix(arg, "restic://") || strings.HasPrefix(arg, "restics://") {
 		return NewResticBackend(arg, insecure, parallel)
+	}
+	if strings.HasPrefix(arg, rcloneScheme) {
+		return NewRcloneBackend(arg, insecure)
 	}
 	if strings.HasPrefix(arg, fakeScheme) {
 		return NewFakeBackend(arg)

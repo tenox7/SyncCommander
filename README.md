@@ -41,12 +41,33 @@ in full on mismatch — disable with `--verify-resume=false`.
 | rsync://, rsync+ssh:// | Rsync MD4 (internal), SHA/MD5 (over ssh) |
 | webdav://, webdavs:// | MD5/SHA1 (`rclone --etag-hash`) |
 | restic://, restics:// | SHA256 |
+| rclone:// any rclone remote (S3, B2, Swift, SMB, Dropbox, ...) | whatever the remote offers: MD5, SHA1, SHA256, XXH3 |
 | fake:// synthetic tree (testing) | XXH3, SHA256, SHA1, MD5, MD4 |
 
 ## Server examples
 
 - `rclone serve webdav --etag-hash md5`
 - `rclone serve restic`
+
+## rclone remotes
+
+`rclone://` hands everything after the scheme to rclone, so any named remote
+from `rclone.conf` or any connection string works.
+
+```
+sc rclone://gdrive/Photos /backup/photos            # named remote
+sc "rclone://:s3,provider=AWS,access_key_id=K,secret_access_key=S:bkt/p" /tmp/x
+```
+
+Checksums come from whatever the remote already stores — free from the listing
+on object stores, over ssh on sftp — never by downloading. Remotes that keep
+none (crypt, http, smb, ftp) compare by size and mtime only.
+
+Built-in backends are local, s3, b2, swift, crypt, http, smb, dropbox and
+onedrive; build with `-tags rclone_all` (`make build-all`) for all 68. Resuming an
+interrupted upload is not supported on these remotes, and on object stores the
+mtime shown is the server upload time — set `RCLONE_USE_SERVER_MODTIME=false`
+for the exact one at the cost of a request per file.
 
 ## Synthetic trees for perf testing
 
