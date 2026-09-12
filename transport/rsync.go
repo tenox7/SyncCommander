@@ -267,6 +267,7 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 // paths that pass --progress to credit byte progress via rsyncProgressWriter.
 func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...string) error {
 	cmd := rsynccmd.Command("rsync", args...)
+	cmd.DialContext = dialLimited
 	var stderr bytes.Buffer
 	cmd.Stdout = w
 	cmd.Stderr = &stderr
@@ -283,6 +284,20 @@ func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...
 		return err
 	}
 	return nil
+}
+
+// dialLimited is the dialer gorsync uses to reach an rsync:// daemon. gorsync
+// opens that socket itself, so this hook is the only place the daemon's bytes
+// can be metered — every other protocol is wrapped where sc dials.
+// The Go resolver mirrors gorsync's own dialer: its restrict mode needs to
+// know which files name resolution touches.
+func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 30 * time.Second, Resolver: &net.Resolver{PreferGo: true}}
+	c, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return LimitConn(c), nil
 }
 
 // rsyncProgressWriter consumes `rsync --progress` output and credits the
@@ -693,11 +708,12 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 		os.Setenv("RSYNC_PASSWORD", b.pass)
 	}
 
-	conn, err := net.DialTimeout("tcp", b.host, 30*time.Second)
+	rawConn, err := net.DialTimeout("tcp", b.host, 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer rawConn.Close()
+	conn := LimitConn(rawConn)
 
 	Log.Add("rsync", ">>>", "MD4 "+remotePath)
 	result, err := client.RunDaemon(ctx, conn, remotePath, []string{tmpDir + "/"})

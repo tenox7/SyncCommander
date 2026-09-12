@@ -61,6 +61,7 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config) (*ftp.Serv
 	dialFunc := func(network, address string) (net.Conn, error) {
 		c, err := dialer.Dial(network, address)
 		if err == nil {
+			c = LimitConn(c)
 			rawConn = c
 		}
 		return c, err
@@ -608,10 +609,11 @@ type ftpHasher struct {
 
 func newFTPHasher(host, port, user, pass, scheme string, tlsCfg *tls.Config) (*ftpHasher, error) {
 	addr := host + ":" + port
-	rawConn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	rawTCP, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
+	rawConn := LimitConn(rawTCP)
 
 	var conn io.ReadWriteCloser = rawConn
 

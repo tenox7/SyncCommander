@@ -13,7 +13,6 @@
 
 - concurrent uploads within one file (subparts) if protocol supports
 
-- bandwidth limit across all protocols incl local fs
 - remote move with relative and absolute paths, ask for path
 - color schemes
 - misc protocols

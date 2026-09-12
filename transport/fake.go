@@ -498,12 +498,12 @@ func (b *FakeBackend) openEntry(relPath string, e model.FileEntry, offset int64)
 		if offset > int64(len(data)) {
 			offset = int64(len(data))
 		}
-		return io.NopCloser(bytes.NewReader(data[offset:])), nil
+		return LimitReadCloser(io.NopCloser(bytes.NewReader(data[offset:]))), nil
 	}
 	if offset > e.Size {
 		offset = e.Size
 	}
-	return &fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size}, nil
+	return LimitReadCloser(&fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size}), nil
 }
 
 // fakeReader streams deterministic bytes for a synthetic file without ever
@@ -579,17 +579,17 @@ func (b *FakeBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	var size int64
 	var buf []byte
 	if b.noData {
-		n, err := io.Copy(io.Discard, src)
+		n, err := io.Copy(LimitWriter(io.Discard), src)
 		if err != nil {
 			return err
 		}
 		size = n
 	} else {
-		data, err := io.ReadAll(src)
-		if err != nil {
+		var sink bytes.Buffer
+		if _, err := io.Copy(LimitWriter(&sink), src); err != nil {
 			return err
 		}
-		buf, size = data, int64(len(data))
+		buf, size = sink.Bytes(), int64(sink.Len())
 	}
 	if mode == 0 {
 		mode = 0644

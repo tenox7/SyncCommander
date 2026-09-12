@@ -124,7 +124,7 @@ func NewResticBackend(rawURL string, insecure bool, parallel int) (*ResticBacken
 			if err != nil {
 				return nil, err
 			}
-			tc := &idleTimeoutConn{Conn: c, idle: idleTimeout}
+			tc := &idleTimeoutConn{Conn: LimitConn(c), idle: idleTimeout}
 			return tc, tc.nudge()
 		},
 	}

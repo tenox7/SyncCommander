@@ -17,6 +17,13 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Parallel copies.
 - Batch copies for small files.
 
+## Bandwidth limit
+
+`-bwlimit 4M` caps both directions (`-bwlimit-in` / `-bwlimit-out` to differ);
+0 is unlimited and it is also adjustable live in the settings dialog (`s`).
+It is applied at the socket for network protocols and at the file for local
+and `fake://` trees, so every protocol shares one budget.
+
 ## Copy safety
 
 Mirror copy only deletes destination-only files when every copy in the run

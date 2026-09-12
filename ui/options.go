@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"sc/transport"
 )
 
 type Option struct {
@@ -13,6 +15,36 @@ type Option struct {
 	IntValue *int
 	IntMin   int
 	IntMax   int
+	// GetRate/SetRate make the option a bandwidth limit in bytes/sec, stepped
+	// through rateSteps by ←/→ instead of held in a local variable.
+	GetRate func() int64
+	SetRate func(int64)
+}
+
+// rateSteps is the ladder ←/→ walks for a bandwidth option; 0 is unlimited.
+var rateSteps = []int64{
+	0, 32 << 10, 64 << 10, 128 << 10, 256 << 10, 512 << 10,
+	1 << 20, 2 << 20, 4 << 20, 8 << 20, 16 << 20, 32 << 20,
+	64 << 20, 128 << 20, 256 << 20, 512 << 20, 1 << 30,
+}
+
+// stepRate moves cur one rung along rateSteps, snapping a value that came from
+// -bwlimit and isn't on the ladder to the next rung in the direction of travel.
+func stepRate(cur int64, delta int) int64 {
+	if delta > 0 {
+		for _, v := range rateSteps {
+			if v > cur {
+				return v
+			}
+		}
+		return rateSteps[len(rateSteps)-1]
+	}
+	for i := len(rateSteps) - 1; i >= 0; i-- {
+		if rateSteps[i] < cur {
+			return rateSteps[i]
+		}
+	}
+	return 0
 }
 
 type SettingsDialog struct {
@@ -69,7 +101,7 @@ func (d *SettingsDialog) Toggle() {
 		return
 	}
 	opt := &d.options[d.cursor]
-	if opt.IntValue != nil {
+	if opt.Value == nil {
 		return
 	}
 	*opt.Value = !*opt.Value
@@ -80,6 +112,10 @@ func (d *SettingsDialog) Adjust(delta int) {
 		return
 	}
 	opt := &d.options[d.cursor]
+	if opt.SetRate != nil {
+		opt.SetRate(stepRate(opt.GetRate(), delta))
+		return
+	}
 	if opt.IntValue == nil {
 		return
 	}
@@ -120,12 +156,14 @@ func (d *SettingsDialog) View(width, height int) string {
 		}
 		var state string
 		switch {
+		case opt.GetRate != nil:
+			state = styleOptInt.Render(fmt.Sprintf("[%4s]", transport.FormatRate(opt.GetRate())))
 		case opt.IntValue != nil:
-			state = styleOptInt.Render(fmt.Sprintf("[%2d]", *opt.IntValue))
+			state = styleOptInt.Render(fmt.Sprintf("[%4d]", *opt.IntValue))
 		case *opt.Value:
-			state = styleOptOn.Render("[ on]")
+			state = styleOptOn.Render("[  on]")
 		default:
-			state = styleOptOff.Render("[off]")
+			state = styleOptOff.Render("[ off]")
 		}
 		sb.WriteString(fmt.Sprintf("%s%s  %s\n", marker, state, opt.Label))
 	}

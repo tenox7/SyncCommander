@@ -144,7 +144,7 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
 	}
-	tracked := &trackedConn{Conn: rawConn}
+	tracked := &trackedConn{Conn: LimitConn(rawConn)}
 	tracked.touch()
 	cfg := &ssh.ClientConfig{
 		User:            user,

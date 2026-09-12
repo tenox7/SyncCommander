@@ -96,6 +96,7 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 		}
 		n, err := f.Read(buf)
 		if n > 0 {
+			TakeIn(n)
 			h.Write(buf[:n])
 		}
 		if err == io.EOF {
@@ -133,7 +134,7 @@ func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, src)
+	_, err = io.Copy(LimitWriter(f), src)
 	return err
 }
 
@@ -158,7 +159,7 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	_, err = io.Copy(f, rd)
+	_, err = io.Copy(LimitWriter(f), rd)
 	return err
 }
 
@@ -171,7 +172,7 @@ func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64)
 		f.Close()
 		return nil, err
 	}
-	return f, nil
+	return LimitReadCloser(f), nil
 }
 
 func (b *LocalBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
@@ -201,5 +202,9 @@ func (b *LocalBackend) RemoveAll(ctx context.Context, relPath string) error {
 }
 
 func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	return os.Open(filepath.Join(b.base, relPath))
+	f, err := os.Open(filepath.Join(b.base, relPath))
+	if err != nil {
+		return nil, err
+	}
+	return LimitReadCloser(f), nil
 }

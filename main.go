@@ -32,6 +32,9 @@ func main() {
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
+	bwLimit := flag.String("bwlimit", "0", "bandwidth limit per direction, e.g. 512k, 4M (0 = unlimited)")
+	bwLimitIn := flag.String("bwlimit-in", "", "inbound bandwidth limit (overrides -bwlimit)")
+	bwLimitOut := flag.String("bwlimit-out", "", "outbound bandwidth limit (overrides -bwlimit)")
 	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
 	scanParallel := flag.Int("scan-parallel", 8, "max directories listed concurrently during a scan")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
@@ -62,6 +65,24 @@ func main() {
 			}
 		}()
 	}
+
+	mustRate := func(s string) int64 {
+		v, err := transport.ParseRate(s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return v
+	}
+	bwIn, bwOut := mustRate(*bwLimit), mustRate(*bwLimit)
+	if *bwLimitIn != "" {
+		bwIn = mustRate(*bwLimitIn)
+	}
+	if *bwLimitOut != "" {
+		bwOut = mustRate(*bwLimitOut)
+	}
+	transport.SetBandwidthIn(bwIn)
+	transport.SetBandwidthOut(bwOut)
 
 	transport.SetMaxRetries(*maxRetries)
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)

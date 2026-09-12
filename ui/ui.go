@@ -290,6 +290,8 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		{Label: "Batch rsync+ssh transfer", Value: m.batchTransfer},
 		{Label: "Verify resumed copies (checksum)", Value: m.verifyResume},
 		{Label: "Parallel copies", IntValue: m.copyParallel, IntMin: 1, IntMax: m.parallelMax},
+		{Label: "Bandwidth limit in", GetRate: transport.BandwidthIn, SetRate: transport.SetBandwidthIn},
+		{Label: "Bandwidth limit out", GetRate: transport.BandwidthOut, SetRate: transport.SetBandwidthOut},
 	})
 	return m
 }
