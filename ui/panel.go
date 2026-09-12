@@ -234,6 +234,8 @@ func (p *Panel) renderNode(node *model.TreeNode) string {
 			}
 		}
 		switch {
+		case sideIsDir && node.ListErr:
+			arrow = "▶!"
 		case sideIsDir && !node.Listed:
 			arrow = "▶…"
 		case activeCksum && p.spinner != "":

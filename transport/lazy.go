@@ -3,11 +3,13 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sc/model"
@@ -148,12 +150,52 @@ func (b *lazyBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 	})
 }
 
+// CopyFrom retries only while src is still untouched — typically a dead
+// connection that markBrokenIf has just dropped, so the next attempt redials.
+// Once bytes have been consumed the reader can't be rewound and a second
+// attempt would write a truncated file; the caller re-opens src and retries at
+// a higher level instead.
 func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
+	counted := &countingReader{r: src}
+	max := MaxRetries()
+	var err error
+	for attempt := 0; attempt <= max; attempt++ {
+		if ctxDone(ctx) {
+			return ctx.Err()
+		}
+		var inner model.Backend
+		if inner, err = b.ensureConnected(); err == nil {
+			err = b.markBrokenIf(inner.CopyFrom(ctx, relPath, counted, mode))
+		}
+		if err == nil {
+			if attempt > 0 {
+				Log.Add(b.proto, "REC", fmt.Sprintf("copy %s: recovered after %d %s", relPath, attempt, pluralRetries(attempt)))
+			}
+			return nil
+		}
+		if counted.n.Load() > 0 || ctxDone(ctx) || isPermanentError(err) || attempt == max {
+			return err
+		}
+		d := backoffDelay(attempt)
+		Log.Add(b.proto, "RETRY", fmt.Sprintf("copy %s: %v (attempt %d/%d in %v)", relPath, err, attempt+2, max+1, d))
+		if serr := sleepCtx(ctx, d); serr != nil {
+			return serr
+		}
 	}
-	return b.markBrokenIf(inner.CopyFrom(ctx, relPath, src, mode))
+	return err
+}
+
+// countingReader records whether anything was read, so CopyFrom can tell an
+// untouched source stream from a partially consumed one.
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 func (b *lazyBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {

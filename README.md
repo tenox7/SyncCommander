@@ -17,6 +17,13 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Parallel copies.
 - Batch copies for small files.
 
+## Copy safety
+
+Mirror copy only deletes destination-only files when every copy in the run
+succeeded; a copy also lists any unscanned subtree first so nothing is skipped
+or under-deleted. Resumed (appended) copies are checksum-verified and recopied
+in full on mismatch — disable with `--verify-resume=false`.
+
 ## Supported protocols and checksums
 
 | Protocol | Checksum |

@@ -36,6 +36,7 @@ func main() {
 	scanParallel := flag.Int("scan-parallel", 8, "max directories listed concurrently during a scan")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
+	verifyResume := flag.Bool("verify-resume", true, "checksum-verify a resumed (appended) copy; on mismatch recopy the file in full")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
@@ -103,7 +104,7 @@ func main() {
 	right := transport.OpenBackendLazy(rightPath, *insecure, *parallel)
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
-	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch)
+	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
 	p := tea.NewProgram(mdl, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

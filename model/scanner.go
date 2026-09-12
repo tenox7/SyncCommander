@@ -2,11 +2,24 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// LogFn routes scanner-level errors into the shared operation log. model can't
+// import transport (transport imports model), so the UI wires it up.
+var LogFn func(proto, direction, msg string)
+
+func logScanErr(err error) {
+	if err == nil || LogFn == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	LogFn("scan", "ERR", err.Error())
+}
 
 type ScanProgress struct {
 	TotalFiles     int64
@@ -148,7 +161,7 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 		func(job dirJob) []dirJob {
 			s.setProgress(progress("scanning..."))
 
-			leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+			leftEntries, rightEntries, listErr := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
 
 			if job.listLeft {
 				stats.leftPending.Add(-1)
@@ -157,11 +170,20 @@ func (s *Scanner) Scan(ctx context.Context, withChecksum bool, subSecond, timeGr
 				stats.rightPending.Add(-1)
 			}
 
+			if listErr != nil {
+				logScanErr(listErr)
+				s.lockTree()
+				job.parent.ListErr = true
+				s.unlockTree()
+				return nil
+			}
+
 			children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST)
 
 			s.lockTree()
 			job.parent.Children = children
 			job.parent.Listed = true
+			job.parent.ListErr = false
 			s.unlockTree()
 
 			stats.dirsListed.Add(1)
@@ -307,11 +329,20 @@ func (s *Scanner) RefreshTopLevel(ctx context.Context, subSecond, timeGrace, ign
 		})
 	}
 	setp("scanning...")
-	leftEntries, rightEntries := s.listBoth(ctx, "")
+	leftEntries, rightEntries, err := s.listBoth(ctx, "")
+	if err != nil {
+		logScanErr(err)
+		s.lockTree()
+		root.ListErr = true
+		s.unlockTree()
+		setp("done")
+		return
+	}
 
 	s.lockTree()
 	root.Children = mergeChildrenPreserving(root, leftEntries, rightEntries, root.Depth+1, subSecond, timeGrace, ignoreTZDST)
 	root.Listed = true
+	root.ListErr = false
 	s.unlockTree()
 	setp("done")
 }
@@ -338,7 +369,15 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	rightIsDir := node.Right != nil && node.Right.IsDir
 	listLeft := leftIsDir && node.Compare.Presence != PresenceRightOnly
 	listRight := rightIsDir && node.Compare.Presence != PresenceLeftOnly
-	leftEntries, rightEntries := s.listDir(ctx, node.RelPath, listLeft, listRight)
+	leftEntries, rightEntries, err := s.listDir(ctx, node.RelPath, listLeft, listRight)
+	if err != nil {
+		logScanErr(err)
+		s.lockTree()
+		node.ListErr = true
+		s.unlockTree()
+		setp("done")
+		return
+	}
 
 	oldExpanded := make(map[string]bool)
 	for _, child := range node.Children {
@@ -350,6 +389,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, subSecond, timeG
 	s.lockTree()
 	node.Children = children
 	node.Listed = true
+	node.ListErr = false
 	s.unlockTree()
 	setp("done")
 }
@@ -368,7 +408,12 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, withChecksum b
 	}
 	setp("scanning...")
 
-	leftEntries, rightEntries := s.listBoth(ctx, DirOf(node.RelPath))
+	leftEntries, rightEntries, err := s.listBoth(ctx, DirOf(node.RelPath))
+	if err != nil {
+		logScanErr(err)
+		setp("done")
+		return
+	}
 
 	var le, re *FileEntry
 	for i := range leftEntries {
@@ -428,7 +473,12 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 	// Update the node's own Left/Right entries so its presence reflects current
 	// state on both backends. Skip for the root node which has no parent to list.
 	if node.RelPath != "" {
-		leftEntries, rightEntries := s.listBoth(ctx, DirOf(node.RelPath))
+		leftEntries, rightEntries, err := s.listBoth(ctx, DirOf(node.RelPath))
+		if err != nil {
+			logScanErr(err)
+			setp("done")
+			return
+		}
 		var le, re *FileEntry
 		for i := range leftEntries {
 			if leftEntries[i].Name == node.Name {
@@ -463,13 +513,21 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, withChecksum bo
 	seed := []dirJob{{relDir: node.RelPath, parent: node, depth: node.Depth + 1, listLeft: rootListLeft, listRight: rootListRight}}
 
 	walkDirs(ctx, s.listWidth, seed, func(job dirJob) []dirJob {
-		leftEntries, rightEntries := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+		leftEntries, rightEntries, listErr := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+		if listErr != nil {
+			logScanErr(listErr)
+			s.lockTree()
+			job.parent.ListErr = true
+			s.unlockTree()
+			return nil
+		}
 		children := mergeChildrenPreservingWithChanged(job.parent, leftEntries, rightEntries, job.depth, subSecond, timeGrace, ignoreTZDST, changed)
 		restoreExpanded(children, oldExpanded)
 
 		s.lockTree()
 		job.parent.Children = children
 		job.parent.Listed = true
+		job.parent.ListErr = false
 		s.unlockTree()
 
 		dirsListed.Add(1)
@@ -593,8 +651,83 @@ func (s *Scanner) preloadRecursive(ctx context.Context, scope string, leftIsDir,
 	}
 }
 
-func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, []FileEntry) {
-	return s.listBoth(ctx, relDir)
+func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, []FileEntry, error) {
+	e, r, err := s.listBoth(ctx, relDir)
+	logScanErr(err)
+	return e, r, err
+}
+
+// NegotiateChecksum picks a checksum algorithm both backends support and
+// configures them to use it. Reports whether one was found.
+func (s *Scanner) NegotiateChecksum() bool { return s.negotiateChecksum() }
+
+// EnsureSubtreeListed lists every directory under node that the scan left
+// unlisted (shallow scan, collapsed dir, earlier list failure). Copy and
+// mirror-delete walk the in-memory tree only, so an unlisted dir silently
+// reads as empty — the subtree is skipped and mirror under-counts deletes.
+// Reports whether the whole subtree is now listed.
+func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, subSecond, timeGrace, ignoreTZDST bool) bool {
+	if node == nil || !node.IsDir {
+		return true
+	}
+	if UnlistedDir(node) == nil {
+		return true
+	}
+	leftIsDir := node.RelPath == "" || (node.Left != nil && node.Left.IsDir)
+	rightIsDir := node.RelPath == "" || (node.Right != nil && node.Right.IsDir)
+	s.preloadRecursive(ctx, node.RelPath, leftIsDir, rightIsDir)
+
+	var failed atomic.Bool
+	jobFor := func(n *TreeNode, depth int) (dirJob, bool) {
+		listLeft := n.Left != nil && n.Left.IsDir && n.Compare.Presence != PresenceRightOnly
+		listRight := n.Right != nil && n.Right.IsDir && n.Compare.Presence != PresenceLeftOnly
+		if n.RelPath == "" {
+			listLeft, listRight = true, true
+		}
+		if !listLeft && !listRight {
+			return dirJob{}, false
+		}
+		return dirJob{relDir: n.RelPath, parent: n, depth: depth, listLeft: listLeft, listRight: listRight}, true
+	}
+	seed, ok := jobFor(node, node.Depth+1)
+	if !ok {
+		return true
+	}
+
+	walkDirs(ctx, s.listWidth, []dirJob{seed}, func(job dirJob) []dirJob {
+		parent := job.parent
+		if !parent.Listed || parent.ListErr {
+			left, right, err := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+			if err != nil {
+				logScanErr(err)
+				failed.Store(true)
+				s.lockTree()
+				parent.ListErr = true
+				s.unlockTree()
+				return nil
+			}
+			children := mergeChildrenPreserving(parent, left, right, job.depth, subSecond, timeGrace, ignoreTZDST)
+			s.lockTree()
+			parent.Children = children
+			parent.Listed = true
+			parent.ListErr = false
+			s.unlockTree()
+		}
+		var next []dirJob
+		for _, child := range parent.Children {
+			if !child.IsDir || child.IsAttr {
+				continue
+			}
+			if j, ok := jobFor(child, job.depth+1); ok {
+				next = append(next, j)
+			}
+		}
+		return next
+	})
+	// Re-check rather than trust the walk: the caller is about to enumerate
+	// this subtree for a destructive operation, and a dir still unlisted here
+	// would enumerate as empty.
+	return !failed.Load() && ctx.Err() == nil && UnlistedDir(node) == nil
 }
 
 // FindNearestDestNode walks up from relPath and returns the deepest tree node
@@ -780,38 +913,8 @@ func (s *Scanner) listCtx(parent context.Context, b Backend) (context.Context, c
 	return context.WithTimeout(parent, s.stallTimeout)
 }
 
-func (s *Scanner) listBoth(ctx context.Context, relDir string) ([]FileEntry, []FileEntry) {
-	type result struct {
-		entries []FileEntry
-		side    int
-	}
-	ch := make(chan result, 2)
-	go func() {
-		c, cancel := s.listCtx(ctx, s.left)
-		defer cancel()
-		e, _ := s.left.List(c, relDir)
-		ch <- result{e, 0}
-	}()
-	go func() {
-		c, cancel := s.listCtx(ctx, s.right)
-		defer cancel()
-		e, _ := s.right.List(c, relDir)
-		ch <- result{e, 1}
-	}()
-	var left, right []FileEntry
-	for i := 0; i < 2; i++ {
-		select {
-		case <-ctx.Done():
-			return left, right
-		case r := <-ch:
-			if r.side == 0 {
-				left = r.entries
-			} else {
-				right = r.entries
-			}
-		}
-	}
-	return left, right
+func (s *Scanner) listBoth(ctx context.Context, relDir string) ([]FileEntry, []FileEntry, error) {
+	return s.listDir(ctx, relDir, true, true)
 }
 
 func DirOf(relPath string) string {
@@ -1097,45 +1200,52 @@ func walkDirs(ctx context.Context, workers int, seed []dirJob, process func(dirJ
 	wg.Wait()
 }
 
-func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRight bool) ([]FileEntry, []FileEntry) {
+// listDir lists relDir on the requested sides. err is non-nil when any
+// requested side failed — callers must then leave the tree alone rather than
+// merge a partial result, which would show the other side's entries as
+// one-sided and the failing side's subtree as empty.
+func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRight bool) ([]FileEntry, []FileEntry, error) {
 	if !listLeft && !listRight {
-		return nil, nil
+		return nil, nil, nil
+	}
+	one := func(b Backend, side string) ([]FileEntry, error) {
+		c, cancel := s.listCtx(ctx, b)
+		defer cancel()
+		e, err := b.List(c, relDir)
+		return e, wrapListErr(side, relDir, err)
 	}
 	if !listLeft {
-		c, cancel := s.listCtx(ctx, s.right)
-		defer cancel()
-		e, _ := s.right.List(c, relDir)
-		return nil, e
+		e, err := one(s.right, "right")
+		return nil, e, err
 	}
 	if !listRight {
-		c, cancel := s.listCtx(ctx, s.left)
-		defer cancel()
-		e, _ := s.left.List(c, relDir)
-		return e, nil
+		e, err := one(s.left, "left")
+		return e, nil, err
 	}
 	type result struct {
 		entries []FileEntry
+		err     error
 		side    int
 	}
 	ch := make(chan result, 2)
 	go func() {
-		c, cancel := s.listCtx(ctx, s.left)
-		defer cancel()
-		e, _ := s.left.List(c, relDir)
-		ch <- result{e, 0}
+		e, err := one(s.left, "left")
+		ch <- result{e, err, 0}
 	}()
 	go func() {
-		c, cancel := s.listCtx(ctx, s.right)
-		defer cancel()
-		e, _ := s.right.List(c, relDir)
-		ch <- result{e, 1}
+		e, err := one(s.right, "right")
+		ch <- result{e, err, 1}
 	}()
 	var left, right []FileEntry
+	var firstErr error
 	for i := 0; i < 2; i++ {
 		select {
 		case <-ctx.Done():
-			return left, right
+			return left, right, ctx.Err()
 		case r := <-ch:
+			if r.err != nil && firstErr == nil {
+				firstErr = r.err
+			}
 			if r.side == 0 {
 				left = r.entries
 			} else {
@@ -1143,7 +1253,18 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 			}
 		}
 	}
-	return left, right
+	return left, right, firstErr
+}
+
+func wrapListErr(side, relDir string, err error) error {
+	if err == nil {
+		return nil
+	}
+	dir := relDir
+	if dir == "" {
+		dir = "/"
+	}
+	return fmt.Errorf("list %s %s: %w", side, dir, err)
 }
 
 type checksumGroup struct {

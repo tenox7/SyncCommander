@@ -108,6 +108,7 @@ func formatElapsed(d time.Duration) string {
 type CopyPopupData struct {
 	LeftToRight        bool
 	DoneFiles          int64
+	FailedFiles        int64
 	TotalFiles         int64
 	InFlight           int64
 	Parallel           int64
@@ -170,6 +171,9 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	}
 
 	header := fmt.Sprintf("COPY  %d/%d files", d.DoneFiles, d.TotalFiles)
+	if d.FailedFiles > 0 {
+		header += fmt.Sprintf("  %d FAILED", d.FailedFiles)
+	}
 	switch {
 	case d.Batched:
 		header += "  [BATCH]"

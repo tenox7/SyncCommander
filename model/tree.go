@@ -62,6 +62,7 @@ type TreeNode struct {
 	Children               []*TreeNode
 	Expanded               bool
 	Listed                 bool
+	ListErr                bool
 	SubtreePending         bool
 	ChecksumPendingLeft    bool
 	ChecksumPendingRight   bool
@@ -148,17 +149,32 @@ func NewRootNode() *TreeNode {
 // even when the new (size, mtime) match the cached fingerprint — handles the
 // case where rsync -t preserves mtime across a copy, leaving the fingerprint
 // looking valid while the body has changed.
+//
+// LeftDirs/RightDirs name whole subtrees that were rewritten wholesale (batch
+// transfer), where enumerating every file would cost as much memory as the
+// tree itself.
 type ChangedPaths struct {
-	Left  map[string]bool
-	Right map[string]bool
+	Left      map[string]bool
+	Right     map[string]bool
+	LeftDirs  []string
+	RightDirs []string
+}
+
+func underAny(dirs []string, relPath string) bool {
+	for _, d := range dirs {
+		if d == "" || relPath == d || strings.HasPrefix(relPath, d+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ChangedPaths) hasLeft(relPath string) bool {
-	return c != nil && c.Left[relPath]
+	return c != nil && (c.Left[relPath] || underAny(c.LeftDirs, relPath))
 }
 
 func (c *ChangedPaths) hasRight(relPath string) bool {
-	return c != nil && c.Right[relPath]
+	return c != nil && (c.Right[relPath] || underAny(c.RightDirs, relPath))
 }
 
 func (c *ChangedPaths) touchesSubtree(dir string) bool {
@@ -166,6 +182,13 @@ func (c *ChangedPaths) touchesSubtree(dir string) bool {
 		return false
 	}
 	prefix := dir + "/"
+	for _, dirs := range [][]string{c.LeftDirs, c.RightDirs} {
+		for _, d := range dirs {
+			if d == "" || d == dir || strings.HasPrefix(d, prefix) || strings.HasPrefix(dir, d+"/") {
+				return true
+			}
+		}
+	}
 	for _, set := range []map[string]bool{c.Left, c.Right} {
 		for p := range set {
 			if p == dir || strings.HasPrefix(p, prefix) {
@@ -809,6 +832,26 @@ func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool) []*Tr
 	var result []*TreeNode
 	collectCopyFilesRec(node, opts, leftToRight, &result)
 	return result
+}
+
+// UnlistedDir returns the first directory in node's subtree that was never
+// listed (Listed) or whose last listing failed (ListErr), or nil.
+// CollectCopyFiles and CollectMirrorDeletes see such a dir as empty, so copy
+// would skip the subtree and mirror would under-count deletes; callers must
+// list it first.
+func UnlistedDir(node *TreeNode) *TreeNode {
+	if node == nil || node.IsAttr || !node.IsDir {
+		return nil
+	}
+	if !node.Listed || node.ListErr {
+		return node
+	}
+	for _, child := range node.Children {
+		if n := UnlistedDir(child); n != nil {
+			return n
+		}
+	}
+	return nil
 }
 
 func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, result *[]*TreeNode) {
