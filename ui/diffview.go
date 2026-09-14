@@ -26,10 +26,13 @@ const (
 	diffLineModified
 )
 
+// diffLine is one row of the text view. The styled strings are rendered once
+// at build time: the per-character diff of a modified row is far too costly
+// to redo on every frame.
 type diffLine struct {
 	kind        diffLineKind
-	leftText    string
-	rightText   string
+	leftStyled  string
+	rightStyled string
 	leftLineNo  int
 	rightLineNo int
 }
@@ -41,26 +44,37 @@ type hexDiffRow struct {
 	diffs    []bool // true = byte differs
 }
 
+// diffContent is a prepared comparison, built off the UI goroutine.
+type diffContent struct {
+	mode     diffMode
+	lines    []diffLine
+	diffIdxs []int // indices into lines where kind != equal
+	hexLeft  []byte
+	hexRight []byte
+}
+
+func buildDiffContent(left, right []byte) *diffContent {
+	if isTextContent(left, right) {
+		lines, idxs := buildTextDiff(left, right)
+		return &diffContent{mode: diffModeText, lines: lines, diffIdxs: idxs}
+	}
+	return &diffContent{mode: diffModeHex, hexLeft: left, hexRight: right}
+}
+
 type DiffView struct {
 	visible bool
-	mode    diffMode
 	title   string
 	offset  int
 	width   int
 	height  int
 	loading bool
 	err     string
+	content *diffContent
 
-	// text mode
-	lines    []diffLine
-	diffIdxs []int // indices into lines where kind != equal
-
-	// hex mode
-	hexLeftData  []byte
-	hexRightData []byte
-	hexBPR       int // bytes per row, computed from width
-	hexRows      []hexDiffRow
-	hexDiffIdx   []int // indices into hexRows with at least one diff
+	// hex rows depend on the terminal width and are rebuilt on resize
+	hexBPR     int
+	hexRows    []hexDiffRow
+	hexDiffIdx []int // indices into hexRows with at least one diff
 
 	// navigation cursor for n/p
 	navPos int
@@ -71,19 +85,7 @@ func NewDiffView() *DiffView {
 }
 
 func (d *DiffView) Open(title string) {
-	d.visible = true
-	d.loading = true
-	d.title = title
-	d.offset = 0
-	d.err = ""
-	d.lines = nil
-	d.diffIdxs = nil
-	d.hexLeftData = nil
-	d.hexRightData = nil
-	d.hexBPR = 0
-	d.hexRows = nil
-	d.hexDiffIdx = nil
-	d.navPos = -1
+	*d = DiffView{visible: true, loading: true, title: title, navPos: -1}
 }
 
 func (d *DiffView) Close()       { d.visible = false }
@@ -94,15 +96,10 @@ func (d *DiffView) SetError(msg string) {
 	d.err = msg
 }
 
-func (d *DiffView) LoadContent(leftData, rightData []byte) {
+func (d *DiffView) LoadContent(c *diffContent) {
 	d.loading = false
-	if isTextContent(leftData, rightData) {
-		d.mode = diffModeText
-		d.buildTextDiff(leftData, rightData)
-	} else {
-		d.mode = diffModeHex
-		d.buildHexDiff(leftData, rightData)
-	}
+	d.content = c
+	d.hexBPR = 0
 }
 
 func isTextContent(left, right []byte) bool {
@@ -113,100 +110,93 @@ func isTextContent(left, right []byte) bool {
 	if len(check) == 0 {
 		return true
 	}
-	sample := check
-	if len(sample) > 512 {
-		sample = sample[:512]
-	}
-	return utf8.Valid(sample)
+	return utf8.Valid(check[:min(len(check), 512)])
 }
 
 // --- text diff ---
 
-func (d *DiffView) buildTextDiff(leftData, rightData []byte) {
+func buildTextDiff(leftData, rightData []byte) (lines []diffLine, diffIdxs []int) {
 	leftLines := splitLines(expandTabs(string(leftData)))
 	rightLines := splitLines(expandTabs(string(rightData)))
 
 	dmp := difflib.New()
-	a, b, lines := dmp.DiffLinesToChars(strings.Join(leftLines, "\n"), strings.Join(rightLines, "\n"))
-	diffs := dmp.DiffMain(a, b, false)
-	diffs = dmp.DiffCharsToLines(diffs, lines)
+	a, b, chars := dmp.DiffLinesToChars(strings.Join(leftLines, "\n"), strings.Join(rightLines, "\n"))
+	diffs := dmp.DiffCharsToLines(dmp.DiffMain(a, b, false), chars)
 
-	d.lines = nil
-	d.diffIdxs = nil
-	leftNo := 1
-	rightNo := 1
-
+	leftNo, rightNo := 1, 1
+	add := func(l diffLine) {
+		if l.kind != diffLineEqual {
+			diffIdxs = append(diffIdxs, len(lines))
+		}
+		lines = append(lines, l)
+	}
 	for i := 0; i < len(diffs); i++ {
 		op := diffs[i]
 		opLines := splitLines(op.Text)
-
 		switch op.Type {
 		case difflib.DiffEqual:
 			for _, l := range opLines {
-				d.lines = append(d.lines, diffLine{
-					kind:        diffLineEqual,
-					leftText:    l,
-					rightText:   l,
-					leftLineNo:  leftNo,
-					rightLineNo: rightNo,
-				})
+				add(diffLine{kind: diffLineEqual, leftStyled: l, rightStyled: l, leftLineNo: leftNo, rightLineNo: rightNo})
 				leftNo++
 				rightNo++
 			}
 		case difflib.DiffDelete:
-			// check if next op is Insert -> pair as Modified
 			if i+1 < len(diffs) && diffs[i+1].Type == difflib.DiffInsert {
+				// A delete followed by an insert is a modification: pair the
+				// rows and highlight the changed characters.
 				insLines := splitLines(diffs[i+1].Text)
-				d.pairModifiedLines(opLines, insLines, &leftNo, &rightNo)
-				i++ // skip the insert
-			} else {
-				for _, l := range opLines {
-					idx := len(d.lines)
-					d.lines = append(d.lines, diffLine{
-						kind:       diffLineDeleted,
-						leftText:   l,
-						leftLineNo: leftNo,
-					})
-					d.diffIdxs = append(d.diffIdxs, idx)
-					leftNo++
+				i++
+				for j := 0; j < max(len(opLines), len(insLines)); j++ {
+					l := diffLine{kind: diffLineModified}
+					var lt, rt string
+					if j < len(opLines) {
+						lt, l.leftLineNo = opLines[j], leftNo
+						leftNo++
+					}
+					if j < len(insLines) {
+						rt, l.rightLineNo = insLines[j], rightNo
+						rightNo++
+					}
+					l.leftStyled, l.rightStyled = highlightCharDiff(lt, rt)
+					add(l)
 				}
+				continue
+			}
+			for _, l := range opLines {
+				add(diffLine{kind: diffLineDeleted, leftStyled: styleDiffDel.Render(l), leftLineNo: leftNo})
+				leftNo++
 			}
 		case difflib.DiffInsert:
 			for _, l := range opLines {
-				idx := len(d.lines)
-				d.lines = append(d.lines, diffLine{
-					kind:        diffLineInserted,
-					rightText:   l,
-					rightLineNo: rightNo,
-				})
-				d.diffIdxs = append(d.diffIdxs, idx)
+				add(diffLine{kind: diffLineInserted, rightStyled: styleDiffAdd.Render(l), rightLineNo: rightNo})
 				rightNo++
 			}
 		}
 	}
+	return lines, diffIdxs
 }
 
-func (d *DiffView) pairModifiedLines(delLines, insLines []string, leftNo, rightNo *int) {
-	maxLen := len(delLines)
-	if len(insLines) > maxLen {
-		maxLen = len(insLines)
+// highlightCharDiff renders both sides of a modified row with the changed
+// characters coloured; an empty side stays empty.
+func highlightCharDiff(leftText, rightText string) (left, right string) {
+	if leftText == "" || rightText == "" {
+		return styleDiffDel.Render(leftText), styleDiffAdd.Render(rightText)
 	}
-	for i := 0; i < maxLen; i++ {
-		dl := diffLine{kind: diffLineModified}
-		if i < len(delLines) {
-			dl.leftText = delLines[i]
-			dl.leftLineNo = *leftNo
-			*leftNo++
+	dmp := difflib.New()
+	diffs := dmp.DiffCleanupSemantic(dmp.DiffMain(leftText, rightText, true))
+	var l, r strings.Builder
+	for _, diff := range diffs {
+		switch diff.Type {
+		case difflib.DiffEqual:
+			l.WriteString(diff.Text)
+			r.WriteString(diff.Text)
+		case difflib.DiffDelete:
+			l.WriteString(styleDiffDel.Render(diff.Text))
+		case difflib.DiffInsert:
+			r.WriteString(styleDiffAdd.Render(diff.Text))
 		}
-		if i < len(insLines) {
-			dl.rightText = insLines[i]
-			dl.rightLineNo = *rightNo
-			*rightNo++
-		}
-		idx := len(d.lines)
-		d.lines = append(d.lines, dl)
-		d.diffIdxs = append(d.diffIdxs, idx)
 	}
+	return l.String(), r.String()
 }
 
 func expandTabs(s string) string {
@@ -223,9 +213,7 @@ func expandTabs(s string) string {
 			col = 0
 		case '\t':
 			n := 8 - (col % 8)
-			for i := 0; i < n; i++ {
-				sb.WriteByte(' ')
-			}
+			sb.WriteString(strings.Repeat(" ", n))
 			col += n
 		default:
 			sb.WriteRune(r)
@@ -239,208 +227,93 @@ func splitLines(s string) []string {
 	if s == "" {
 		return nil
 	}
-	lines := strings.Split(s, "\n")
-	// remove trailing empty from final newline
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
 // --- hex diff ---
-
-func (d *DiffView) buildHexDiff(leftData, rightData []byte) {
-	d.hexLeftData = leftData
-	d.hexRightData = rightData
-	d.hexBPR = 0
-	d.hexRows = nil
-	d.hexDiffIdx = nil
-}
 
 func (d *DiffView) rebuildHexRows(bpr int) {
 	d.hexBPR = bpr
 	d.hexRows = nil
 	d.hexDiffIdx = nil
-
-	leftData := d.hexLeftData
-	rightData := d.hexRightData
-	maxLen := len(leftData)
-	if len(rightData) > maxLen {
-		maxLen = len(rightData)
-	}
-
-	for off := 0; off < maxLen; off += bpr {
-		lEnd := off + bpr
-		if lEnd > len(leftData) {
-			lEnd = len(leftData)
-		}
-		rEnd := off + bpr
-		if rEnd > len(rightData) {
-			rEnd = len(rightData)
-		}
-
-		var lSlice, rSlice []byte
+	leftData, rightData := d.content.hexLeft, d.content.hexRight
+	for off := 0; off < max(len(leftData), len(rightData)); off += bpr {
+		row := hexDiffRow{offset: off, diffs: make([]bool, bpr)}
 		if off < len(leftData) {
-			lSlice = leftData[off:lEnd]
+			row.leftHex = leftData[off:min(off+bpr, len(leftData))]
 		}
 		if off < len(rightData) {
-			rSlice = rightData[off:rEnd]
+			row.rightHex = rightData[off:min(off+bpr, len(rightData))]
 		}
-
-		row := hexDiffRow{
-			offset:   off,
-			leftHex:  lSlice,
-			rightHex: rSlice,
-			diffs:    make([]bool, bpr),
-		}
-
 		hasDiff := false
 		for i := 0; i < bpr; i++ {
 			pos := off + i
-			lPresent := pos < len(leftData)
-			rPresent := pos < len(rightData)
-			if lPresent != rPresent {
-				row.diffs[i] = true
-				hasDiff = true
-			} else if lPresent && rPresent && leftData[pos] != rightData[pos] {
+			lPresent, rPresent := pos < len(leftData), pos < len(rightData)
+			if lPresent != rPresent || (lPresent && leftData[pos] != rightData[pos]) {
 				row.diffs[i] = true
 				hasDiff = true
 			}
 		}
-
-		idx := len(d.hexRows)
-		d.hexRows = append(d.hexRows, row)
 		if hasDiff {
-			d.hexDiffIdx = append(d.hexDiffIdx, idx)
+			d.hexDiffIdx = append(d.hexDiffIdx, len(d.hexRows))
 		}
+		d.hexRows = append(d.hexRows, row)
 	}
 }
 
+// hexBytesPerRow fits "XXXXXXXX " (9) + "HH " per byte + "│" + ASCII + "│".
 func hexBytesPerRow(panelWidth int) int {
-	// layout: "XXXXXXXX " (9) + "HH " * N (3N) + "│" (1) + ASCII (N) + "│" (1) = 11 + 4N
-	n := (panelWidth - 11) / 4
-	if n < 4 {
-		n = 4
-	}
-	return n
+	return max((panelWidth-11)/4, 4)
 }
 
 // --- scrolling ---
 
-func (d *DiffView) viewHeight() int {
-	h := d.height - 4 // title + separator + bottom separator + keys
-	if h < 1 {
-		h = 1
-	}
-	return h
-}
+func (d *DiffView) viewHeight() int { return max(d.height-4, 1) } // title, rule, rule, keys
 
 func (d *DiffView) totalRows() int {
-	if d.mode == diffModeText {
-		return len(d.lines)
+	if d.content == nil {
+		return 0
+	}
+	if d.content.mode == diffModeText {
+		return len(d.content.lines)
 	}
 	return len(d.hexRows)
 }
 
-func (d *DiffView) ScrollUp() {
-	d.offset -= d.viewHeight() / 2
-	if d.offset < 0 {
-		d.offset = 0
+func (d *DiffView) diffIdxs() []int {
+	if d.content == nil {
+		return nil
 	}
+	if d.content.mode == diffModeText {
+		return d.content.diffIdxs
+	}
+	return d.hexDiffIdx
 }
 
-func (d *DiffView) ScrollDown() {
-	maxOff := d.totalRows() - d.viewHeight()
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	d.offset += d.viewHeight() / 2
-	if d.offset > maxOff {
-		d.offset = maxOff
-	}
+func (d *DiffView) clampOffset() {
+	d.offset = min(max(d.offset, 0), max(d.totalRows()-d.viewHeight(), 0))
 }
 
-func (d *DiffView) PageUp() {
-	d.offset -= d.viewHeight()
-	if d.offset < 0 {
-		d.offset = 0
-	}
-}
+func (d *DiffView) ScrollUp()   { d.offset -= d.viewHeight() / 2; d.clampOffset() }
+func (d *DiffView) ScrollDown() { d.offset += d.viewHeight() / 2; d.clampOffset() }
+func (d *DiffView) PageUp()     { d.offset -= d.viewHeight(); d.clampOffset() }
+func (d *DiffView) PageDown()   { d.offset += d.viewHeight(); d.clampOffset() }
+func (d *DiffView) Home()       { d.offset = 0 }
+func (d *DiffView) End()        { d.offset = d.totalRows(); d.clampOffset() }
 
-func (d *DiffView) PageDown() {
-	maxOff := d.totalRows() - d.viewHeight()
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	d.offset += d.viewHeight()
-	if d.offset > maxOff {
-		d.offset = maxOff
-	}
-}
+func (d *DiffView) NextDiff() { d.jumpDiff(1) }
+func (d *DiffView) PrevDiff() { d.jumpDiff(-1) }
 
-func (d *DiffView) Home() {
-	d.offset = 0
-}
-
-func (d *DiffView) End() {
-	maxOff := d.totalRows() - d.viewHeight()
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	d.offset = maxOff
-}
-
-func (d *DiffView) NextDiff() {
-	idxs := d.diffIdxs
-	if d.mode == diffModeHex {
-		idxs = d.hexDiffIdx
-	}
+// jumpDiff moves the navigation cursor by delta, wrapping, and centres the
+// row it lands on.
+func (d *DiffView) jumpDiff(delta int) {
+	idxs := d.diffIdxs()
 	if len(idxs) == 0 {
 		return
 	}
-	d.navPos++
-	if d.navPos >= len(idxs) {
-		d.navPos = 0
-	}
-	d.scrollToRow(idxs[d.navPos])
-}
-
-func (d *DiffView) PrevDiff() {
-	idxs := d.diffIdxs
-	if d.mode == diffModeHex {
-		idxs = d.hexDiffIdx
-	}
-	if len(idxs) == 0 {
-		return
-	}
-	d.navPos--
-	if d.navPos < 0 {
-		d.navPos = len(idxs) - 1
-	}
-	d.scrollToRow(idxs[d.navPos])
-}
-
-func (d *DiffView) scrollToRow(row int) {
-	vh := d.viewHeight()
-	// center the row in the viewport
-	d.offset = row - vh/2
-	if d.offset < 0 {
-		d.offset = 0
-	}
-	maxOff := d.totalRows() - vh
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	if d.offset > maxOff {
-		d.offset = maxOff
-	}
-}
-
-func (d *DiffView) diffCount() int {
-	if d.mode == diffModeText {
-		return len(d.diffIdxs)
-	}
-	return len(d.hexDiffIdx)
+	d.navPos = (d.navPos + delta + len(idxs)) % len(idxs)
+	d.offset = idxs[d.navPos] - d.viewHeight()/2
+	d.clampOffset()
 }
 
 // --- rendering ---
@@ -448,7 +321,6 @@ func (d *DiffView) diffCount() int {
 var (
 	styleDiffAdd    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleDiffDel    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleDiffChg    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleDiffLineNo = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	styleDiffTitle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	styleDiffDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -474,201 +346,94 @@ func (d *DiffView) View(width, height int) string {
 	if !d.visible {
 		return ""
 	}
-	d.width = width
-	d.height = height
-
+	d.width, d.height = width, height
 	if d.loading {
-		msg := styleDiffTitle.Render("Loading " + d.title + "...")
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, msg)
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, styleDiffTitle.Render("Loading "+d.title+"..."))
 	}
 	if d.err != "" {
-		msg := styleDiffDel.Render("Error: " + d.err)
-		hint := styleDiffDim.Render("\nEsc=close")
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, msg+hint)
+		msg := styleDiffDel.Render("Error: "+d.err) + styleDiffDim.Render("\nEsc=close")
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, msg)
 	}
-
-	if d.mode == diffModeText {
-		return d.viewText(width, height)
+	if d.content.mode == diffModeText {
+		return d.viewText(width)
 	}
-	return d.viewHex(width, height)
+	return d.viewHex(width)
 }
 
-func (d *DiffView) viewText(width, height int) string {
-	vh := d.viewHeight()
+// frame lays out a two-pane screen: title, the rules with their junction at
+// the pane split, the rows (already joined), filler and the key hints.
+func (d *DiffView) frame(mode string, rows []string, width int) string {
 	panelWidth := width / 2
-	gutterWidth := 6                             // line number gutter
-	contentWidth := panelWidth - gutterWidth - 3 // gutter + space + border
-	if contentWidth < 10 {
-		contentWidth = 10
+	navInfo := ""
+	if idxs := d.diffIdxs(); d.navPos >= 0 && len(idxs) > 0 {
+		navInfo = fmt.Sprintf("  [%d/%d]", d.navPos+1, len(idxs))
 	}
+	title := fmt.Sprintf(" %s  %s  %d diffs%s", mode, d.title, len(d.diffIdxs()), navInfo)
+	rule := func(junction string) string {
+		return styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + junction + strings.Repeat("─", width-panelWidth))
+	}
+	empty := strings.Repeat(" ", panelWidth-1) + styleDiffDim.Render("│") + strings.Repeat(" ", width-panelWidth)
 
 	var sb strings.Builder
-
-	// title bar
-	navInfo := ""
-	if d.navPos >= 0 && len(d.diffIdxs) > 0 {
-		navInfo = fmt.Sprintf("  [%d/%d]", d.navPos+1, len(d.diffIdxs))
-	}
-	modeStr := "TEXT"
-	title := fmt.Sprintf(" %s  %s  %d diffs%s", modeStr, d.title, len(d.diffIdxs), navInfo)
 	sb.WriteString(styleDiffTitle.Render(ansi.Truncate(title, width-2, "")))
 	sb.WriteString("\n")
-	sb.WriteString(styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + "┬" + strings.Repeat("─", width-panelWidth)))
+	sb.WriteString(rule("┬"))
 	sb.WriteString("\n")
-
-	end := d.offset + vh
-	if end > len(d.lines) {
-		end = len(d.lines)
-	}
-
-	for i := d.offset; i < end; i++ {
-		line := d.lines[i]
-		leftPart := d.renderTextLine(line, true, gutterWidth, contentWidth)
-		rightPart := d.renderTextLine(line, false, gutterWidth, contentWidth)
-		sb.WriteString(rowDiffMarker(line.kind))
-		sb.WriteString(leftPart)
-		sb.WriteString(styleDiffDim.Render("│"))
-		sb.WriteString(rightPart)
+	for _, r := range rows {
+		sb.WriteString(r)
 		sb.WriteString("\n")
 	}
-
-	// fill remaining rows
-	emptyLeft := strings.Repeat(" ", panelWidth-1)
-	emptyRight := strings.Repeat(" ", width-panelWidth)
-	for i := end - d.offset; i < vh; i++ {
-		sb.WriteString(emptyLeft)
-		sb.WriteString(styleDiffDim.Render("│"))
-		sb.WriteString(emptyRight)
+	for i := len(rows); i < d.viewHeight(); i++ {
+		sb.WriteString(empty)
 		sb.WriteString("\n")
 	}
-
-	sb.WriteString(styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + "┴" + strings.Repeat("─", width-panelWidth)))
+	sb.WriteString(rule("┴"))
 	sb.WriteString("\n")
 	sb.WriteString(styleDiffDim.Render("n=next diff  p=prev diff  ↑↓=scroll  PgUp/Dn=page  Home/End  q/Esc=close"))
-
 	return sb.String()
 }
 
-func (d *DiffView) renderTextLine(line diffLine, isLeft bool, gutterWidth, contentWidth int) string {
-	panelWidth := d.width / 2
-	if !isLeft {
-		panelWidth = d.width - d.width/2
+// fitWidth pads or truncates a styled string to exactly w cells.
+func fitWidth(s string, w int) string {
+	if lipgloss.Width(s) > w {
+		s = ansi.Truncate(s, w, "")
 	}
-	availWidth := panelWidth
-	if isLeft {
-		availWidth -= 2 // room for row marker + center divider
-	}
-
-	lineNo := line.leftLineNo
-	text := line.leftText
-	if !isLeft {
-		lineNo = line.rightLineNo
-		text = line.rightText
-	}
-
-	gutter := ""
-	if lineNo > 0 {
-		gutter = styleDiffLineNo.Render(fmt.Sprintf("%*d ", gutterWidth-1, lineNo))
-	} else {
-		gutter = styleDiffDim.Render(strings.Repeat(" ", gutterWidth))
-	}
-
-	styledText := text
-	switch line.kind {
-	case diffLineEqual:
-		styledText = text
-	case diffLineDeleted:
-		if isLeft {
-			styledText = styleDiffDel.Render(text)
-		} else {
-			styledText = ""
-		}
-	case diffLineInserted:
-		if !isLeft {
-			styledText = styleDiffAdd.Render(text)
-		} else {
-			styledText = ""
-		}
-	case diffLineModified:
-		if isLeft && text != "" {
-			styledText = d.highlightCharDiff(line.leftText, line.rightText, true)
-		} else if !isLeft && text != "" {
-			styledText = d.highlightCharDiff(line.leftText, line.rightText, false)
-		} else {
-			styledText = ""
-		}
-	}
-
-	result := gutter + styledText
-	visLen := lipgloss.Width(result)
-	if visLen > availWidth {
-		result = ansi.Truncate(result, availWidth, "")
-		visLen = lipgloss.Width(result)
-	}
-	if visLen < availWidth {
-		result += strings.Repeat(" ", availWidth-visLen)
-	}
-	return result
+	return s + strings.Repeat(" ", max(w-lipgloss.Width(s), 0))
 }
 
-func (d *DiffView) highlightCharDiff(leftText, rightText string, showLeft bool) string {
-	dmp := difflib.New()
-	diffs := dmp.DiffMain(leftText, rightText, true)
-	diffs = dmp.DiffCleanupSemantic(diffs)
-
-	var sb strings.Builder
-	for _, diff := range diffs {
-		switch diff.Type {
-		case difflib.DiffEqual:
-			sb.WriteString(diff.Text)
-		case difflib.DiffDelete:
-			if showLeft {
-				sb.WriteString(styleDiffDel.Render(diff.Text))
-			}
-		case difflib.DiffInsert:
-			if !showLeft {
-				sb.WriteString(styleDiffAdd.Render(diff.Text))
-			}
-		}
-	}
-	return sb.String()
-}
-
-// --- hex view ---
-
-func (d *DiffView) viewHex(width, height int) string {
-	vh := d.viewHeight()
+func (d *DiffView) viewText(width int) string {
+	const gutterWidth = 6
 	panelWidth := width / 2
+	leftW, rightW := panelWidth-2, width-panelWidth // row marker and divider take two cells
+	lines := d.content.lines
+	end := min(d.offset+d.viewHeight(), len(lines))
+	rows := make([]string, 0, end-d.offset)
+	for _, line := range lines[d.offset:end] {
+		left := gutter(line.leftLineNo, gutterWidth) + line.leftStyled
+		right := gutter(line.rightLineNo, gutterWidth) + line.rightStyled
+		rows = append(rows, rowDiffMarker(line.kind)+fitWidth(left, leftW)+styleDiffDim.Render("│")+fitWidth(right, rightW))
+	}
+	return d.frame("TEXT", rows, width)
+}
 
-	// recompute rows if terminal width changed
-	bpr := hexBytesPerRow(panelWidth - 2) // -1 for row marker, -1 for center divider
+func gutter(lineNo, width int) string {
+	if lineNo == 0 {
+		return strings.Repeat(" ", width)
+	}
+	return styleDiffLineNo.Render(fmt.Sprintf("%*d ", width-1, lineNo))
+}
+
+func (d *DiffView) viewHex(width int) string {
+	panelWidth := width / 2
+	bpr := hexBytesPerRow(panelWidth - 2)
 	if bpr != d.hexBPR {
 		d.rebuildHexRows(bpr)
 		d.navPos = -1
+		d.clampOffset()
 	}
-
-	var sb strings.Builder
-
-	// title bar
-	navInfo := ""
-	if d.navPos >= 0 && len(d.hexDiffIdx) > 0 {
-		navInfo = fmt.Sprintf("  [%d/%d]", d.navPos+1, len(d.hexDiffIdx))
-	}
-	title := fmt.Sprintf(" HEX  %s  %d diffs%s", d.title, len(d.hexDiffIdx), navInfo)
-	sb.WriteString(styleDiffTitle.Render(ansi.Truncate(title, width-2, "")))
-	sb.WriteString("\n")
-	sb.WriteString(styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + "┬" + strings.Repeat("─", width-panelWidth)))
-	sb.WriteString("\n")
-
-	end := d.offset + vh
-	if end > len(d.hexRows) {
-		end = len(d.hexRows)
-	}
-
-	for i := d.offset; i < end; i++ {
-		row := d.hexRows[i]
-		leftPart := d.renderHexPanel(row, true, panelWidth-2, bpr)
-		rightPart := d.renderHexPanel(row, false, width-panelWidth, bpr)
+	end := min(d.offset+d.viewHeight(), len(d.hexRows))
+	rows := make([]string, 0, end-d.offset)
+	for _, row := range d.hexRows[d.offset:end] {
 		marker := " "
 		for _, b := range row.diffs {
 			if b {
@@ -676,84 +441,33 @@ func (d *DiffView) viewHex(width, height int) string {
 				break
 			}
 		}
-		sb.WriteString(marker)
-		sb.WriteString(leftPart)
-		sb.WriteString(styleDiffDim.Render("│"))
-		sb.WriteString(rightPart)
-		sb.WriteString("\n")
+		left := fitWidth(renderHexPanel(row, row.leftHex, bpr), panelWidth-2)
+		right := fitWidth(renderHexPanel(row, row.rightHex, bpr), width-panelWidth)
+		rows = append(rows, marker+left+styleDiffDim.Render("│")+right)
 	}
-
-	emptyLeft := strings.Repeat(" ", panelWidth-1)
-	emptyRight := strings.Repeat(" ", width-panelWidth)
-	for i := end - d.offset; i < vh; i++ {
-		sb.WriteString(emptyLeft)
-		sb.WriteString(styleDiffDim.Render("│"))
-		sb.WriteString(emptyRight)
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString(styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + "┴" + strings.Repeat("─", width-panelWidth)))
-	sb.WriteString("\n")
-	sb.WriteString(styleDiffDim.Render("n=next diff  p=prev diff  ↑↓=scroll  PgUp/Dn=page  Home/End  q/Esc=close"))
-
-	return sb.String()
+	return d.frame("HEX", rows, width)
 }
 
-func (d *DiffView) renderHexPanel(row hexDiffRow, isLeft bool, availWidth int, bpr int) string {
-	data := row.leftHex
-	if !isLeft {
-		data = row.rightHex
-	}
-	dataLen := len(data)
-
-	// offset: 8 chars + space
-	offsetStr := styleDiffDim.Render(fmt.Sprintf("%08x ", row.offset))
-
-	// hex bytes
-	var hexPart strings.Builder
+func renderHexPanel(row hexDiffRow, data []byte, bpr int) string {
+	var hexPart, asciiPart strings.Builder
+	asciiPart.WriteString(styleDiffDim.Render("│"))
 	for i := 0; i < bpr; i++ {
-		if i < dataLen {
-			byteStr := fmt.Sprintf("%02x", data[i])
-			if row.diffs[i] {
-				hexPart.WriteString(styleDiffHexHL.Render(byteStr))
-			} else {
-				hexPart.WriteString(byteStr)
-			}
-			hexPart.WriteString(" ")
-		} else {
+		if i >= len(data) {
 			hexPart.WriteString("   ")
-		}
-	}
-
-	// ascii
-	var asciiPart strings.Builder
-	asciiPart.WriteString(styleDiffDim.Render("│"))
-	for i := 0; i < bpr; i++ {
-		if i < dataLen {
-			ch := data[i]
-			display := "."
-			if ch >= 0x20 && ch < 0x7f {
-				display = string(ch)
-			}
-			if row.diffs[i] {
-				asciiPart.WriteString(styleDiffHexHL.Render(display))
-			} else {
-				asciiPart.WriteString(display)
-			}
-		} else {
 			asciiPart.WriteString(" ")
+			continue
 		}
+		byteStr := fmt.Sprintf("%02x", data[i])
+		display := "."
+		if data[i] >= 0x20 && data[i] < 0x7f {
+			display = string(data[i])
+		}
+		if row.diffs[i] {
+			byteStr, display = styleDiffHexHL.Render(byteStr), styleDiffHexHL.Render(display)
+		}
+		hexPart.WriteString(byteStr + " ")
+		asciiPart.WriteString(display)
 	}
 	asciiPart.WriteString(styleDiffDim.Render("│"))
-
-	result := offsetStr + hexPart.String() + asciiPart.String()
-	visLen := lipgloss.Width(result)
-	if visLen > availWidth {
-		result = ansi.Truncate(result, availWidth, "")
-		visLen = lipgloss.Width(result)
-	}
-	if visLen < availWidth {
-		result += strings.Repeat(" ", availWidth-visLen)
-	}
-	return result
+	return styleDiffDim.Render(fmt.Sprintf("%08x ", row.offset)) + hexPart.String() + asciiPart.String()
 }

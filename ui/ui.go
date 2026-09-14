@@ -50,8 +50,9 @@ type rescanReq struct {
 }
 type touchDoneMsg struct{}
 type diffLoadDoneMsg struct {
-	left, right []byte
-	err         error
+	gen     uint64
+	content *diffContent
+	err     error
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -261,6 +262,8 @@ type Model struct {
 	info           *InfoDialog
 	logView        *LogDialog
 	diffView       *DiffView
+	diffGen        uint64             // identity of the load the diff view is waiting for
+	diffCancel     context.CancelFunc // aborts that load when the view closes
 	pendingDelete  *model.TreeNode
 	pendingCopy    *pendingCopyInfo
 	openDlg        *OpenDialog
@@ -418,10 +421,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case diffLoadDoneMsg:
+		if msg.gen != m.diffGen || !m.diffView.IsOpen() {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.diffView.SetError(msg.err.Error())
 		} else {
-			m.diffView.LoadContent(msg.left, msg.right)
+			m.diffView.LoadContent(msg.content)
 		}
 		return m, nil
 	}
@@ -771,8 +777,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c", "q":
-		m.diffView.Close()
+	case "esc", "q":
+		m.closeDiff()
 	case "up", "k":
 		m.diffView.ScrollUp()
 	case "down", "j":
@@ -793,40 +799,64 @@ func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// diffMaxBytes caps what the diff view pulls into memory per side.
+const diffMaxBytes = 8 << 20
+
+// loadDiffContent reads both sides and builds the comparison off the UI
+// goroutine. The load carries a generation so a slow earlier load cannot
+// overwrite a newer one, and closing the view cancels it.
 func (m *Model) loadDiffContent(node *model.TreeNode) tea.Cmd {
-	left := m.left
-	right := m.right
-	relPath := node.RelPath
-	hasLeft := node.Left != nil
-	hasRight := node.Right != nil
+	m.closeDiffLoad()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.diffCancel = cancel
+	m.diffGen++
+	gen := m.diffGen
+	left, right, relPath := m.left, m.right, node.RelPath
+	hasLeft, hasRight := node.Left != nil, node.Right != nil
 	return func() tea.Msg {
-		ctx := context.Background()
 		var leftData, rightData []byte
 		var err error
-
 		if hasLeft {
-			leftData, err = readAll(ctx, left, relPath)
-			if err != nil {
-				return diffLoadDoneMsg{err: fmt.Errorf("left: %w", err)}
-			}
+			leftData, err = readCapped(ctx, left, "left", relPath)
 		}
-		if hasRight {
-			rightData, err = readAll(ctx, right, relPath)
-			if err != nil {
-				return diffLoadDoneMsg{err: fmt.Errorf("right: %w", err)}
-			}
+		if err == nil && hasRight {
+			rightData, err = readCapped(ctx, right, "right", relPath)
 		}
-		return diffLoadDoneMsg{left: leftData, right: rightData}
+		if err != nil {
+			return diffLoadDoneMsg{gen: gen, err: err}
+		}
+		return diffLoadDoneMsg{gen: gen, content: buildDiffContent(leftData, rightData)}
 	}
 }
 
-func readAll(ctx context.Context, backend model.Backend, relPath string) ([]byte, error) {
+func (m *Model) closeDiffLoad() {
+	if m.diffCancel != nil {
+		m.diffCancel()
+		m.diffCancel = nil
+	}
+}
+
+func (m *Model) closeDiff() {
+	m.closeDiffLoad()
+	m.diffView.Close()
+}
+
+// readCapped reads a whole file for the diff view, refusing anything past
+// diffMaxBytes rather than pulling gigabytes into memory.
+func readCapped(ctx context.Context, backend model.Backend, side, relPath string) ([]byte, error) {
 	rc, err := backend.Open(ctx, relPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", side, err)
 	}
 	defer rc.Close()
-	return io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(&cancelReadCloser{rc: rc, ctx: ctx}, diffMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", side, err)
+	}
+	if len(data) > diffMaxBytes {
+		return nil, fmt.Errorf("%s: larger than %s, too big for the diff view", side, model.FormatSize(diffMaxBytes))
+	}
+	return data, nil
 }
 
 func (m *Model) adjustCopyParallel(delta int) {
