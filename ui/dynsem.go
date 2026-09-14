@@ -25,6 +25,9 @@ func newDynSem(n int) *dynSem {
 
 func (s *dynSem) Acquire(ctx context.Context) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		s.mu.Lock()
 		if s.held < s.cap {
 			s.held++

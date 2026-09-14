@@ -107,6 +107,7 @@ func formatElapsed(d time.Duration) string {
 // transfer is running through a single batch session.
 type CopyPopupData struct {
 	LeftToRight        bool
+	Listing            bool
 	DoneFiles          int64
 	FailedFiles        int64
 	TotalFiles         int64
@@ -171,6 +172,9 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	}
 
 	header := fmt.Sprintf("COPY  %d/%d files", d.DoneFiles, d.TotalFiles)
+	if d.Listing {
+		header = "COPY  listing subtree…"
+	}
 	if d.FailedFiles > 0 {
 		header += fmt.Sprintf("  %d FAILED", d.FailedFiles)
 	}

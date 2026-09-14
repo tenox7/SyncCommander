@@ -87,6 +87,7 @@ type CopyProgress struct {
 	FileStartBytes     atomic.Int64
 	FileStartBaseBytes atomic.Int64
 	LeftToRight        atomic.Bool
+	Listing            atomic.Bool // enumerating an unlisted subtree before the first file moves
 	Cancel             atomic.Pointer[cancelFn]
 	Sem                atomic.Pointer[dynSem]
 
@@ -104,6 +105,22 @@ type ProgressSlot struct {
 	BaseBytes atomic.Int64
 	Start     atomic.Int64
 	Active    atomic.Bool
+}
+
+// Reset rearms every counter for a new transfer, so the popup never shows the
+// previous copy's numbers while the subtree is still being listed.
+func (p *CopyProgress) Reset(parallel, slots int, leftToRight bool) {
+	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.InFlight, &p.Bytes, &p.BaseBytes,
+		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStart, &p.FileStartBytes, &p.FileStartBaseBytes} {
+		c.Store(0)
+	}
+	p.Parallel.Store(int64(parallel))
+	p.Batched.Store(false)
+	p.Listing.Store(false)
+	p.LeftToRight.Store(leftToRight)
+	p.File.Store("")
+	p.Start.Store(time.Now().UnixNano())
+	p.ResetSlots(slots)
 }
 
 func (p *CopyProgress) ResetSlots(n int) {
@@ -1192,8 +1209,8 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	batchEnabled, verifyResume := m.batchTransfer, m.verifyResume
 	baseCtx, cancel := context.WithCancel(context.Background())
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
+	progress.Reset(parallel, parallelMax, leftToRight)
 	progress.Cancel.Store(&cancelFn{f: cancel})
-	progress.Failed.Store(0)
 	nodeIsDir := node.IsDir
 	var nodeRel string
 	m.readTree(func(*model.TreeNode) { nodeRel = node.RelPath })
@@ -1204,7 +1221,10 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		// Copy and mirror-delete enumerate the in-memory tree, which shows an
 		// unlisted dir as empty. List the whole subtree first or the copy
 		// silently skips it and mirror under-counts what to delete.
-		if nodeIsDir && !scanner.EnsureSubtreeListed(ctx, node, opts) {
+		progress.Listing.Store(true)
+		listed := !nodeIsDir || scanner.EnsureSubtreeListed(ctx, node, opts)
+		progress.Listing.Store(false)
+		if !listed {
 			transport.Log.Add("copy", "ERR", "aborted "+nodeRel+": subtree could not be fully listed")
 			return copyDoneMsg{}
 		}
@@ -1269,22 +1289,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 
 		progress.Total.Store(int64(len(files)))
 		progress.TotalBytes.Store(totalBytes)
-		progress.Done.Store(0)
-		progress.InFlight.Store(0)
-		progress.Parallel.Store(int64(parallel))
-		progress.Batched.Store(false)
-		progress.Bytes.Store(0)
-		progress.BaseBytes.Store(0)
-		progress.CompletedBytes.Store(0)
-		progress.CompletedBaseBytes.Store(0)
 		progress.Start.Store(time.Now().UnixNano())
-		progress.LeftToRight.Store(leftToRight)
-		progress.File.Store("")
-		progress.FileSize.Store(0)
-		progress.FileStartBytes.Store(0)
-		progress.FileStartBaseBytes.Store(0)
-		progress.FileStart.Store(0)
-		progress.ResetSlots(parallelMax)
 
 		dstChanged := make(map[string]bool)
 		changedDir := ""
@@ -2483,6 +2488,7 @@ func (m *Model) View() string {
 		}
 		popup := RenderCopyPopup(CopyPopupData{
 			LeftToRight:        m.copyProgress.LeftToRight.Load(),
+			Listing:            m.copyProgress.Listing.Load(),
 			DoneFiles:          m.copyProgress.Done.Load(),
 			FailedFiles:        m.copyProgress.Failed.Load(),
 			TotalFiles:         m.copyProgress.Total.Load(),
