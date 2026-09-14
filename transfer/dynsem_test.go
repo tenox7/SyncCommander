@@ -1,4 +1,4 @@
-package ui
+package transfer
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 func TestDynSemBasicAcquireRelease(t *testing.T) {
-	s := newDynSem(2)
+	s := NewDynSem(2)
 	ctx := context.Background()
 	if err := s.Acquire(ctx); err != nil {
 		t.Fatalf("acquire 1: %v", err)
@@ -38,7 +38,7 @@ func TestDynSemBasicAcquireRelease(t *testing.T) {
 }
 
 func TestDynSemResizeUpUnblocks(t *testing.T) {
-	s := newDynSem(1)
+	s := NewDynSem(1)
 	ctx := context.Background()
 	_ = s.Acquire(ctx)
 
@@ -62,7 +62,7 @@ func TestDynSemResizeUpUnblocks(t *testing.T) {
 }
 
 func TestDynSemResizeDownNoPreemption(t *testing.T) {
-	s := newDynSem(4)
+	s := NewDynSem(4)
 	ctx := context.Background()
 	for i := 0; i < 4; i++ {
 		_ = s.Acquire(ctx)
@@ -96,7 +96,7 @@ func TestDynSemResizeDownNoPreemption(t *testing.T) {
 }
 
 func TestDynSemAcquireCtxCancel(t *testing.T) {
-	s := newDynSem(1)
+	s := NewDynSem(1)
 	_ = s.Acquire(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,7 +115,7 @@ func TestDynSemAcquireCtxCancel(t *testing.T) {
 }
 
 func TestDynSemConcurrentResize(t *testing.T) {
-	s := newDynSem(2)
+	s := NewDynSem(2)
 	ctx := context.Background()
 	var inFlight int64
 	var maxSeen int64

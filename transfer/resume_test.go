@@ -1,4 +1,4 @@
-package ui
+package transfer
 
 import (
 	"context"

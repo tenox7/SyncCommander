@@ -2,15 +2,11 @@ package ui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"sc/model"
+	"sc/transfer"
 	"sc/transport"
 )
 
@@ -69,154 +66,6 @@ type copyDoneMsg struct {
 
 type cancelFn struct{ f context.CancelFunc }
 
-type CopyProgress struct {
-	Total              atomic.Int64
-	Done               atomic.Int64
-	Failed             atomic.Int64
-	InFlight           atomic.Int64
-	Parallel           atomic.Int64
-	Batched            atomic.Bool
-	Bytes              atomic.Int64
-	BaseBytes          atomic.Int64
-	CompletedBytes     atomic.Int64
-	CompletedBaseBytes atomic.Int64
-	TotalBytes         atomic.Int64
-	Start              atomic.Int64
-	File               atomic.Value
-	FileSize           atomic.Int64
-	FileStart          atomic.Int64
-	FileStartBytes     atomic.Int64
-	FileStartBaseBytes atomic.Int64
-	LeftToRight        atomic.Bool
-	Listing            atomic.Bool // enumerating an unlisted subtree before the first file moves
-	Cancel             atomic.Pointer[cancelFn]
-	Sem                atomic.Pointer[dynSem]
-
-	slotsMu sync.RWMutex
-	slots   []*ProgressSlot
-}
-
-// ProgressSlot tracks one in-flight file copy for the multi-slot copy popup.
-// Each parallel goroutine in copyOne claims a slot at start and releases it
-// at end. The transport writes byte deltas into Bytes via the context counter.
-type ProgressSlot struct {
-	File      atomic.Value
-	Size      atomic.Int64
-	Bytes     atomic.Int64
-	BaseBytes atomic.Int64
-	Start     atomic.Int64
-	Active    atomic.Bool
-}
-
-// Reset rearms every counter for a new transfer, so the popup never shows the
-// previous copy's numbers while the subtree is still being listed.
-func (p *CopyProgress) Reset(parallel, slots int, leftToRight bool) {
-	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.InFlight, &p.Bytes, &p.BaseBytes,
-		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStart, &p.FileStartBytes, &p.FileStartBaseBytes} {
-		c.Store(0)
-	}
-	p.Parallel.Store(int64(parallel))
-	p.Batched.Store(false)
-	p.Listing.Store(false)
-	p.LeftToRight.Store(leftToRight)
-	p.File.Store("")
-	p.Start.Store(time.Now().UnixNano())
-	p.ResetSlots(slots)
-}
-
-func (p *CopyProgress) ResetSlots(n int) {
-	p.slotsMu.Lock()
-	defer p.slotsMu.Unlock()
-	p.slots = make([]*ProgressSlot, n)
-	for i := range p.slots {
-		p.slots[i] = &ProgressSlot{}
-	}
-}
-
-func (p *CopyProgress) ClaimSlot() *ProgressSlot {
-	p.slotsMu.RLock()
-	defer p.slotsMu.RUnlock()
-	for _, s := range p.slots {
-		if s.Active.CompareAndSwap(false, true) {
-			s.File.Store("")
-			s.Size.Store(0)
-			s.Bytes.Store(0)
-			s.BaseBytes.Store(0)
-			s.Start.Store(0)
-			return s
-		}
-	}
-	return nil
-}
-
-func (p *CopyProgress) ReleaseSlot(s *ProgressSlot) {
-	if s == nil {
-		return
-	}
-	p.CompletedBytes.Add(s.Bytes.Load())
-	p.CompletedBaseBytes.Add(s.BaseBytes.Load())
-	s.Active.Store(false)
-}
-
-func (p *CopyProgress) SnapshotSlots() []SlotSnapshot {
-	p.slotsMu.RLock()
-	defer p.slotsMu.RUnlock()
-	out := make([]SlotSnapshot, 0, len(p.slots))
-	for _, s := range p.slots {
-		if !s.Active.Load() {
-			continue
-		}
-		file, _ := s.File.Load().(string)
-		out = append(out, SlotSnapshot{
-			File:      file,
-			Size:      s.Size.Load(),
-			Bytes:     s.Bytes.Load(),
-			BaseBytes: s.BaseBytes.Load(),
-			Start:     s.Start.Load(),
-		})
-	}
-	return out
-}
-
-type SlotSnapshot struct {
-	File      string
-	Size      int64
-	Bytes     int64
-	BaseBytes int64
-	Start     int64
-}
-
-// SyncTotals refreshes Bytes/BaseBytes to be the sum of completed bytes plus
-// the in-flight slot counters. The status bar reads progress.Bytes directly;
-// per-slot writers update only their slot, so without this the status bar
-// counter would freeze during parallel copies. Skip during batch mode —
-// batch writes Bytes directly and has no slots to sum from.
-func (p *CopyProgress) SyncTotals() {
-	if p.Batched.Load() {
-		return
-	}
-	bytes := p.CompletedBytes.Load()
-	base := p.CompletedBaseBytes.Load()
-	p.slotsMu.RLock()
-	for _, s := range p.slots {
-		if !s.Active.Load() {
-			continue
-		}
-		bytes += s.Bytes.Load()
-		base += s.BaseBytes.Load()
-	}
-	p.slotsMu.RUnlock()
-	p.Bytes.Store(bytes)
-	p.BaseBytes.Store(base)
-}
-
-func (p *CopyProgress) BeginFile(size int64) {
-	p.FileSize.Store(size)
-	p.FileStartBytes.Store(p.Bytes.Load())
-	p.FileStartBaseBytes.Store(p.BaseBytes.Load())
-	p.FileStart.Store(time.Now().UnixNano())
-}
-
 type DeleteProgress struct {
 	Total  atomic.Int64
 	Done   atomic.Int64
@@ -246,7 +95,7 @@ type Model struct {
 	pendingRescan  *rescanReq
 	deleting       bool
 	copying        bool
-	copyProgress   *CopyProgress
+	copyProgress   *transfer.Progress
 	deleteProgress *DeleteProgress
 	cmpOpts        *model.CompareOpts
 	width          int
@@ -310,7 +159,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		logView:        NewLogDialog(),
 		diffView:       NewDiffView(),
 		openDlg:        NewOpenDialog(),
-		copyProgress:   &CopyProgress{},
+		copyProgress:   &transfer.Progress{},
 		deleteProgress: &DeleteProgress{},
 		insecure:       insecure,
 		tickActive:     true,
@@ -412,7 +261,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case copyDoneMsg:
 		m.copying = false
 		if c := m.copyProgress.Cancel.Swap(nil); c != nil {
-			c.f()
+			(*c)()
 		}
 		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTreeNow()
@@ -437,7 +286,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		if c := m.copyProgress.Cancel.Swap(nil); c != nil {
-			c.f()
+			(*c)()
 		}
 		if c := m.deleteProgress.Cancel.Swap(nil); c != nil {
 			c.f()
@@ -500,7 +349,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "x", "X":
 			if c := m.copyProgress.Cancel.Load(); c != nil {
 				transport.Log.Add("copy", "<<<", "user canceled transfer")
-				c.f()
+				(*c)()
 			}
 		case "~", "`":
 			m.logView.Open()
@@ -842,7 +691,8 @@ func readCapped(ctx context.Context, backend model.Backend, side, relPath string
 		return nil, fmt.Errorf("%s: %w", side, err)
 	}
 	defer rc.Close()
-	data, err := io.ReadAll(io.LimitReader(&cancelReadCloser{rc: rc, ctx: ctx}, diffMaxBytes+1))
+	defer transport.CancelCloser(ctx, rc)()
+	data, err := io.ReadAll(io.LimitReader(rc, diffMaxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", side, err)
 	}
@@ -1203,708 +1053,31 @@ func removeOne(ctx context.Context, backend model.Backend, relPath string, isDir
 	return backend.Remove(ctx, relPath)
 }
 
-// copyItem and treeEntry are the snapshots a copy works from: the live tree is
-// only readable under the scanner's lock, which a transfer cannot hold. Entry
-// pointers are safe to keep — a rescan swaps a node's entry for a new one
-// rather than rewriting the old.
-type copyItem struct {
-	relPath  string
-	src, dst *model.FileEntry
-}
-
-type treeEntry struct {
-	relPath string
-	isDir   bool
-}
-
-func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) tea.Cmd {
-	left := m.left
-	right := m.right
-	scanner := m.scanner
-	opts := *m.cmpOpts
-	progress := m.copyProgress
+// copyNode hands the transfer engine a snapshot of what it needs and reports
+// back with the rescan root and the changed paths.
+func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd {
+	var relPath string
+	m.readTree(func(*model.TreeNode) { relPath = node.RelPath })
+	src, dst := m.left, m.right
+	if !leftToRight {
+		src, dst = m.right, m.left
+	}
 	parallel := max(m.copyParallel, 1)
-	parallelMax := max(m.parallelMax, parallel)
-	batchEnabled, verifyResume := m.batchTransfer, m.verifyResume
-	baseCtx, cancel := context.WithCancel(context.Background())
-	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
-	progress.Reset(parallel, parallelMax, leftToRight)
-	progress.Cancel.Store(&cancelFn{f: cancel})
-	nodeIsDir := node.IsDir
-	var nodeRel string
-	m.readTree(func(*model.TreeNode) { nodeRel = node.RelPath })
+	req := transfer.Request{
+		Src: src, Dst: dst, Scanner: m.scanner, Node: node, RelPath: relPath,
+		LeftToRight: leftToRight, Mirror: mirror, Opts: *m.cmpOpts,
+		Parallel: parallel, ParallelMax: max(m.parallelMax, parallel),
+		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = transport.ContextWithFatalCancel(ctx, cancel)
+	m.copyProgress.Reset(parallel, req.ParallelMax, leftToRight)
+	m.copyProgress.Cancel.Store(&cancel)
 	return func() tea.Msg {
-		ctx := transport.ContextWithProgress(baseCtx, &progress.Bytes)
-		ctx = transport.ContextWithBaseProgress(ctx, &progress.BaseBytes)
-
-		// Copy and mirror-delete enumerate the in-memory tree, which shows an
-		// unlisted dir as empty. List the whole subtree first or the copy
-		// silently skips it and mirror under-counts what to delete.
-		progress.Listing.Store(true)
-		listed := !nodeIsDir || scanner.EnsureSubtreeListed(ctx, node, opts)
-		progress.Listing.Store(false)
-		if !listed {
-			transport.Log.Add("copy", "ERR", "aborted "+nodeRel+": subtree could not be fully listed")
-			return copyDoneMsg{}
-		}
-
-		var dstBackend model.Backend
-		if leftToRight {
-			dstBackend = right
-		} else {
-			dstBackend = left
-		}
-		// A copy outlives any lock it could sensibly hold, so both enumerations
-		// snapshot what they need from the live tree in one locked pass and the
-		// transfer below never touches a node again.
-		var collisions []treeEntry
-		var files []copyItem
-		var totalBytes int64
-		scanner.ReadTree(func(*model.TreeNode) {
-			for _, c := range model.CollectTypeCollisions(node, leftToRight) {
-				dstEntry := c.Right
-				if !leftToRight {
-					dstEntry = c.Left
-				}
-				if dstEntry == nil {
-					continue
-				}
-				collisions = append(collisions, treeEntry{relPath: c.RelPath, isDir: dstEntry.IsDir})
-			}
-			nodes := []*model.TreeNode{node}
-			if nodeIsDir {
-				nodes = model.CollectCopyFiles(node, &opts, leftToRight)
-			}
-			files = make([]copyItem, 0, len(nodes))
-			for _, f := range nodes {
-				it := copyItem{relPath: f.RelPath, src: f.Left, dst: f.Right}
-				if !leftToRight {
-					it.src, it.dst = f.Right, f.Left
-				}
-				if it.src != nil {
-					totalBytes += it.src.Size
-				}
-				files = append(files, it)
-			}
-		})
-
-		for _, c := range collisions {
-			if ctx.Err() != nil {
-				break
-			}
-			var err error
-			if c.isDir {
-				err = dstBackend.RemoveAll(ctx, c.relPath)
-			} else {
-				err = dstBackend.Remove(ctx, c.relPath)
-			}
-			if err != nil {
-				progress.Failed.Add(1)
-				transport.Log.Add("copy", "ERR", "type-collision cleanup "+c.relPath+": "+err.Error())
-			} else {
-				transport.Log.Add("copy", "<<<", "type-collision cleanup "+c.relPath)
-			}
-		}
-
-		progress.Total.Store(int64(len(files)))
-		progress.TotalBytes.Store(totalBytes)
-		progress.Start.Store(time.Now().UnixNano())
-
-		dstChanged := make(map[string]bool)
-		changedDir := ""
-		var changedMu sync.Mutex
-		markChanged := func(relPath string) {
-			changedMu.Lock()
-			dstChanged[relPath] = true
-			changedMu.Unlock()
-		}
-
-		srcBackend := left
-		if !leftToRight {
-			srcBackend = right
-		}
-		batched := false
-		if batchEnabled && nodeIsDir {
-			if bs, ok := dstBackend.(model.BatchSender); ok {
-				if lp, ok := srcBackend.(model.LocalFS); ok {
-					srcRoot := lp.LocalPath("")
-					srcSubtree := filepath.Join(srcRoot, nodeRel)
-					var batchFiles, batchBytes int64
-					_ = filepath.WalkDir(srcSubtree, func(_ string, d fs.DirEntry, werr error) error {
-						if werr != nil || d.IsDir() {
-							return nil
-						}
-						info, ierr := d.Info()
-						if ierr != nil {
-							return nil
-						}
-						batchFiles++
-						batchBytes += info.Size()
-						return nil
-					})
-					if batchFiles > 0 {
-						progress.Total.Store(batchFiles)
-						progress.TotalBytes.Store(batchBytes)
-						progress.InFlight.Store(1)
-						progress.Parallel.Store(1)
-						progress.Batched.Store(true)
-						transport.Log.Add("copy", ">>>", fmt.Sprintf("BATCH %s (%d files, %s)", nodeRel, batchFiles, model.FormatSize(batchBytes)))
-						bctx := transport.ContextWithFileSize(ctx, batchBytes)
-						err := bs.SendLocalTree(bctx, srcRoot, nodeRel, func(name string) {
-							progress.File.Store(name)
-							if d := progress.Done.Load(); d < progress.Total.Load() {
-								progress.Done.Add(1)
-							}
-						})
-						progress.InFlight.Store(0)
-						if err == nil {
-							progress.Done.Store(progress.Total.Load())
-							progress.CompletedBytes.Store(progress.Bytes.Load())
-							progress.CompletedBaseBytes.Store(progress.BaseBytes.Load())
-							// Batch rewrites every file in the subtree, not just
-							// the diff set, so invalidate cached CRC for the whole
-							// subtree rather than the diff paths alone.
-							changedDir = nodeRel
-							batched = true
-							transport.Log.Add("copy", "<<<", "BATCH "+nodeRel+" OK")
-						} else {
-							if !errors.Is(err, transport.ErrUnsupported) {
-								transport.Log.Add("copy", "ERR", "BATCH "+nodeRel+": "+err.Error())
-							}
-							progress.Total.Store(int64(len(files)))
-							progress.TotalBytes.Store(totalBytes)
-							progress.Done.Store(0)
-							progress.Bytes.Store(0)
-							progress.CompletedBytes.Store(0)
-							progress.CompletedBaseBytes.Store(0)
-						}
-						progress.Batched.Store(false)
-					}
-				}
-			}
-		}
-
-		if parallel > 1 && !batched {
-			transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", parallel))
-		}
-		sem := newDynSem(parallel)
-		progress.Sem.Store(sem)
-		defer progress.Sem.Store(nil)
-		var wg sync.WaitGroup
-
-		copyOne := func(f copyItem) {
-			src, dst := left, right
-			if !leftToRight {
-				src, dst = right, left
-			}
-			srcEntry, dstEntry := f.src, f.dst
-			if srcEntry == nil {
-				progress.Done.Add(1)
-				return
-			}
-			if srcEntry.IsDir {
-				progress.File.Store(f.relPath)
-				progress.BeginFile(0)
-				if err := dst.Mkdir(ctx, f.relPath, srcEntry.Mode); err != nil {
-					progress.Failed.Add(1)
-					transport.Log.Add("copy", "ERR", "mkdir "+f.relPath+": "+err.Error())
-				} else {
-					transport.Log.Add("copy", "<<<", "mkdir "+f.relPath)
-				}
-				progress.Done.Add(1)
-				return
-			}
-			if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
-				var clearErr error
-				if dstEntry.IsDir {
-					clearErr = dst.RemoveAll(ctx, f.relPath)
-				} else {
-					clearErr = dst.Remove(ctx, f.relPath)
-				}
-				if clearErr != nil {
-					progress.Failed.Add(1)
-					transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.relPath+": "+clearErr.Error())
-					progress.Done.Add(1)
-					return
-				}
-				transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.relPath)
-				dstEntry = nil
-			}
-			slot := progress.ClaimSlot()
-			defer progress.ReleaseSlot(slot)
-			if slot != nil {
-				slot.File.Store(f.relPath)
-				slot.Size.Store(srcEntry.Size)
-				slot.Start.Store(time.Now().UnixNano())
-			}
-			progress.File.Store(f.relPath)
-			progress.BeginFile(srcEntry.Size)
-			transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.relPath, model.FormatSize(srcEntry.Size)))
-
-			slotBytes := &progress.Bytes
-			slotBase := &progress.BaseBytes
-			if slot != nil {
-				slotBytes = &slot.Bytes
-				slotBase = &slot.BaseBytes
-			}
-			fileCtx := transport.ContextWithProgress(ctx, slotBytes)
-			fileCtx = transport.ContextWithBaseProgress(fileCtx, slotBase)
-			fileCtx = transport.ContextWithFileSize(fileCtx, srcEntry.Size)
-			fileCtx = transport.ContextWithModTime(fileCtx, srcEntry.ModTime)
-
-			verify := resumeVerifier(verifyResume, scanner, src, dst, f.relPath, srcEntry.Size)
-			setTimes := func() {
-				if err := dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
-					transport.Log.Add("copy", "ERR", "settimes "+f.relPath+": "+err.Error())
-				}
-			}
-
-			// Resume first when a partial dst body exists: append the missing
-			// tail rather than overwrite the whole file. tryResumeCopy
-			// self-gates (no-op for absent/full/oversized dst). The appended
-			// prefix is never read back, so verify checks it afterwards.
-			var resumeOK bool
-			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				resumeOK = tryResumeCopy(attemptCtx, src, dst, f.relPath, srcEntry, dstEntry, slotBytes, slotBase, verify)
-				return nil
-			})
-			if resumeOK {
-				setTimes()
-				markChanged(f.relPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK (resumed)")
-				progress.Done.Add(1)
-				return
-			}
-
-			var directOK bool
-			_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-				directOK = tryDirectTransfer(attemptCtx, src, dst, f.relPath, srcEntry)
-				return nil
-			})
-			if directOK {
-				setTimes()
-				markChanged(f.relPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK")
-				progress.Done.Add(1)
-				return
-			}
-
-			attempt := 0
-			err := transport.Retry(fileCtx, "copy", "copy "+f.relPath, func() error {
-				return transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
-					attempt++
-					if attempt > 1 {
-						offset := peekDstSize(attemptCtx, dst, f.relPath)
-						if offset > 0 && offset < srcEntry.Size {
-							err := resumeAttempt(attemptCtx, src, dst, f.relPath, srcEntry, offset, slotBytes, slotBase, verify)
-							if err == nil {
-								return nil
-							}
-							if !errors.Is(err, transport.ErrUnsupported) && !errors.Is(err, errResumeMismatch) {
-								return err
-							}
-						}
-					}
-					return fullCopyAttempt(attemptCtx, src, dst, f.relPath, srcEntry, slotBytes)
-				})
-			})
-			if err == nil {
-				setTimes()
-				markChanged(f.relPath)
-				transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK")
-			} else {
-				progress.Failed.Add(1)
-				transport.Log.Add("copy", "ERR", "COPY "+f.relPath+": "+err.Error())
-			}
-			progress.Done.Add(1)
-		}
-
-		if !batched {
-		dispatch:
-			for _, f := range files {
-				if err := sem.Acquire(ctx); err != nil {
-					break dispatch
-				}
-				wg.Add(1)
-				progress.InFlight.Add(1)
-				go func(f copyItem) {
-					defer wg.Done()
-					defer sem.Release()
-					defer progress.InFlight.Add(-1)
-					copyOne(f)
-				}(f)
-			}
-			wg.Wait()
-		}
-
-		var rescanRoot *model.TreeNode
-		if nodeIsDir {
-			// Mirror deletes destination-only files, so it must only run once
-			// every copy landed. A partial copy plus a full delete pass would
-			// destroy data the source still holds.
-			failed := progress.Failed.Load()
-			switch {
-			case !mirror:
-			case ctx.Err() != nil:
-				transport.Log.Add("copy", "ERR", "mirror delete skipped: copy canceled")
-			case failed > 0:
-				transport.Log.Add("copy", "ERR", fmt.Sprintf("mirror delete skipped: %d file(s) failed to copy", failed))
-			default:
-				delBackend := right
-				if !leftToRight {
-					delBackend = left
-				}
-				var deletes []treeEntry
-				scanner.ReadTree(func(*model.TreeNode) {
-					for _, d := range model.CollectMirrorDeletes(node, leftToRight) {
-						deletes = append(deletes, treeEntry{relPath: d.RelPath, isDir: d.IsDir})
-					}
-				})
-				for _, d := range deletes {
-					if ctx.Err() != nil {
-						break
-					}
-					var err error
-					if d.isDir {
-						err = delBackend.RemoveAll(ctx, d.relPath)
-					} else {
-						err = delBackend.Remove(ctx, d.relPath)
-					}
-					if err != nil {
-						transport.Log.Add("copy", "ERR", "mirror delete "+d.relPath+": "+err.Error())
-						continue
-					}
-					transport.Log.Add("copy", "<<<", "mirror delete "+d.relPath)
-				}
-			}
-			rescanRoot = node
-		} else {
-			rescanRoot = scanner.FindNearestDestNode(model.DirOf(nodeRel), leftToRight)
-		}
-		if failed := progress.Failed.Load(); failed > 0 {
-			transport.Log.Add("copy", "ERR", fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, progress.Total.Load()))
-		}
-		changed := &model.ChangedPaths{}
-		var changedDirs []string
-		if batched {
-			changedDirs = []string{changedDir}
-		}
-		if leftToRight {
-			changed.Right, changed.RightDirs = dstChanged, changedDirs
-		} else {
-			changed.Left, changed.LeftDirs = dstChanged, changedDirs
-		}
-		return copyDoneMsg{rescanRoot: rescanRoot, changed: changed}
+		res := transfer.Copy(ctx, req)
+		return copyDoneMsg{rescanRoot: res.RescanRoot, changed: res.Changed}
 	}
 }
-
-// tryDirectTransfer attempts a path-to-path transfer (e.g. rsync directly
-// between local filesystem and remote rsync daemon) when one side exposes a
-// LocalFS path and the other side supports a direct send/receive. This avoids
-// any intermediate tmp file and lets rsync do its own delta-sync resume
-// against whatever already exists at the destination. Returns true on success.
-func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry) bool {
-	// src is local-backed and dst can pull a local file directly. Backends
-	// implementing LocalSender self-credit progress.Bytes during the push and
-	// top up to fileSize on success — see RsyncSSHBackend/RsyncBackend
-	// SendLocalFile. Don't credit again here.
-	if lp, ok := src.(model.LocalFS); ok {
-		if r, ok2 := dst.(model.LocalSender); ok2 {
-			err := r.SendLocalFile(ctx, lp.LocalPath(relPath), relPath, srcEntry.Mode)
-			return err == nil
-		}
-	}
-	// dst is local-backed and src can push directly to a local path.
-	if lp, ok := dst.(model.LocalFS); ok {
-		if r, ok2 := src.(model.LocalReceiver); ok2 {
-			// RecvToLocalFile uses tailDirSize and credits counter as the
-			// destination grows, so no manual top-up here.
-			err := r.RecvToLocalFile(ctx, relPath, lp.LocalPath(relPath))
-			return err == nil
-		}
-	}
-	return false
-}
-
-// tryResumeCopy attempts to resume an interrupted upload by appending only the
-// missing tail of srcEntry onto an existing partial dst file. Returns true on
-// success; false if resume is not applicable, not supported by either backend,
-// or if any step fails (caller should fall back to a full overwrite copy).
-//
-// On success the global Bytes counter ends up offset+(src.Size-offset) higher;
-// the offset portion is also tracked in BaseBytes so it doesn't inflate the
-// transfer-rate calculation. On failure any progress credited along the way is
-// rolled back so a fallback CopyFrom can re-credit the full source size
-// without double-counting.
-func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, bytes, baseBytes *atomic.Int64, verify func(context.Context) error) bool {
-	if dstEntry == nil || dstEntry.IsDir {
-		return false
-	}
-	if dstEntry.Size <= 0 || dstEntry.Size >= srcEntry.Size {
-		return false
-	}
-	if _, ok := dst.(model.Resumer); !ok {
-		return false
-	}
-	// The scan-time size goes stale as soon as anything else writes to dst, and
-	// appending at the wrong offset corrupts the file. Re-read it live; a dst
-	// that has since grown past srcEntry.Size (or vanished) falls back to a
-	// full copy.
-	offset := peekDstSize(ctx, dst, relPath)
-	if offset <= 0 || offset >= srcEntry.Size {
-		return false
-	}
-	return resumeAttempt(ctx, src, dst, relPath, srcEntry, offset, bytes, baseBytes, verify) == nil
-}
-
-// errResumeMismatch reports that a resumed file did not match the source after
-// the append. Callers treat it like ErrUnsupported: fall back to a full
-// overwrite copy rather than retrying the append.
-var errResumeMismatch = errors.New("resumed file does not match source")
-
-// resumeVerifier returns the post-append check for a resumed copy, or nil when
-// verification is off. Resume trusts whatever prefix already sits at the
-// destination — same size, different bytes produces a wrong file that otherwise
-// reports success — so compare both sides once the append lands.
-func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend, relPath string, size int64) func(context.Context) error {
-	if !enabled {
-		return nil
-	}
-	return func(ctx context.Context) error {
-		if got := peekDstSize(ctx, dst, relPath); got != size {
-			return fmt.Errorf("%w: %s (%d bytes at destination, source has %d)", errResumeMismatch, relPath, got, size)
-		}
-		// Without a shared algorithm the two sides would hash differently and
-		// every comparison would read as a mismatch; the size check above is
-		// all the verification available.
-		if !scanner.NegotiateChecksum() {
-			transport.Log.Add("copy", "ERR", "verify "+relPath+": no checksum algorithm shared by both sides, resumed content unverified")
-			return nil
-		}
-		srcSum, serr := src.Checksum(ctx, relPath)
-		dstSum, derr := dst.Checksum(ctx, relPath)
-		if serr != nil || derr != nil || srcSum == "" || dstSum == "" {
-			transport.Log.Add("copy", "ERR", "verify "+relPath+": checksum unavailable, resumed content unverified")
-			return nil
-		}
-		if srcSum != dstSum {
-			return fmt.Errorf("%w: %s (src %s, dst %s)", errResumeMismatch, relPath, srcSum, dstSum)
-		}
-		return nil
-	}
-}
-
-// peekDstSize returns the current size of relPath on dst, or 0 if it can't be
-// determined. Used between retry attempts to find how many bytes of a partial
-// upload survived so the next attempt can resume rather than restart.
-func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
-	parent := model.DirOf(relPath)
-	entries, err := dst.List(ctx, parent)
-	if err != nil {
-		return 0
-	}
-	name := path.Base(relPath)
-	for i := range entries {
-		if entries[i].Name == name && !entries[i].IsDir {
-			return entries[i].Size
-		}
-	}
-	return 0
-}
-
-// resumeAttempt resumes a partial upload by appending bytes from offset onward,
-// then runs verify (if any) against the finished file. Returns
-// transport.ErrUnsupported if dst can't append, errResumeMismatch if the
-// result doesn't match the source; on any error the progress credited during
-// the attempt is rolled back. The offset portion is also tracked in BaseBytes
-// so it doesn't inflate the transfer-rate calculation.
-func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context) error) error {
-	resumer, ok := dst.(model.Resumer)
-	if !ok {
-		return transport.ErrUnsupported
-	}
-	bytes.Add(offset)
-	baseBytes.Add(offset)
-	var added atomic.Int64
-	added.Store(offset)
-	opener := &trackedRangeOpener{
-		Backend:  src,
-		RelPath:  relPath,
-		FileSize: srcEntry.Size,
-		Ctx:      ctx,
-		Target:   bytes,
-		Added:    &added,
-	}
-	rollback := func() {
-		bytes.Add(-added.Load())
-		baseBytes.Add(-offset)
-	}
-	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
-		rollback()
-		return err
-	}
-	if verify == nil {
-		return nil
-	}
-	if err := verify(ctx); err != nil {
-		transport.Log.Add("copy", "ERR", err.Error()+" — recopying in full")
-		rollback()
-		return err
-	}
-	return nil
-}
-
-// fullCopyAttempt opens src from byte 0 and writes the whole file via CopyFrom.
-// On failure any progress credited during the attempt is rolled back.
-func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) error {
-	reader, err := src.Open(ctx, relPath)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	defer transport.CancelCloser(ctx, reader)()
-	dstOwnsProgress := false
-	if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
-		dstOwnsProgress = true
-	}
-	var added atomic.Int64
-	var srcReader io.Reader = reader
-	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
-		srcReader = &trackedReader{r: srcReader, target: counter, added: &added}
-	}
-	srcReader = &cancelReader{r: srcReader, ctx: ctx}
-	if err := dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode); err != nil {
-		counter.Add(-added.Load())
-		return err
-	}
-	return nil
-}
-
-// trackedRangeOpener implements model.RangeOpener for resume flows. OpenAt
-// wraps the returned reader so each tail byte read increments Target/Added.
-// Open (used by rsync-style backends that own their own progress accounting)
-// is left un-instrumented — those backends drive progress via
-// transport.progressFromContext during the rsync push.
-type trackedRangeOpener struct {
-	Backend  model.Backend
-	RelPath  string
-	FileSize int64
-	Ctx      context.Context
-	Target   *atomic.Int64
-	Added    *atomic.Int64
-}
-
-func (o *trackedRangeOpener) Size() int64 { return o.FileSize }
-
-func (o *trackedRangeOpener) LocalPath() string {
-	if lp, ok := o.Backend.(model.LocalFS); ok {
-		return lp.LocalPath(o.RelPath)
-	}
-	return ""
-}
-
-func (o *trackedRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
-	rd, err := o.Backend.Open(ctx, o.RelPath)
-	if err != nil {
-		return nil, err
-	}
-	return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
-}
-
-func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
-	var rd io.ReadCloser
-	if seeker, ok := o.Backend.(model.SeekableOpener); ok {
-		r, err := seeker.OpenAt(ctx, o.RelPath, offset)
-		if err != nil && !errors.Is(err, transport.ErrUnsupported) {
-			return nil, err
-		}
-		rd = r
-	}
-	if rd == nil {
-		r, err := o.Backend.Open(ctx, o.RelPath)
-		if err != nil {
-			return nil, err
-		}
-		if offset > 0 {
-			if _, err := io.CopyN(io.Discard, r, offset); err != nil {
-				r.Close()
-				return nil, err
-			}
-		}
-		rd = r
-	}
-	if transport.IsPreCounted(rd) {
-		return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
-	}
-	return &cancelReadCloser{
-		rc:  &trackedReadCloser{rc: rd, target: o.Target, added: o.Added},
-		ctx: o.Ctx,
-	}, nil
-}
-
-type trackedReadCloser struct {
-	rc     io.ReadCloser
-	target *atomic.Int64
-	added  *atomic.Int64
-}
-
-func (t *trackedReadCloser) Read(p []byte) (int, error) {
-	n, err := t.rc.Read(p)
-	if n > 0 {
-		t.target.Add(int64(n))
-		t.added.Add(int64(n))
-	}
-	return n, err
-}
-
-func (t *trackedReadCloser) Close() error      { return t.rc.Close() }
-func (t *trackedReadCloser) Unwrap() io.Reader { return t.rc }
-
-type cancelReadCloser struct {
-	rc  io.ReadCloser
-	ctx context.Context
-}
-
-func (c *cancelReadCloser) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return c.rc.Read(p)
-}
-
-func (c *cancelReadCloser) Close() error      { return c.rc.Close() }
-func (c *cancelReadCloser) Unwrap() io.Reader { return c.rc }
-
-type trackedReader struct {
-	r      io.Reader
-	target *atomic.Int64
-	added  *atomic.Int64
-}
-
-func (t *trackedReader) Read(p []byte) (int, error) {
-	n, err := t.r.Read(p)
-	if n > 0 {
-		t.target.Add(int64(n))
-		t.added.Add(int64(n))
-	}
-	return n, err
-}
-
-func (t *trackedReader) Unwrap() io.Reader { return t.r }
-
-type cancelReader struct {
-	r   io.Reader
-	ctx context.Context
-}
-
-func (c *cancelReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return c.r.Read(p)
-}
-
-func (c *cancelReader) Unwrap() io.Reader { return c.r }
 
 func (m *Model) openRename(node *model.TreeNode) {
 	var oldName string
