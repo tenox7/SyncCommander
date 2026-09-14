@@ -218,13 +218,12 @@ func (p *CopyProgress) BeginFile(size int64) {
 }
 
 type DeleteProgress struct {
-	Total       atomic.Int64
-	Done        atomic.Int64
-	File        atomic.Value
-	Side        atomic.Value
-	Start       atomic.Int64
-	Enumerating atomic.Bool
-	Cancel      atomic.Pointer[cancelFn]
+	Total  atomic.Int64
+	Done   atomic.Int64
+	File   atomic.Value
+	Side   atomic.Value
+	Start  atomic.Int64
+	Cancel atomic.Pointer[cancelFn]
 }
 
 type pendingCopyInfo struct {
@@ -361,9 +360,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
 		m.layoutPanels()
+		m.leftPanel.clampOffset()
+		m.rightPanel.clampOffset()
 		return m, nil
 	case tickMsg:
 		if !m.busy() {
@@ -450,7 +450,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.logView.IsOpen() {
 		switch msg.String() {
-		case "esc", "ctrl+c", "q", "~", "`":
+		case "esc", "q", "~", "`":
 			m.logView.Close()
 		case "up", "k":
 			m.logView.ScrollUp()
@@ -471,14 +471,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.info.IsOpen() {
 		switch msg.String() {
-		case "esc", "ctrl+c", "q", "i":
+		case "esc", "q", "i":
 			m.info.Close()
 		}
 		return m, nil
 	}
 	if m.help.IsOpen() {
 		switch msg.String() {
-		case "esc", "ctrl+c", "q", "?":
+		case "esc", "q", "?":
 			m.help.Close()
 		}
 		return m, nil
@@ -497,7 +497,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.copying {
 		switch msg.String() {
-		case "x", "X", "ctrl+c":
+		case "x", "X":
 			if c := m.copyProgress.Cancel.Load(); c != nil {
 				transport.Log.Add("copy", "<<<", "user canceled transfer")
 				c.f()
@@ -513,7 +513,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.deleting {
 		switch msg.String() {
-		case "x", "X", "ctrl+c":
+		case "x", "X":
 			if c := m.deleteProgress.Cancel.Load(); c != nil {
 				transport.Log.Add("delete", "<<<", "user canceled delete")
 				c.f()
@@ -658,35 +658,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openDelete(node)
 		}
 	case ">":
-		if m.copying {
-			break
-		}
-		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || m.presence(node) == model.PresenceRightOnly {
-			break
-		}
-		if lines, ok := m.copyConfirmLines(node, true); ok {
-			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: true}
-			m.confirm.Open("\u26a0 COPY LEFT \u2192 RIGHT", lines, true)
-			break
-		}
-		m.copying = true
-		return m, tea.Batch(m.copyNode(node, true, false), m.ensureTick())
+		return m, m.startCopy(true)
 	case "<":
-		if m.copying {
-			break
-		}
-		node := m.activePanel().CursorNode()
-		if node == nil || node.IsAttr || m.presence(node) == model.PresenceLeftOnly {
-			break
-		}
-		if lines, ok := m.copyConfirmLines(node, false); ok {
-			m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: false}
-			m.confirm.Open("\u26a0 COPY RIGHT \u2192 LEFT", lines, true)
-			break
-		}
-		m.copying = true
-		return m, tea.Batch(m.copyNode(node, false, false), m.ensureTick())
+		return m, m.startCopy(false)
 	case "=":
 		m.settings.Open()
 	case "S", "s":
@@ -705,12 +679,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		cl, cr := m.scanner.ChecksumInfo()
 		algo := m.scanner.ChecksumAlgo()
-		m.readTree(func(tree *model.TreeNode) {
-			if tree == nil {
-				return
-			}
-			m.info.Open(model.PropagateStatus(tree, m.cmpOpts), "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), algo, cl, cr)
-		})
+		m.refreshTreeNow()
+		if m.cachedStats != nil {
+			m.info.Open(*m.cachedStats, "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), algo, cl, cr)
+		}
 	case "y":
 		if m.copying || m.deleting {
 			break
@@ -773,6 +745,27 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// startCopy runs the cursor node in the given direction, asking first when the
+// copy would destroy anything on the destination.
+func (m *Model) startCopy(leftToRight bool) tea.Cmd {
+	node := m.activePanel().CursorNode()
+	blocked := model.PresenceRightOnly
+	title := "\u26a0 COPY LEFT \u2192 RIGHT"
+	if !leftToRight {
+		blocked, title = model.PresenceLeftOnly, "\u26a0 COPY RIGHT \u2192 LEFT"
+	}
+	if m.copying || node == nil || node.IsAttr || m.presence(node) == blocked {
+		return nil
+	}
+	if lines, ok := m.copyConfirmLines(node, leftToRight); ok {
+		m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight}
+		m.confirm.Open(title, lines, true)
+		return nil
+	}
+	m.copying = true
+	return tea.Batch(m.copyNode(node, leftToRight, false), m.ensureTick())
 }
 
 func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -884,7 +877,7 @@ func (m *Model) adjustCopyParallel(delta int) {
 
 func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c", "s", "q":
+	case "esc", "s", "q":
 		m.settings.Close()
 	case "up", "k":
 		m.settings.MoveUp()
@@ -902,7 +895,7 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c":
+	case "esc":
 		m.input.Close()
 	case "enter":
 		return m, m.input.Confirm()
@@ -964,7 +957,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 
 func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c":
+	case "esc":
 		m.openDlg.Close()
 	case "enter":
 		leftPath, rightPath := m.openDlg.Values()
@@ -996,7 +989,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			side = model.PresenceRightOnly
 		case "enter":
 			side = model.PresenceBoth
-		case "esc", "ctrl+c", "q":
+		case "esc", "q":
 			m.confirm.Close()
 			m.pendingDelete = nil
 			return m, nil
@@ -1028,7 +1021,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.copying = true
 			return m, tea.Batch(m.copyNode(pc.node, pc.leftToRight, true), m.ensureTick())
 		}
-	case "esc", "ctrl+c", "n", "N", "q":
+	case "esc", "n", "N", "q":
 		m.confirm.Close()
 		m.pendingDelete = nil
 		m.pendingCopy = nil
@@ -1103,14 +1096,7 @@ func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
 			m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)
 			return
 		}
-		files, dirs, complete := model.CountDescendants(node)
-		countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
-		if !complete {
-			countStr = fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
-		} else if files == 0 && dirs == 0 {
-			countStr = "empty folder"
-		}
-		m.confirm.Open("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr, sides}, true)
+		m.confirm.Open("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", describeSubtree(node), sides}, true)
 		return
 	}
 
@@ -1118,14 +1104,19 @@ func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
 		m.confirm.OpenChoice("Delete "+node.Name+"?", []string{""}, false)
 		return
 	}
+	m.confirm.OpenChoice("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", describeSubtree(node)}, true)
+}
+
+// describeSubtree summarises what a recursive delete would remove.
+func describeSubtree(node *model.TreeNode) string {
 	files, dirs, complete := model.CountDescendants(node)
-	countStr := fmt.Sprintf("%d files, %d folders", files, dirs)
-	if !complete {
-		countStr = fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
-	} else if files == 0 && dirs == 0 {
-		countStr = "empty folder"
+	switch {
+	case !complete:
+		return fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
+	case files == 0 && dirs == 0:
+		return "empty folder"
 	}
-	m.confirm.OpenChoice("\u26a0 RECURSIVE DELETE", []string{"", node.Name + "/", countStr}, true)
+	return fmt.Sprintf("%d files, %d folders", files, dirs)
 }
 
 func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
@@ -1156,7 +1147,6 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	progress.File.Store(relPath)
 	progress.Side.Store(sideLabel)
 	progress.Start.Store(time.Now().UnixNano())
-	progress.Enumerating.Store(false)
 
 	perSide := int64(files + dirs)
 	if isDir {
@@ -1923,6 +1913,10 @@ func (m *Model) openRename(node *model.TreeNode) {
 		if newName == "" || newName == oldName {
 			return nil
 		}
+		if strings.ContainsAny(newName, "/\\") {
+			transport.Log.Add("rename", "ERR", oldName+": a name cannot contain a path separator")
+			return nil
+		}
 		opts := *m.cmpOpts
 		var oldRel string
 		var presence model.Presence
@@ -2326,6 +2320,11 @@ func swapTreeData(node *model.TreeNode) {
 	node.LeftChecksum, node.RightChecksum = node.RightChecksum, node.LeftChecksum
 	node.LeftCksumSize, node.RightCksumSize = node.RightCksumSize, node.LeftCksumSize
 	node.LeftCksumModTime, node.RightCksumModTime = node.RightCksumModTime, node.LeftCksumModTime
+	node.LeftChecksumDone, node.RightChecksumDone = node.RightChecksumDone, node.LeftChecksumDone
+	node.LeftChecksumErr, node.RightChecksumErr = node.RightChecksumErr, node.LeftChecksumErr
+	node.ChecksumPendingLeft, node.ChecksumPendingRight = node.ChecksumPendingRight, node.ChecksumPendingLeft
+	node.ChecksumActiveLeft, node.ChecksumActiveRight = node.ChecksumActiveRight, node.ChecksumActiveLeft
+	node.ChecksumInFlightLeft, node.ChecksumInFlightRight = node.ChecksumInFlightRight, node.ChecksumInFlightLeft
 	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
 	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
 	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
@@ -2470,13 +2469,7 @@ func (m *Model) View() string {
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, bottomBar)
 
 	if m.copying {
-		popupW := 60
-		if max := m.width - 4; popupW > max {
-			popupW = max
-		}
-		if popupW < 24 {
-			popupW = 24
-		}
+		popupW := popupWidth(m.width)
 		file, _ := m.copyProgress.File.Load().(string)
 		batched := m.copyProgress.Batched.Load()
 		bytes := m.copyProgress.Bytes.Load()
@@ -2530,44 +2523,18 @@ func (m *Model) View() string {
 			TotalElapsed:       elapsed,
 			Spinner:            spinnerFrames[m.copySpinFrame],
 		}, popupW)
-		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
-		py := (m.height - strings.Count(popup, "\n") - 1) / 2
-		if px < 0 {
-			px = 0
-		}
-		if py < 0 {
-			py = 0
-		}
-		screen = overlayString(screen, popup, px, py)
+		screen = overlayCentered(screen, popup, m.width, m.height)
 	}
 
 	if m.deleting {
-		popupW := 60
-		if max := m.width - 4; popupW > max {
-			popupW = max
-		}
-		if popupW < 24 {
-			popupW = 24
-		}
 		file, _ := m.deleteProgress.File.Load().(string)
 		side, _ := m.deleteProgress.Side.Load().(string)
-		done := m.deleteProgress.Done.Load()
-		total := m.deleteProgress.Total.Load()
-		enumerating := m.deleteProgress.Enumerating.Load()
 		var elapsed time.Duration
 		if start := m.deleteProgress.Start.Load(); start > 0 {
 			elapsed = time.Since(time.Unix(0, start))
 		}
-		popup := RenderDeletePopup(file, side, done, total, enumerating, elapsed, popupW)
-		px := (m.width - lipgloss.Width(strings.Split(popup, "\n")[0])) / 2
-		py := (m.height - strings.Count(popup, "\n") - 1) / 2
-		if px < 0 {
-			px = 0
-		}
-		if py < 0 {
-			py = 0
-		}
-		screen = overlayString(screen, popup, px, py)
+		popup := RenderDeletePopup(file, side, m.deleteProgress.Done.Load(), m.deleteProgress.Total.Load(), elapsed, popupWidth(m.width))
+		screen = overlayCentered(screen, popup, m.width, m.height)
 	}
 
 	if m.diffView.IsOpen() {

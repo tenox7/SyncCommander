@@ -420,21 +420,6 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
 }
 
-func attrChar(label string, status model.AttrStatus) string {
-	switch status {
-	case model.AttrEqual:
-		return styleEqual.Render(label)
-	case model.AttrDifferent:
-		return styleDifferent.Render(label)
-	case model.AttrScanning:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render(label)
-	case model.AttrNA:
-		return styleUnknown.Render("-")
-	default:
-		return styleUnknown.Render(".")
-	}
-}
-
 func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 	switch node.Compare.Presence {
 	case model.PresenceLeftOnly, model.PresenceRightOnly:
@@ -454,49 +439,16 @@ func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 }
 
 func (p *Panel) nodeStyle(node *model.TreeNode) lipgloss.Style {
-	switch node.Compare.Presence {
-	case model.PresenceLeftOnly, model.PresenceRightOnly:
+	if node.Compare.Presence != model.PresenceBoth || node.Compare.Checksum == model.AttrDifferent {
 		return styleDifferent
 	}
-	if node.Compare.Checksum == model.AttrDifferent {
+	switch model.NodeStatus(node, p.cmpOpts) {
+	case model.AttrDifferent:
 		return styleDifferent
+	case model.AttrEqual:
+		return styleEqual
 	}
-	opts := p.cmpOpts
-	attrs := []model.AttrStatus{}
-	if opts != nil && opts.Size {
-		attrs = append(attrs, node.Compare.Size)
-	}
-	if opts != nil && opts.ModTime {
-		attrs = append(attrs, node.Compare.ModTime)
-	}
-	if opts != nil && opts.ATime {
-		attrs = append(attrs, node.Compare.ATime)
-	}
-	if opts != nil && opts.CTime {
-		attrs = append(attrs, node.Compare.CTime)
-	}
-	if opts != nil && opts.BTime {
-		attrs = append(attrs, node.Compare.BirthTime)
-	}
-	if opts != nil && opts.Mode {
-		attrs = append(attrs, node.Compare.Mode)
-	}
-	if opts != nil && opts.Checksum {
-		attrs = append(attrs, node.Compare.Checksum)
-	}
-	hasUnknown := false
-	for _, a := range attrs {
-		if a == model.AttrDifferent {
-			return styleDifferent
-		}
-		if a == model.AttrUnknown || a == model.AttrScanning {
-			hasUnknown = true
-		}
-	}
-	if hasUnknown || len(attrs) == 0 {
-		return styleUnknown
-	}
-	return styleEqual
+	return styleUnknown
 }
 
 // guideColumns writes the ancestor guide columns — bits [1, Depth) of the

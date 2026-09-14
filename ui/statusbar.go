@@ -26,76 +26,40 @@ var styleDeletePopup = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
-func RenderDeletePopup(file, side string, done, total int64, enumerating bool, elapsed time.Duration, width int) string {
-	inner := width - 4
-	if inner < 20 {
-		inner = 20
-	}
-
+func RenderDeletePopup(file, side string, done, total int64, elapsed time.Duration, width int) string {
+	inner := max(width-4, 20)
+	done = min(max(done, 0), max(total, 0))
 	pct := 0
 	if total > 0 {
-		if done > total {
-			done = total
-		}
 		pct = int(done * 100 / total)
 	}
-
-	name := file
-	if name == "" {
-		name = "—"
-	}
-	if lipgloss.Width(name) > inner {
-		name = ansi.Truncate(name, inner, "…")
-	}
-
 	barIndent := "  ✗ "
-	pctStrLen := 5
-	barWidth := inner - lipgloss.Width(barIndent) - pctStrLen
-	if barWidth < 5 {
-		barWidth = 5
+	barWidth := max(inner-lipgloss.Width(barIndent)-5, 5)
+	rows := []string{
+		fmt.Sprintf("DELETE %s  %d/%d items", side, done, total),
+		truncateName(file, inner),
+		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(done, total, barWidth), pct),
+		"Elapsed: " + formatHMS(int64(elapsed.Seconds())),
+		"X=cancel",
 	}
-
-	header := fmt.Sprintf("DELETE %s", side)
-	var line1 string
-	if enumerating {
-		line1 = fmt.Sprintf("%s  enumerating… %d found", header, total)
-	} else {
-		line1 = fmt.Sprintf("%s  %d/%d items", header, done, total)
-	}
-	line2 := name
-	var line3 string
-	if enumerating {
-		line3 = fmt.Sprintf("%s%s   --%%", barIndent, strings.Repeat("░", barWidth))
-	} else {
-		line3 = fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(done, total, barWidth), pct)
-	}
-	line4 := fmt.Sprintf("Elapsed: %s", formatElapsed(elapsed))
-	line5 := "X=cancel"
-
-	pad := func(s string) string {
-		if lipgloss.Width(s) > inner {
-			s = ansi.Truncate(s, inner, "…")
-		}
-		w := lipgloss.Width(s)
-		if w >= inner {
-			return s
-		}
-		return s + strings.Repeat(" ", inner-w)
-	}
-	body := pad(line1) + "\n" + pad(line2) + "\n" +
-		pad(line3) + "\n" + pad(line4) + "\n" +
-		pad(line5)
-	return styleDeletePopup.Width(width).Render(body)
+	return styleDeletePopup.Width(width).Render(padRows(rows, inner))
 }
 
-func formatElapsed(d time.Duration) string {
-	if d < 0 {
-		d = 0
+// padRows fits every row to exactly w cells and joins them.
+func padRows(rows []string, w int) string {
+	for i, r := range rows {
+		if lipgloss.Width(r) > w {
+			r = ansi.Truncate(r, w, "…")
+		}
+		rows[i] = r + strings.Repeat(" ", max(w-lipgloss.Width(r), 0))
 	}
-	secs := int64(d.Seconds())
-	h := secs / 3600
-	m := (secs % 3600) / 60
-	s := secs % 60
+	return strings.Join(rows, "\n")
+}
+
+// formatHMS renders seconds as m:ss, or h:mm:ss past an hour.
+func formatHMS(secs int64) string {
+	secs = max(secs, 0)
+	h, m, s := secs/3600, (secs%3600)/60, secs%60
 	if h > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
@@ -140,10 +104,7 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	if !d.LeftToRight {
 		arrow = "<"
 	}
-	inner := width - 4
-	if inner < 20 {
-		inner = 20
-	}
+	inner := max(width-4, 20)
 
 	totalPct := 0
 	if d.TotalBytes > 0 {
@@ -183,17 +144,6 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		header += "  [BATCH]"
 	case d.Parallel > 1:
 		header += fmt.Sprintf("  [%d/%d in flight]", d.InFlight, d.Parallel)
-	}
-
-	pad := func(s string) string {
-		if lipgloss.Width(s) > inner {
-			s = ansi.Truncate(s, inner, "…")
-		}
-		w := lipgloss.Width(s)
-		if w >= inner {
-			return s
-		}
-		return s + strings.Repeat(" ", inner-w)
 	}
 
 	var rows []string
@@ -238,7 +188,7 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			nameW = 8
 		}
 		barW := 10
-		if d.Slots != nil && len(d.Slots) == 0 {
+		if len(d.Slots) == 0 && !d.Listing {
 			rows = append(rows, "  (waiting…)")
 		}
 		for _, s := range d.Slots {
@@ -280,12 +230,7 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		"X=cancel",
 	)
 
-	var lines []string
-	for _, r := range rows {
-		lines = append(lines, pad(r))
-	}
-	body := strings.Join(lines, "\n")
-	return styleCopyPopup.Width(width).Render(body)
+	return styleCopyPopup.Width(width).Render(padRows(rows, inner))
 }
 
 func truncateName(s string, w int) string {
@@ -313,17 +258,17 @@ func formatETA(remaining int64, rate float64) string {
 	if remaining <= 0 || rate <= 0 {
 		return "--:--"
 	}
-	secs := int64(float64(remaining)/rate + 0.5)
-	if secs < 0 {
-		return "--:--"
-	}
-	h := secs / 3600
-	m := (secs % 3600) / 60
-	s := secs % 60
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%d:%02d", m, s)
+	return formatHMS(int64(float64(remaining)/rate + 0.5))
+}
+
+// popupWidth fits a popup to the terminal.
+func popupWidth(termWidth int) int { return max(min(60, termWidth-4), 24) }
+
+// overlayCentered draws popup over the middle of screen.
+func overlayCentered(screen, popup string, width, height int) string {
+	px := max((width-lipgloss.Width(strings.Split(popup, "\n")[0]))/2, 0)
+	py := max((height-strings.Count(popup, "\n")-1)/2, 0)
+	return overlayString(screen, popup, px, py)
 }
 
 func overlayString(base, popup string, x, y int) string {
@@ -359,10 +304,7 @@ func progressBar(done, total int64, barWidth int) string {
 	if total <= 0 {
 		return strings.Repeat("░", barWidth)
 	}
-	filled := int(done * int64(barWidth) / total)
-	if filled > barWidth {
-		filled = barWidth
-	}
+	filled := min(max(int(done*int64(barWidth)/total), 0), barWidth)
 	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 }
 
@@ -468,8 +410,6 @@ func RenderStatusBar(info StatusInfo, width int) string {
 			rate = " " + model.FormatRate(float64(realBytes)/info.Elapsed.Seconds())
 		}
 		details = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
-	case "READ":
-		details = fmt.Sprintf("READ: %s", model.FormatSize(info.BytesCopied))
 	case "DELETE":
 		details = fmt.Sprintf("DELETE: %d/%d items", info.FilesDone, info.FilesTotal)
 	case "IDLE":

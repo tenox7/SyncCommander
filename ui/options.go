@@ -171,18 +171,5 @@ func (d *SettingsDialog) View(width, height int) string {
 	sb.WriteString("\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Space=toggle  ←/→=adjust  Esc=close"))
 
-	dialog := styleDialogBorder.Render(sb.String())
-
-	dw := lipgloss.Width(dialog)
-	dh := lipgloss.Height(dialog)
-	x := (width - dw) / 2
-	y := (height - dh) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, dialog)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, styleDialogBorder.Render(sb.String()))
 }

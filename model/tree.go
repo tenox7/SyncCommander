@@ -491,7 +491,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 				node.SubtreeChecksumPending = 1
 			}
 		}
-		return nodeStatus(node, opts)
+		return NodeStatus(node, opts)
 	}
 	if !node.Listed {
 		node.ChildStatus = AttrUnknown
@@ -605,7 +605,9 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 	return result
 }
 
-func nodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
+// NodeStatus folds the attribute results opts enables into one status for a
+// file present on both sides.
+func NodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	if node.Compare.Presence != PresenceBoth {
 		return AttrDifferent
 	}
@@ -811,7 +813,7 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 		switch node.Compare.Presence {
 		case PresenceBoth:
 			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
-			if collision || nodeStatus(node, opts) != AttrEqual || node.Compare.Checksum == AttrDifferent {
+			if collision || NodeStatus(node, opts) != AttrEqual || node.Compare.Checksum == AttrDifferent {
 				*result = append(*result, node)
 			}
 		case PresenceLeftOnly:
@@ -1078,7 +1080,7 @@ func isDiffLeaf(n *TreeNode, opts *CompareOpts) bool {
 		return true
 	}
 	if !n.IsDir {
-		return nodeStatus(n, opts) == AttrDifferent
+		return NodeStatus(n, opts) == AttrDifferent
 	}
 	return false
 }
