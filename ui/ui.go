@@ -937,8 +937,7 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.openDlg.Close()
 	case "enter":
-		leftPath := m.openDlg.leftValue
-		rightPath := m.openDlg.rightValue
+		leftPath, rightPath := m.openDlg.Values()
 		if leftPath == "" || rightPath == "" {
 			m.openDlg.SetError("both paths are required")
 			return m, nil
