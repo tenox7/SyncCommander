@@ -74,22 +74,13 @@ func TestUIRaceAgainstScanner(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune{'t'}},
 	}
 
-	// Update returns Model from its own cases and *Model from handleKey.
-	pump := func(msg tea.Msg) {
-		next, _ := m.Update(msg)
-		if p, ok := next.(*Model); ok {
-			m = *p
-			return
-		}
-		m = next.(Model)
-	}
+	pump := func(msg tea.Msg) { m.Update(msg) }
 	for i := 0; ; i++ {
 		pump(tickMsg(time.Now()))
 		pump(keys[i%len(keys)])
 		_ = m.View()
 		select {
 		case <-scanned:
-			pump(scanDoneMsg{})
 			_ = m.View()
 			<-collected
 			return
@@ -107,7 +98,7 @@ func openBackendOrSkip(t *testing.T, path string) model.Backend {
 	return b
 }
 
-func newTestModel(t *testing.T, left, right model.Backend) Model {
+func newTestModel(t *testing.T, left, right model.Backend) *Model {
 	t.Helper()
 	m := NewModel(left, right, &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true}, false, true, 2, 8, false, false)
 	m.width, m.height = 120, 40

@@ -22,9 +22,32 @@ import (
 )
 
 type tickMsg time.Time
-type scanDoneMsg struct{}
-type rescanDoneMsg struct{}
-type checksumDoneMsg struct{}
+
+type opKind int
+
+const (
+	opScan opKind = iota
+	opChecksum
+)
+
+// scanOp is one running scanner operation. gen tells a late done message from
+// a cancelled predecessor apart from the current op, so a stale one can never
+// clear the flag that keeps the tick loop alive.
+type scanOp struct {
+	gen    uint64
+	cancel context.CancelFunc
+}
+
+type opDoneMsg struct {
+	kind opKind
+	gen  uint64
+}
+
+// rescanReq is a rescan that has to wait for the running scan to finish.
+type rescanReq struct {
+	node    *model.TreeNode
+	changed *model.ChangedPaths
+}
 type touchDoneMsg struct{}
 type diffLoadDoneMsg struct {
 	left, right []byte
@@ -198,10 +221,12 @@ type Model struct {
 	right          model.Backend
 	scanner        *model.Scanner
 	activeLeft     bool
-	scanning       bool
+	scan           *scanOp
+	cksum          *scanOp
+	opGen          uint64
+	pendingRescan  *rescanReq
 	deleting       bool
 	copying        bool
-	checksumming   bool
 	copyProgress   *CopyProgress
 	deleteProgress *DeleteProgress
 	cmpOpts        *model.CompareOpts
@@ -222,11 +247,11 @@ type Model struct {
 	openDlg        *OpenDialog
 	insecure       bool
 	deepScan       bool
-	copyParallel   *int
+	copyParallel   int
 	parallelMax    int
 	scanParallel   int
-	batchTransfer  *bool
-	verifyResume   *bool
+	batchTransfer  bool
+	verifyResume   bool
 	tickActive     bool
 	cachedStats    *TreeStats
 	statsRev       uint64
@@ -235,18 +260,12 @@ type Model struct {
 	lastFlatLen    int
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) Model {
-	model.LogFn = transport.Log.Add
-	if copyParallel < 1 {
-		copyParallel = 1
-	}
-	if scanParallel < 1 {
-		scanParallel = 1
-	}
+func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {
+	copyParallel, scanParallel = max(copyParallel, 1), max(scanParallel, 1)
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
 	rp := NewPanel(right.BasePath())
-	m := Model{
+	m := &Model{
 		leftPanel:      lp,
 		rightPanel:     rp,
 		left:           left,
@@ -255,11 +274,11 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
-		copyParallel:   &copyParallel,
+		copyParallel:   copyParallel,
 		parallelMax:    copyParallel,
 		scanParallel:   scanParallel,
-		batchTransfer:  &batchTransfer,
-		verifyResume:   &verifyResume,
+		batchTransfer:  batchTransfer,
+		verifyResume:   verifyResume,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
 		confirm:        NewConfirmDialog(),
@@ -271,7 +290,6 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		copyProgress:   &CopyProgress{},
 		deleteProgress: &DeleteProgress{},
 		insecure:       insecure,
-		scanning:       true,
 		tickActive:     true,
 	}
 	lp.cmpOpts = m.cmpOpts
@@ -287,20 +305,20 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},
 		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
 		{Label: "Ignore TZ/DST (hour-modulo)", Value: &m.cmpOpts.IgnoreTZDST},
-		{Label: "Batch rsync+ssh transfer", Value: m.batchTransfer},
-		{Label: "Verify resumed copies (checksum)", Value: m.verifyResume},
-		{Label: "Parallel copies", IntValue: m.copyParallel, IntMin: 1, IntMax: m.parallelMax},
+		{Label: "Batch rsync+ssh transfer", Value: &m.batchTransfer},
+		{Label: "Verify resumed copies (checksum)", Value: &m.verifyResume},
+		{Label: "Parallel copies", IntValue: &m.copyParallel, IntMin: 1, IntMax: m.parallelMax},
 		{Label: "Bandwidth limit in", GetRate: transport.BandwidthIn, SetRate: transport.SetBandwidthIn},
 		{Label: "Bandwidth limit out", GetRate: transport.BandwidthOut, SetRate: transport.SetBandwidthOut},
 	})
 	return m
 }
 
-func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.EnterAltScreen, m.tickCmd(), m.startScan())
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(m.tickCmd(), m.startScan())
 }
 
-func (m Model) tickCmd() tea.Cmd {
+func (m *Model) tickCmd() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
@@ -314,7 +332,7 @@ func (m *Model) ensureTick() tea.Cmd {
 	return m.tickCmd()
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -324,7 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layoutPanels()
 		return m, nil
 	case tickMsg:
-		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
+		if !m.busy() {
 			m.tickActive = false
 			return m, nil
 		}
@@ -345,26 +363,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTree()
 		return m, m.tickCmd()
-	case scanDoneMsg:
-		m.scanning = false
-		m.refreshTreeNow()
-		return m, nil
-	case rescanDoneMsg:
-		m.scanning = false
-		m.refreshTreeNow()
-		return m, nil
-	case checksumDoneMsg:
-		m.checksumming = false
-		m.refreshTreeNow()
-		return m, nil
+	case opDoneMsg:
+		return m, m.finishOp(msg)
 	case renameDoneMsg:
 		if msg.err != nil {
 			m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		}
 		m.refreshTreeNow()
-		if msg.rescan != nil && !m.scanning {
-			m.scanning = true
-			return m, tea.Batch(m.rescanNode(msg.rescan, nil), m.ensureTick())
+		if msg.rescan != nil {
+			return m, m.queueRescan(msg.rescan, nil)
 		}
 		return m, nil
 	case touchDoneMsg:
@@ -386,8 +393,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
 		m.refreshTreeNow()
 		if msg.rescanRoot != nil {
-			m.scanning = true
-			return m, tea.Batch(m.rescanNode(msg.rescanRoot, msg.changed), m.ensureTick())
+			return m, m.queueRescan(msg.rescanRoot, msg.changed)
 		}
 		return m, nil
 	case diffLoadDoneMsg:
@@ -409,7 +415,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if c := m.deleteProgress.Cancel.Swap(nil); c != nil {
 			c.f()
 		}
-		m.scanner.Cancel()
+		m.cancelOps()
 		return m, tea.Quit
 	}
 	if m.diffView.IsOpen() {
@@ -491,8 +497,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
-	case "q", "ctrl+c":
-		m.scanner.Cancel()
+	case "q":
+		m.cancelOps()
 		return m, tea.Quit
 	case "tab":
 		m.activeLeft = !m.activeLeft
@@ -514,7 +520,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		node := m.activePanel().CursorNode()
 		lazyList := false
 		m.mutateTree(func(*model.TreeNode) {
-			if node != nil && node.IsDir && !node.Listed && !m.scanning {
+			if node != nil && node.IsDir && !node.Listed && !m.scanning() {
 				node.Expanded = true
 				lazyList = true
 				return
@@ -522,8 +528,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.activePanel().Toggle()
 		})
 		if lazyList {
-			m.scanning = true
-			return m, tea.Batch(m.listNode(node), m.ensureTick())
+			return m, m.listNode(node)
 		}
 		m.refreshTree()
 	case "left", "h":
@@ -559,7 +564,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.refreshTree()
 		}
 	case "n":
-		if !m.scanning && !m.copying && !m.deleting && !m.checksumming {
+		if !m.busy() {
 			m.jumpToNextDiff()
 		}
 	case "/":
@@ -582,18 +587,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshTree()
 	case "r":
 		node := m.activePanel().CursorNode()
-		if node != nil && node.IsAttr {
+		if m.scanning() || (node != nil && node.IsAttr) {
 			break
 		}
-		m.scanning = true
-		return m, tea.Batch(m.rescanWithTopLevel(node), m.ensureTick())
+		return m, m.rescanWithTopLevel(node)
 	case "R":
 		tree := m.scanner.Tree()
-		if tree == nil {
+		if tree == nil || m.scanning() {
 			break
 		}
-		m.scanning = true
-		return m, tea.Batch(m.deepRescanNode(tree), m.ensureTick())
+		return m, m.deepRescanNode(tree)
 	case "t":
 		node := m.activePanel().CursorNode()
 		touch := false
@@ -604,7 +607,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.touchNode(node)
 		}
 	case "c":
-		if m.checksumming {
+		if m.checksumming() {
 			break
 		}
 		node := m.activePanel().CursorNode()
@@ -612,8 +615,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node = m.parentFileNode()
 		}
 		if node != nil {
-			m.checksumming = true
-			return m, tea.Batch(m.checksumNode(node), m.ensureTick())
+			return m, m.checksumNode(node)
 		}
 	case "e":
 		node := m.activePanel().CursorNode()
@@ -661,7 +663,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "=":
 		m.settings.Open()
 	case "S", "s":
-		if !m.scanning && !m.copying && !m.deleting {
+		if !m.scanning() && !m.copying && !m.deleting {
 			m.swapSides()
 		}
 	case "w":
@@ -811,7 +813,7 @@ func (m *Model) adjustCopyParallel(delta int) {
 	if m.copyProgress.Batched.Load() {
 		return
 	}
-	cur := *m.copyParallel
+	cur := m.copyParallel
 	next := cur + delta
 	if next < 1 {
 		next = 1
@@ -822,7 +824,7 @@ func (m *Model) adjustCopyParallel(delta int) {
 	if next == cur {
 		return
 	}
-	*m.copyParallel = next
+	m.copyParallel = next
 	m.copyProgress.Parallel.Store(int64(next))
 	if s := m.copyProgress.Sem.Load(); s != nil {
 		s.Resize(next)
@@ -865,13 +867,13 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	var err error
 
 	if leftPath != m.left.BasePath() {
-		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, *m.copyParallel)
+		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
 	if rightPath != m.right.BasePath() {
-		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, *m.copyParallel)
+		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
 		if err != nil {
 			if newLeft != nil {
 				transport.CloseBackend(newLeft)
@@ -880,7 +882,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 		}
 	}
 
-	m.scanner.Cancel()
+	m.cancelOps()
 
 	if newLeft != nil {
 		oldLeft := m.left
@@ -898,7 +900,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	m.rightPanel.title = m.right.BasePath()
 	m.leftPanel.SetNodes(nil)
 	m.rightPanel.SetNodes(nil)
-	return tea.Batch(m.startScan(), m.ensureTick()), ""
+	return m.startScan(), ""
 }
 
 func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1173,16 +1175,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 	scanner := m.scanner
 	opts := *m.cmpOpts
 	progress := m.copyProgress
-	parallel := *m.copyParallel
-	if parallel < 1 {
-		parallel = 1
-	}
-	parallelMax := m.parallelMax
-	if parallelMax < parallel {
-		parallelMax = parallel
-	}
-	batchEnabled := m.batchTransfer != nil && *m.batchTransfer
-	verifyResume := m.verifyResume != nil && *m.verifyResume
+	parallel := max(m.copyParallel, 1)
+	parallelMax := max(m.parallelMax, parallel)
+	batchEnabled, verifyResume := m.batchTransfer, m.verifyResume
 	baseCtx, cancel := context.WithCancel(context.Background())
 	baseCtx = transport.ContextWithFatalCancel(baseCtx, cancel)
 	progress.Cancel.Store(&cancelFn{f: cancel})
@@ -2079,76 +2074,120 @@ func (m *Model) syncPanels() {
 	dst.offset = src.offset
 }
 
-func (m *Model) startScan() tea.Cmd {
-	m.scanning = true
-	opts := *m.cmpOpts
-	scanner := m.scanner
-	return func() tea.Msg {
-		timeScan("dir scan", "/", func() {
-			scanner.Scan(context.Background(), opts)
-		})
-		return scanDoneMsg{}
+func (m *Model) scanning() bool     { return m.scan != nil }
+func (m *Model) checksumming() bool { return m.cksum != nil }
+
+// busy reports whether any background operation is live, which is what keeps
+// the tick loop running.
+func (m *Model) busy() bool {
+	return m.scanning() || m.checksumming() || m.copying || m.deleting
+}
+
+// startOp runs one scanner operation in the background under its own
+// cancellable context and reports back with the op's generation.
+func (m *Model) startOp(kind opKind, run func(ctx context.Context)) tea.Cmd {
+	m.opGen++
+	ctx, cancel := context.WithCancel(context.Background())
+	op := &scanOp{gen: m.opGen, cancel: cancel}
+	if kind == opChecksum {
+		m.cksum = op
+	} else {
+		m.scan = op
 	}
+	return tea.Batch(func() tea.Msg {
+		run(ctx)
+		return opDoneMsg{kind: kind, gen: op.gen}
+	}, m.ensureTick())
+}
+
+// finishOp clears the op a done message belongs to and ignores messages from
+// cancelled predecessors. A rescan queued behind the scan starts now.
+func (m *Model) finishOp(msg opDoneMsg) tea.Cmd {
+	slot := &m.scan
+	if msg.kind == opChecksum {
+		slot = &m.cksum
+	}
+	if *slot == nil || (*slot).gen != msg.gen {
+		return nil
+	}
+	(*slot).cancel()
+	*slot = nil
+	m.refreshTreeNow()
+	if msg.kind == opScan && m.pendingRescan != nil {
+		r := m.pendingRescan
+		m.pendingRescan = nil
+		return m.rescanNode(r.node, r.changed)
+	}
+	return nil
+}
+
+// queueRescan starts a rescan now, or once the running scan finishes. Two
+// pending rescans collapse into one of the whole tree.
+func (m *Model) queueRescan(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
+	if !m.scanning() {
+		return m.rescanNode(node, changed)
+	}
+	if m.pendingRescan != nil {
+		node, changed = m.scanner.Tree(), nil
+	}
+	m.pendingRescan = &rescanReq{node: node, changed: changed}
+	return nil
+}
+
+func (m *Model) cancelOps() {
+	for _, op := range []*scanOp{m.scan, m.cksum} {
+		if op != nil {
+			op.cancel()
+		}
+	}
+}
+
+func (m *Model) startScan() tea.Cmd {
+	opts, scanner := *m.cmpOpts, m.scanner
+	return m.startOp(opScan, func(ctx context.Context) {
+		timeScan("dir scan", "/", func() { scanner.Scan(ctx, opts) })
+	})
 }
 
 func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
 	scanner := m.scanner
-	return func() tea.Msg {
-		scanner.ChecksumNode(context.Background(), node)
-		return checksumDoneMsg{}
-	}
+	return m.startOp(opChecksum, func(ctx context.Context) { scanner.ChecksumNode(ctx, node) })
 }
 
 func (m *Model) rescanNode(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
-	opts := *m.cmpOpts
-	scanner := m.scanner
-	target := scanTargetLabel(node)
-	return func() tea.Msg {
-		timeScan("rescan", target, func() {
-			scanner.RescanNode(context.Background(), node, opts, changed)
-		})
-		return rescanDoneMsg{}
-	}
+	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
+	return m.startOp(opScan, func(ctx context.Context) {
+		timeScan("rescan", target, func() { scanner.RescanNode(ctx, node, opts, changed) })
+	})
 }
 
+// rescanWithTopLevel rescans the cursor node and re-lists the root, so new
+// top-level entries show up wherever the cursor sits.
 func (m *Model) rescanWithTopLevel(node *model.TreeNode) tea.Cmd {
-	opts := *m.cmpOpts
-	scanner := m.scanner
-	target := scanTargetLabel(node)
+	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
 	rescanCursor := node != nil && node.RelPath != ""
-	return func() tea.Msg {
+	return m.startOp(opScan, func(ctx context.Context) {
 		timeScan("rescan", target, func() {
 			if rescanCursor {
-				scanner.RescanNode(context.Background(), node, opts, nil)
+				scanner.RescanNode(ctx, node, opts, nil)
 			}
-			scanner.RefreshTopLevel(context.Background(), opts)
+			scanner.RefreshTopLevel(ctx, opts)
 		})
-		return rescanDoneMsg{}
-	}
+	})
 }
 
 func (m *Model) deepRescanNode(node *model.TreeNode) tea.Cmd {
-	opts := *m.cmpOpts
-	scanner := m.scanner
-	target := scanTargetLabel(node)
-	return func() tea.Msg {
-		timeScan("deep scan", target, func() {
-			scanner.DeepRescanNode(context.Background(), node, opts)
-		})
-		return rescanDoneMsg{}
-	}
+	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
+	return m.startOp(opScan, func(ctx context.Context) {
+		timeScan("deep scan", target, func() { scanner.DeepRescanNode(ctx, node, opts) })
+	})
 }
 
 func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
-	opts := *m.cmpOpts
-	scanner := m.scanner
-	target := scanTargetLabel(node)
-	return func() tea.Msg {
-		timeScan("list", target, func() {
-			scanner.ListNode(context.Background(), node, opts)
-		})
-		return rescanDoneMsg{}
-	}
+	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
+	return m.startOp(opScan, func(ctx context.Context) {
+		timeScan("list", target, func() { scanner.ListNode(ctx, node, opts) })
+	})
 }
 
 func scanTargetLabel(node *model.TreeNode) string {
@@ -2294,11 +2333,11 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		if start := m.deleteProgress.Start.Load(); start > 0 {
 			info.Elapsed = time.Since(time.Unix(0, start))
 		}
-	case m.checksumming || progress.Phase == model.PhaseChecksumming:
+	case m.checksumming() || progress.Phase == model.PhaseChecksumming:
 		info.State = "CHECKSUM"
 		info.ChecksumDone = progress.ChecksumDone
 		info.ChecksumTotal = progress.ChecksumFiles
-	case m.scanning || progress.Phase == model.PhaseScanning:
+	case m.scanning() || progress.Phase == model.PhaseScanning:
 		info.State = "DIR SCAN"
 		info.DirsListed = progress.DirsListed
 		info.DirsTotal = progress.DirsTotal
@@ -2328,7 +2367,7 @@ func (m *Model) layoutPanels() {
 	m.rightPanel.active = !m.activeLeft
 }
 
-func (m Model) View() string {
+func (m *Model) View() string {
 	if m.width == 0 {
 		return "loading..."
 	}
@@ -2336,13 +2375,13 @@ func (m Model) View() string {
 	progress := m.scanner.Progress()
 
 	spinner := ""
-	if (progress.Phase != "" && progress.Phase != model.PhaseDone) || m.scanning || m.deleting || m.copying || m.checksumming {
+	if (progress.Phase != "" && progress.Phase != model.PhaseDone) || m.busy() {
 		spinner = spinnerFrames[m.spinFrame]
 	}
 	operation := ""
 	if m.deleting {
 		operation = spinner + " deleting..."
-	} else if m.checksumming {
+	} else if m.checksumming() {
 		operation = spinner + " checksumming..."
 	}
 
@@ -2360,7 +2399,7 @@ func (m Model) View() string {
 	statusInfo.Spinner = spinner
 	bottomBar := RenderStatusBar(statusInfo, m.width)
 
-	if m.deleting || m.copying || m.checksumming {
+	if m.deleting || m.copying || m.checksumming() {
 		m.leftPanel.spinner = spinner
 		m.rightPanel.spinner = spinner
 	} else {
