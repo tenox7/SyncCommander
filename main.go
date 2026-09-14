@@ -131,7 +131,7 @@ func main() {
 	}
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
-	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
+	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
 	if _, err := tea.NewProgram(mdl, tea.WithAltScreen()).Run(); err != nil {
 		fail(err)
 	}

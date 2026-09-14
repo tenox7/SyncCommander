@@ -25,7 +25,7 @@ func TestUIRaceAgainstScanner(t *testing.T) {
 	}
 
 	opts := &model.CompareOpts{Size: true, ModTime: true, Checksum: true, TimeGrace: true}
-	m := NewModel(lb, rb, opts, false, true, 2, 8, false, false)
+	m := NewModel(lb, rb, "fake://x?dirs=4&files=5&depth=3", "fake://x?dirs=4&files=5&depth=3&diff=0.2&drop=0.05", opts, false, true, 2, 8, false, false)
 	m.width, m.height = 120, 40
 	m.layoutPanels()
 	sc := m.scanner
@@ -100,7 +100,7 @@ func openBackendOrSkip(t *testing.T, path string) model.Backend {
 
 func newTestModel(t *testing.T, left, right model.Backend) *Model {
 	t.Helper()
-	m := NewModel(left, right, &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true}, false, true, 2, 8, false, false)
+	m := NewModel(left, right, left.BasePath(), right.BasePath(), &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true}, false, true, 2, 8, false, false)
 	m.width, m.height = 120, 40
 	m.layoutPanels()
 	return m

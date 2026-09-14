@@ -219,6 +219,8 @@ type Model struct {
 	rightPanel     *Panel
 	left           model.Backend
 	right          model.Backend
+	leftArg        string // the arguments the backends were opened with; BasePath is display only
+	rightArg       string
 	scanner        *model.Scanner
 	activeLeft     bool
 	scan           *scanOp
@@ -260,7 +262,7 @@ type Model struct {
 	lastFlatLen    int
 }
 
-func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {
+func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {
 	copyParallel, scanParallel = max(copyParallel, 1), max(scanParallel, 1)
 	lp := NewPanel(left.BasePath())
 	lp.isLeft = true
@@ -270,6 +272,8 @@ func NewModel(left, right model.Backend, cmpOpts *model.CompareOpts, insecure, d
 		rightPanel:     rp,
 		left:           left,
 		right:          right,
+		leftArg:        leftArg,
+		rightArg:       rightArg,
 		scanner:        model.NewScanner(left, right, 4, scanParallel, deepScan),
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
@@ -688,14 +692,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.copying || m.deleting {
 			break
 		}
-		m.openDlg.Open(m.left.BasePath(), m.right.BasePath())
+		m.openDlg.Open(transport.MaskURLPassword(m.leftArg), transport.MaskURLPassword(m.rightArg))
 	case "u":
 		if m.copying || m.deleting {
 			break
 		}
-		leftPath := transport.ParentPath(m.left.BasePath())
-		rightPath := transport.ParentPath(m.right.BasePath())
-		if leftPath == m.left.BasePath() && rightPath == m.right.BasePath() {
+		leftPath := transport.ParentPath(m.leftArg)
+		rightPath := transport.ParentPath(m.rightArg)
+		if leftPath == m.leftArg && rightPath == m.rightArg {
 			break
 		}
 		cmd, _ := m.reopenBackends(leftPath, rightPath)
@@ -723,8 +727,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if node == nil || !node.IsDir || node.IsAttr {
 			break
 		}
-		leftPath := m.left.BasePath()
-		rightPath := m.right.BasePath()
+		leftPath, rightPath := m.leftArg, m.rightArg
 		descend := false
 		m.readTree(func(*model.TreeNode) {
 			if node.Left == nil && node.Right == nil {
@@ -732,10 +735,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			descend = true
 			if node.Left != nil {
-				leftPath = leftPath + "/" + node.RelPath
+				leftPath = childArg(leftPath, node.RelPath)
 			}
 			if node.Right != nil {
-				rightPath = rightPath + "/" + node.RelPath
+				rightPath = childArg(rightPath, node.RelPath)
 			}
 		})
 		if !descend {
@@ -862,17 +865,26 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// reopenBackends switches to new open arguments; an unchanged side keeps its
+// connection. The change dialog shows masked arguments, so a value equal to
+// the mask means "unchanged".
 func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
+	if leftPath == transport.MaskURLPassword(m.leftArg) {
+		leftPath = m.leftArg
+	}
+	if rightPath == transport.MaskURLPassword(m.rightArg) {
+		rightPath = m.rightArg
+	}
 	var newLeft, newRight model.Backend
 	var err error
 
-	if leftPath != m.left.BasePath() {
+	if leftPath != m.leftArg {
 		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
-	if rightPath != m.right.BasePath() {
+	if rightPath != m.rightArg {
 		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
 		if err != nil {
 			if newLeft != nil {
@@ -887,12 +899,12 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	if newLeft != nil {
 		oldLeft := m.left
 		go func() { transport.CloseBackend(oldLeft) }()
-		m.left = newLeft
+		m.left, m.leftArg = newLeft, leftPath
 	}
 	if newRight != nil {
 		oldRight := m.right
 		go func() { transport.CloseBackend(oldRight) }()
-		m.right = newRight
+		m.right, m.rightArg = newRight, rightPath
 	}
 
 	m.scanner = model.NewScanner(m.left, m.right, 4, m.scanParallel, m.deepScan)
@@ -2188,6 +2200,14 @@ func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
 	return m.startOp(opScan, func(ctx context.Context) {
 		timeScan("list", target, func() { scanner.ListNode(ctx, node, opts) })
 	})
+}
+
+// childArg extends an open argument, URL or local path, by relPath.
+func childArg(arg, relPath string) string {
+	if transport.IsRemote(arg) {
+		return strings.TrimRight(arg, "/") + "/" + relPath
+	}
+	return filepath.Join(arg, filepath.FromSlash(relPath))
 }
 
 func scanTargetLabel(node *model.TreeNode) string {
