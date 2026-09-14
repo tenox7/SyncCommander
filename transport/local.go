@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -28,17 +29,15 @@ func NewLocalBackend(base string) *LocalBackend {
 	return &LocalBackend{base: base}
 }
 
-func (b *LocalBackend) BasePath() string {
-	return b.base
-}
+func (b *LocalBackend) BasePath() string { return b.base }
 
+// LocalPath maps a slash-separated relPath onto the host filesystem.
 func (b *LocalBackend) LocalPath(relPath string) string {
-	return filepath.Join(b.base, relPath)
+	return filepath.Join(b.base, filepath.FromSlash(relPath))
 }
 
 func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	dir := filepath.Join(b.base, relDir)
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(b.LocalPath(relDir))
 	if err != nil {
 		return nil, err
 	}
@@ -48,29 +47,25 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 			return nil, ctx.Err()
 		}
 		info, err := d.Info()
-		if err != nil {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		rel := filepath.Join(relDir, d.Name())
 		entry := model.FileEntry{
-			RelPath: rel,
+			RelPath: path.Join(relDir, d.Name()),
 			Name:    d.Name(),
 			Size:    info.Size(),
 			ModTime: info.ModTime(),
 			IsDir:   d.IsDir(),
 			Mode:    info.Mode(),
 		}
-		fillTimes(&entry, filepath.Join(dir, d.Name()))
+		fillTimes(&entry, info)
 		result = append(result, entry)
 	}
 	return result, nil
 }
 
 func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	f, err := os.Open(filepath.Join(b.base, relPath))
+	f, err := os.Open(b.LocalPath(relPath))
 	if err != nil {
 		return "", err
 	}
@@ -113,98 +108,96 @@ func (b *LocalBackend) ProbeChecksums() []string {
 	return []string{"xxh3", "sha256", "sha1", "md5", "md4"}
 }
 
-func (b *LocalBackend) SetChecksumAlgo(algo string) {
-	b.cksumAlgo = algo
+func (b *LocalBackend) SetChecksumAlgo(algo string) { b.cksumAlgo = algo }
+
+func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime, btime time.Time) error {
+	if atime.IsZero() {
+		atime = mtime
+	}
+	return setTimes(b.LocalPath(relPath), mtime, atime, btime)
 }
 
-func (b *LocalBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
-	return setTimes(filepath.Join(b.base, relPath), mtime, atime, btime)
-}
-
-func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	path := filepath.Join(b.base, relPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-		return fmt.Errorf("local: refuse to overwrite existing directory %s", path)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(LimitWriter(f), src)
-	return err
+func (b *LocalBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+	return b.write(relPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode, 0, src)
 }
 
 func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
-	path := filepath.Join(b.base, relPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-		return fmt.Errorf("local: refuse to append into existing directory %s", path)
-	}
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
 		return err
 	}
 	defer rd.Close()
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, mode)
+	return b.write(relPath, os.O_CREATE|os.O_WRONLY, mode, offset, rd)
+}
+
+// write streams src into relPath from offset, cutting the file there first.
+// Close is checked: network filesystems report write errors there.
+func (b *LocalBackend) write(relPath string, flags int, mode os.FileMode, offset int64, src io.Reader) error {
+	p := b.LocalPath(relPath)
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		return err
+	}
+	if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+		return fmt.Errorf("local: refuse to overwrite existing directory %s", p)
+	}
+	f, err := os.OpenFile(p, flags, mode)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return err
+	if offset > 0 {
+		if err = f.Truncate(offset); err == nil {
+			_, err = f.Seek(offset, io.SeekStart)
+		}
 	}
-	_, err = io.Copy(LimitWriter(f), rd)
+	if err == nil {
+		_, err = io.Copy(LimitWriter(f), src)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	return err
 }
 
-func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	f, err := os.Open(filepath.Join(b.base, relPath))
+func (b *LocalBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+	return b.OpenAt(nil, relPath, 0)
+}
+
+func (b *LocalBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	f, err := os.Open(b.LocalPath(relPath))
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		f.Close()
-		return nil, err
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	return LimitReadCloser(f), nil
 }
 
-func (b *LocalBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
+func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0755
 	}
-	return os.MkdirAll(filepath.Join(b.base, relPath), mode.Perm())
+	return os.MkdirAll(b.LocalPath(relPath), mode.Perm())
 }
 
-func (b *LocalBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
-	return os.Rename(filepath.Join(b.base, oldRelPath), filepath.Join(b.base, newRelPath))
+func (b *LocalBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
+	return os.Rename(b.LocalPath(oldRelPath), b.LocalPath(newRelPath))
 }
 
-func (b *LocalBackend) Remove(ctx context.Context, relPath string) error {
-	return os.Remove(filepath.Join(b.base, relPath))
+func (b *LocalBackend) Remove(_ context.Context, relPath string) error {
+	return os.Remove(b.LocalPath(relPath))
 }
 
-func (b *LocalBackend) RemoveAll(ctx context.Context, relPath string) error {
-	full := filepath.Join(b.base, relPath)
+func (b *LocalBackend) RemoveAll(_ context.Context, relPath string) error {
+	full := b.LocalPath(relPath)
 	if err := os.RemoveAll(full); err != nil {
 		return err
 	}
-	if fi, err := os.Stat(full); err == nil {
-		return fmt.Errorf("local: RemoveAll lied — path still exists after removal (%s, isDir=%v)", full, fi.IsDir())
+	if _, err := os.Stat(full); err == nil {
+		return fmt.Errorf("local: %s still exists after RemoveAll", full)
 	}
 	return nil
-}
-
-func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	f, err := os.Open(filepath.Join(b.base, relPath))
-	if err != nil {
-		return nil, err
-	}
-	return LimitReadCloser(f), nil
 }

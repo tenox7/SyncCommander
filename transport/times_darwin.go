@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -10,9 +11,9 @@ import (
 	"sc/model"
 )
 
-func fillTimes(entry *model.FileEntry, path string) {
-	var st syscall.Stat_t
-	if syscall.Lstat(path, &st) != nil {
+func fillTimes(entry *model.FileEntry, info os.FileInfo) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
 		return
 	}
 	entry.ATime = time.Unix(st.Atimespec.Sec, st.Atimespec.Nsec)

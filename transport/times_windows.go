@@ -8,17 +8,18 @@ import (
 	"sc/model"
 )
 
-func fillTimes(entry *model.FileEntry, path string) {
-	info, err := os.Lstat(path)
-	if err != nil {
+func fillTimes(entry *model.FileEntry, info os.FileInfo) {
+	d, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	if !ok {
 		return
 	}
-	d := info.Sys().(*syscall.Win32FileAttributeData)
 	entry.ATime = time.Unix(0, d.LastAccessTime.Nanoseconds())
 	entry.CTime = time.Unix(0, d.CreationTime.Nanoseconds())
 	entry.BirthTime = time.Unix(0, d.CreationTime.Nanoseconds())
 }
 
+// setTimes leaves the creation time alone when btime is unknown; passing the
+// access time there, as SetFileTime's argument order invites, would rewrite it.
 func setTimes(path string, mtime, atime, btime time.Time) error {
 	h, err := syscall.CreateFile(
 		syscall.StringToUTF16Ptr(path),
@@ -36,7 +37,7 @@ func setTimes(path string, mtime, atime, btime time.Time) error {
 
 	mt := syscall.NsecToFiletime(mtime.UnixNano())
 	at := syscall.NsecToFiletime(atime.UnixNano())
-	ct := &at
+	var ct *syscall.Filetime
 	if !btime.IsZero() {
 		bt := syscall.NsecToFiletime(btime.UnixNano())
 		ct = &bt
