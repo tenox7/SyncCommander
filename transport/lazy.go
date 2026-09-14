@@ -15,16 +15,17 @@ import (
 	"sc/model"
 )
 
-// isConnLost reports whether err looks like the underlying network/SSH
-// connection has been torn down — the kind of error that survives across
-// retry attempts unless we redial. Matching is substring-based because
-// the SSH/SFTP/net stack wraps these in heterogeneous ways. Bare io.EOF
-// is excluded since it's the normal end-of-stream signal from readers.
+// isConnLost reports whether err looks like the transport underneath the
+// backend has died, so the next attempt must redial. Matching is
+// substring-based because the SSH/SFTP/net stack wraps these in
+// heterogeneous ways. An op-level EOF counts too: no backend method returns
+// io.EOF from a healthy connection (readers are not wrapped here), so it can
+// only mean the peer hung up.
 func isConnLost(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, net.ErrClosed) {
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	msg := err.Error()
@@ -44,17 +45,31 @@ func isConnLost(err error) bool {
 	return false
 }
 
-// ErrUnsupported is returned by lazyBackend.AppendFrom/OpenAt when the
-// underlying backend does not implement the corresponding optional interface.
-var ErrUnsupported = errors.New("resume not supported by this backend")
+// ErrUnsupported is returned for an optional capability the connected backend
+// lacks (resume, direct local-path transfer, batch send).
+var ErrUnsupported = errors.New("operation not supported by this backend")
 
+// protoManagesLiveness names the protocols whose transport enforces its own
+// idle deadline, so the scanner must not add a per-call stall timeout.
+func protoManagesLiveness(proto string) bool {
+	switch proto {
+	case "webdav", "webdavs", "restic", "restics", "rclone":
+		return true
+	}
+	return false
+}
+
+// lazyBackend connects on first use and redials after a lost connection.
+// dialMu serializes dial attempts so parallel callers share one, while mu
+// only guards the pointer: Close never waits behind a dial.
 type lazyBackend struct {
-	factory         func() (model.Backend, error)
-	inner           model.Backend
-	mu              sync.Mutex
-	display         string
-	proto           string
-	managesLiveness bool
+	factory func() (model.Backend, error)
+	display string
+	proto   string
+	mu      sync.Mutex
+	inner   model.Backend
+	closed  bool
+	dialMu  sync.Mutex
 }
 
 func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
@@ -62,109 +77,167 @@ func NewLazyBackend(display string, factory func() (model.Backend, error)) model
 	if idx := strings.Index(display, "://"); idx > 0 {
 		proto = display[:idx]
 	}
-	return &lazyBackend{factory: factory, display: display, proto: proto, managesLiveness: protoManagesLiveness(proto)}
+	return &lazyBackend{factory: factory, display: display, proto: proto}
 }
 
-func (b *lazyBackend) ManagesLiveness() bool { return b.managesLiveness }
+func (b *lazyBackend) ManagesLiveness() bool { return protoManagesLiveness(b.proto) }
 
-func (b *lazyBackend) ensureConnected() (model.Backend, error) {
+func (b *lazyBackend) current() model.Backend {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.inner != nil {
-		return b.inner, nil
+	return b.inner
+}
+
+func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error) {
+	if inner := b.current(); inner != nil {
+		return inner, nil
+	}
+	b.dialMu.Lock()
+	defer b.dialMu.Unlock()
+	if inner := b.current(); inner != nil {
+		return inner, nil
 	}
 	Log.Add(b.proto, ">>>", "connecting to "+b.display)
-	var inner model.Backend
-	err := Retry(context.Background(), b.proto, "connect "+b.display, func() error {
-		var ferr error
-		inner, ferr = b.factory()
-		return ferr
-	})
+	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, b.factory)
 	if err != nil {
 		Log.Add(b.proto, "ERR", b.display+": "+err.Error())
 		return nil, err
 	}
-	b.inner = inner
+	b.mu.Lock()
+	closed := b.closed
+	if !closed {
+		b.inner = inner
+	}
+	b.mu.Unlock()
+	if closed {
+		CloseBackend(inner)
+		return nil, net.ErrClosed
+	}
 	Log.Add(b.proto, "<<<", "connected to "+b.display)
 	return inner, nil
 }
 
-// markBrokenIf inspects err and, if it indicates the connection has died,
-// drops the cached backend so the next ensureConnected() redials. Safe to
-// call from any goroutine. Returns err unchanged.
+// markBrokenIf drops the cached backend when err says the connection died, so
+// the next call redials. Returns err unchanged.
 func (b *lazyBackend) markBrokenIf(err error) error {
 	if !isConnLost(err) {
 		return err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.inner != nil {
-		Log.Add(b.proto, "ERR", "connection lost — will reconnect on next op: "+err.Error())
-		if c, ok := b.inner.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		b.inner = nil
+	inner := b.inner
+	b.inner = nil
+	b.mu.Unlock()
+	if inner != nil {
+		Log.Add(b.proto, "ERR", "connection lost, reconnecting on next op: "+err.Error())
+		CloseBackend(inner)
 	}
 	return err
 }
 
+// do runs op against the connected backend under Retry.
+func (b *lazyBackend) do(ctx context.Context, what string, op func(model.Backend) error) error {
+	return Retry(ctx, b.proto, what, func() error {
+		inner, err := b.ensureConnected(ctx)
+		if err != nil {
+			return err
+		}
+		return b.markBrokenIf(op(inner))
+	})
+}
+
+func doVal[T any](b *lazyBackend, ctx context.Context, what string, op func(model.Backend) (T, error)) (T, error) {
+	var v T
+	err := b.do(ctx, what, func(inner model.Backend) error {
+		var e error
+		v, e = op(inner)
+		return e
+	})
+	return v, err
+}
+
+// capability returns the connected backend as T, or ErrUnsupported.
+func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
+	var zero T
+	inner, err := b.ensureConnected(ctx)
+	if err != nil {
+		return zero, err
+	}
+	t, ok := inner.(T)
+	if !ok {
+		return zero, ErrUnsupported
+	}
+	return t, nil
+}
+
+// doAs is do for an optional capability: a backend without it fails fast
+// instead of burning retries.
+func doAs[T any](b *lazyBackend, ctx context.Context, what string, op func(T) error) error {
+	if _, err := capability[T](b, ctx); err != nil {
+		return err
+	}
+	return b.do(ctx, what, func(inner model.Backend) error {
+		t, ok := inner.(T)
+		if !ok {
+			return ErrUnsupported
+		}
+		return op(t)
+	})
+}
+
 func (b *lazyBackend) BasePath() string {
-	b.mu.Lock()
-	inner := b.inner
-	b.mu.Unlock()
-	if inner != nil {
+	if inner := b.current(); inner != nil {
 		return inner.BasePath()
 	}
 	return b.display
 }
 
 func (b *lazyBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	return RetryVal(ctx, b.proto, "list "+relDir, func() ([]model.FileEntry, error) {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return nil, err
-		}
-		entries, err := inner.List(ctx, relDir)
-		return entries, b.markBrokenIf(err)
-	})
+	return doVal(b, ctx, "list "+relDir, func(in model.Backend) ([]model.FileEntry, error) { return in.List(ctx, relDir) })
 }
 
 func (b *lazyBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	return RetryVal(ctx, b.proto, "checksum "+relPath, func() (string, error) {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return "", err
-		}
-		s, err := inner.Checksum(ctx, relPath)
-		return s, b.markBrokenIf(err)
-	})
+	return doVal(b, ctx, "checksum "+relPath, func(in model.Backend) (string, error) { return in.Checksum(ctx, relPath) })
 }
 
 func (b *lazyBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
-	return Retry(ctx, b.proto, "settimes "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		return b.markBrokenIf(inner.SetTimes(ctx, relPath, mtime, atime, btime))
-	})
+	return b.do(ctx, "settimes "+relPath, func(in model.Backend) error { return in.SetTimes(ctx, relPath, mtime, atime, btime) })
 }
 
-// CopyFrom retries only while src is still untouched — typically a dead
+func (b *lazyBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
+	return b.do(ctx, "mkdir "+relPath, func(in model.Backend) error { return in.Mkdir(ctx, relPath, mode) })
+}
+
+func (b *lazyBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	return b.do(ctx, "rename "+oldRelPath, func(in model.Backend) error { return in.Rename(ctx, oldRelPath, newRelPath) })
+}
+
+func (b *lazyBackend) Remove(ctx context.Context, relPath string) error {
+	return b.do(ctx, "remove "+relPath, func(in model.Backend) error { return in.Remove(ctx, relPath) })
+}
+
+func (b *lazyBackend) RemoveAll(ctx context.Context, relPath string) error {
+	return b.do(ctx, "removeall "+relPath, func(in model.Backend) error { return in.RemoveAll(ctx, relPath) })
+}
+
+func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
+	return doVal(b, ctx, "open "+relPath, func(in model.Backend) (io.ReadCloser, error) { return in.Open(ctx, relPath) })
+}
+
+// CopyFrom retries only while src is still untouched: typically a dead
 // connection that markBrokenIf has just dropped, so the next attempt redials.
-// Once bytes have been consumed the reader can't be rewound and a second
-// attempt would write a truncated file; the caller re-opens src and retries at
-// a higher level instead.
+// Once bytes have been consumed the reader cannot be rewound and a second
+// attempt would write a truncated file; the caller re-opens src and retries
+// at a higher level instead.
 func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	counted := &countingReader{r: src}
 	max := MaxRetries()
 	var err error
 	for attempt := 0; attempt <= max; attempt++ {
-		if ctxDone(ctx) {
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var inner model.Backend
-		if inner, err = b.ensureConnected(); err == nil {
+		if inner, err = b.ensureConnected(ctx); err == nil {
 			err = b.markBrokenIf(inner.CopyFrom(ctx, relPath, counted, mode))
 		}
 		if err == nil {
@@ -173,7 +246,7 @@ func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 			}
 			return nil
 		}
-		if counted.n.Load() > 0 || ctxDone(ctx) || isPermanentError(err) || attempt == max {
+		if counted.n.Load() > 0 || ctx.Err() != nil || isPermanentError(err) || attempt == max {
 			return err
 		}
 		d := backoffDelay(attempt)
@@ -198,212 +271,81 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (b *lazyBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
-	return Retry(ctx, b.proto, "mkdir "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		return b.markBrokenIf(inner.Mkdir(ctx, relPath, mode))
-	})
-}
-
-func (b *lazyBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
-	return Retry(ctx, b.proto, "rename "+oldRelPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		return b.markBrokenIf(inner.Rename(ctx, oldRelPath, newRelPath))
-	})
-}
-
-func (b *lazyBackend) Remove(ctx context.Context, relPath string) error {
-	return Retry(ctx, b.proto, "remove "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		return b.markBrokenIf(inner.Remove(ctx, relPath))
-	})
-}
-
-func (b *lazyBackend) RemoveAll(ctx context.Context, relPath string) error {
-	return Retry(ctx, b.proto, "removeall "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		return b.markBrokenIf(inner.RemoveAll(ctx, relPath))
-	})
-}
-
-func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	return RetryVal(ctx, b.proto, "open "+relPath, func() (io.ReadCloser, error) {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return nil, err
-		}
-		rc, err := inner.Open(ctx, relPath)
-		return rc, b.markBrokenIf(err)
-	})
-}
-
 func (b *lazyBackend) Close() error {
 	b.mu.Lock()
 	inner := b.inner
+	b.inner, b.closed = nil, true
 	b.mu.Unlock()
-	if inner == nil {
-		return nil
-	}
-	if c, ok := inner.(interface{ Close() error }); ok {
+	if c, ok := inner.(io.Closer); ok {
 		return c.Close()
 	}
 	return nil
 }
 
 func (b *lazyBackend) ProbeChecksums() []string {
-	inner, err := b.ensureConnected()
+	p, err := capability[model.ChecksumProber](b, context.Background())
 	if err != nil {
 		return nil
 	}
-	if p, ok := inner.(model.ChecksumProber); ok {
-		return p.ProbeChecksums()
-	}
-	return nil
+	return p.ProbeChecksums()
 }
 
 func (b *lazyBackend) SetChecksumAlgo(algo string) {
-	b.mu.Lock()
-	inner := b.inner
-	b.mu.Unlock()
-	if inner == nil {
-		return
-	}
-	if p, ok := inner.(model.ChecksumProber); ok {
+	if p, ok := b.current().(model.ChecksumProber); ok {
 		p.SetChecksumAlgo(algo)
 	}
 }
 
 func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	p, ok := inner.(model.ChecksumPrefetcher)
-	if !ok {
+	err := doAs(b, ctx, "prefetch "+scope, func(p model.ChecksumPrefetcher) error { return p.PrefetchChecksums(ctx, scope, recursive) })
+	if errors.Is(err, ErrUnsupported) {
 		return nil
 	}
-	return Retry(ctx, b.proto, "prefetch "+scope, func() error {
-		return p.PrefetchChecksums(ctx, scope, recursive)
-	})
+	return err
 }
 
-func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
-	inner, err := b.ensureConnected()
+func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	p, err := capability[model.RecursivePreloader](b, ctx)
+	if errors.Is(err, ErrUnsupported) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	r, ok := inner.(model.Resumer)
-	if !ok {
-		return ErrUnsupported
+	return p.PreloadRecursive(ctx, scope)
+}
+
+// AppendFrom is not retried here: the source has been consumed from offset,
+// so the copy layer re-probes the destination size and resumes again itself.
+func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+	r, err := capability[model.Resumer](b, ctx)
+	if err != nil {
+		return err
 	}
 	return b.markBrokenIf(r.AppendFrom(ctx, relPath, src, mode, offset))
 }
 
 func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	inner, err := b.ensureConnected()
-	if err != nil {
+	if _, err := capability[model.SeekableOpener](b, ctx); err != nil {
 		return nil, err
 	}
-	if _, ok := inner.(model.SeekableOpener); !ok {
-		return nil, ErrUnsupported
-	}
-	return RetryVal(ctx, b.proto, "openat "+relPath, func() (io.ReadCloser, error) {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return nil, err
-		}
-		o, ok := inner.(model.SeekableOpener)
+	return doVal(b, ctx, "openat "+relPath, func(in model.Backend) (io.ReadCloser, error) {
+		o, ok := in.(model.SeekableOpener)
 		if !ok {
 			return nil, ErrUnsupported
 		}
-		rc, err := o.OpenAt(ctx, relPath, offset)
-		return rc, b.markBrokenIf(err)
+		return o.OpenAt(ctx, relPath, offset)
 	})
 }
 
 func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	if _, ok := inner.(model.LocalSender); !ok {
-		return ErrUnsupported
-	}
-	return Retry(ctx, b.proto, "send "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		s, ok := inner.(model.LocalSender)
-		if !ok {
-			return ErrUnsupported
-		}
-		return b.markBrokenIf(s.SendLocalFile(ctx, srcPath, relPath, mode))
-	})
+	return doAs(b, ctx, "send "+relPath, func(s model.LocalSender) error { return s.SendLocalFile(ctx, srcPath, relPath, mode) })
 }
 
 func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	if _, ok := inner.(model.BatchSender); !ok {
-		return ErrUnsupported
-	}
-	return Retry(ctx, b.proto, "batch send "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		s, ok := inner.(model.BatchSender)
-		if !ok {
-			return ErrUnsupported
-		}
-		return b.markBrokenIf(s.SendLocalTree(ctx, srcRoot, relPath, onFile))
-	})
-}
-
-func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	p, ok := inner.(model.RecursivePreloader)
-	if !ok {
-		return nil
-	}
-	return p.PreloadRecursive(ctx, scope)
+	return doAs(b, ctx, "batch send "+relPath, func(s model.BatchSender) error { return s.SendLocalTree(ctx, srcRoot, relPath, onFile) })
 }
 
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	inner, err := b.ensureConnected()
-	if err != nil {
-		return err
-	}
-	if _, ok := inner.(model.LocalReceiver); !ok {
-		return ErrUnsupported
-	}
-	return Retry(ctx, b.proto, "recv "+relPath, func() error {
-		inner, err := b.ensureConnected()
-		if err != nil {
-			return err
-		}
-		r, ok := inner.(model.LocalReceiver)
-		if !ok {
-			return ErrUnsupported
-		}
-		return b.markBrokenIf(r.RecvToLocalFile(ctx, relPath, dstPath))
-	})
+	return doAs(b, ctx, "recv "+relPath, func(r model.LocalReceiver) error { return r.RecvToLocalFile(ctx, relPath, dstPath) })
 }

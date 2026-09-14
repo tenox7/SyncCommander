@@ -63,10 +63,8 @@ type ResticBackend struct {
 	display string
 	user    string
 	pass    string
-	// listCache is populated by PreloadRecursive (one GET per type) and shared
-	// with the WebDAV backend's recursive-preload machinery. nil until the
-	// first preload; the cache methods are nil-safe so writes can ignore that.
-	listCache *rsyncListCache
+	// listCache is populated by PreloadRecursive (one GET per type).
+	listCache *listCache
 }
 
 var (
@@ -140,12 +138,13 @@ func NewResticBackend(rawURL string, insecure bool, parallel int) (*ResticBacken
 	display += displayHost + "/" + base
 
 	b := &ResticBackend{
-		client:  &http.Client{Transport: tr},
-		baseURL: baseURL,
-		base:    base,
-		display: display,
-		user:    user,
-		pass:    pass,
+		client:    &http.Client{Transport: tr},
+		baseURL:   baseURL,
+		base:      base,
+		display:   display,
+		user:      user,
+		pass:      pass,
+		listCache: newListCache(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -267,18 +266,7 @@ func isResticType(name string) bool {
 // List serves from the recursive-preload cache when one is in flight or done,
 // otherwise lists live. Mirrors the WebDAV backend's cache-then-live path.
 func (b *ResticBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	if b.listCache != nil {
-		entries, hit, active, done := b.listCache.lookup(relDir)
-		if hit {
-			return entries, nil
-		}
-		if active && !done {
-			if e, ok := b.listCache.await(relDir); ok {
-				return e, nil
-			}
-		}
-	}
-	return b.liveList(ctx, relDir)
+	return b.listCache.serve(ctx, relDir, b.liveList)
 }
 
 // liveList resolves a directory directly. The repo root is synthesized (no list
@@ -426,22 +414,7 @@ func (b *ResticBackend) statSize(ctx context.Context, relPath string) int64 {
 // awaiters block until it finishes. A preload already in flight is a no-op.
 // Mirrors the WebDAV Depth:infinity preload, reusing the same cache type.
 func (b *ResticBackend) PreloadRecursive(ctx context.Context, scope string) error {
-	if b.listCache == nil {
-		b.listCache = newRsyncListCache()
-	}
-	c := b.listCache
-	c.mu.Lock()
-	if c.active && !c.done {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	c.reset(ctx, scope)
-
-	go func() {
-		_ = b.runRecursiveList(ctx, scope, c.emit)
-		c.finish()
-	}()
+	b.listCache.start(ctx, scope, b.runRecursiveList)
 	return nil
 }
 
@@ -534,7 +507,7 @@ func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if sz := fileSizeFromContext(ctx); sz > 0 {
+	if sz, ok := fileSizeFromContext(ctx); ok && sz > 0 {
 		req.ContentLength = sz
 	}
 	resp, err := b.doReq(req)

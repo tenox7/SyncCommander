@@ -53,11 +53,6 @@ func webdavIdle() time.Duration {
 	return time.Duration(n)
 }
 
-func protoManagesLiveness(proto string) bool {
-	return proto == "webdav" || proto == "webdavs" || proto == "restic" || proto == "restics" ||
-		proto == "rclone"
-}
-
 type idleTimeoutConn struct {
 	net.Conn
 	idle time.Duration
@@ -118,7 +113,7 @@ type WebDAVBackend struct {
 	cksumAlgo  string
 	availAlgos []string
 	sums       *wdSumCache
-	listCache  *rsyncListCache
+	listCache  *listCache
 	noInfinity atomic.Bool
 }
 
@@ -183,13 +178,14 @@ func NewWebDAVBackend(rawURL string, insecure bool, parallel int) (*WebDAVBacken
 	display += displayHost + "/" + base
 
 	b := &WebDAVBackend{
-		client:  &http.Client{Transport: tr},
-		baseURL: baseURL,
-		base:    base,
-		display: display,
-		user:    user,
-		pass:    pass,
-		sums:    newWDSumCache(),
+		client:    &http.Client{Transport: tr},
+		baseURL:   baseURL,
+		base:      base,
+		display:   display,
+		user:      user,
+		pass:      pass,
+		sums:      newWDSumCache(),
+		listCache: newListCache(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -392,18 +388,7 @@ func parseWDTime(s string) time.Time {
 }
 
 func (b *WebDAVBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	if b.listCache != nil {
-		entries, hit, active, done := b.listCache.lookup(relDir)
-		if hit {
-			return entries, nil
-		}
-		if active && !done {
-			if e, ok := b.listCache.await(relDir); ok {
-				return e, nil
-			}
-		}
-	}
-	return b.liveList(ctx, relDir)
+	return b.listCache.serve(ctx, relDir, b.liveList)
 }
 
 func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -437,22 +422,7 @@ func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	if b.noInfinity.Load() {
 		return nil
 	}
-	if b.listCache == nil {
-		b.listCache = newRsyncListCache()
-	}
-	c := b.listCache
-	c.mu.Lock()
-	if c.active && !c.done {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	c.reset(ctx, scope)
-
-	go func() {
-		_ = b.runRecursiveList(ctx, scope, c.emit)
-		c.finish()
-	}()
+	b.listCache.start(ctx, scope, b.runRecursiveList)
 	return nil
 }
 

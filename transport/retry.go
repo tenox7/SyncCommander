@@ -15,9 +15,9 @@ import (
 // returned stop func cancels the watcher; call it on normal completion
 // (e.g. via defer) so the goroutine doesn't leak after the close. Closing
 // the destination handle is what actually unblocks an in-flight Write on
-// SFTP/SSH backends — ctx cancellation alone does not.
+// SFTP/SSH backends; ctx cancellation alone does not. c may be nil.
 func cancelCloser(ctx context.Context, c io.Closer) func() {
-	if ctx == nil || c == nil {
+	if c == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
@@ -32,7 +32,7 @@ func cancelCloser(ctx context.Context, c io.Closer) func() {
 }
 
 // WithStallGuard runs op against a child of parent. If counter does not
-// advance for idle, the child ctx is canceled — unblocking whatever op is
+// advance for idle, the child ctx is canceled, unblocking whatever op is
 // waiting on. Parent cancellation propagates normally. If the stall fires
 // while parent is still healthy, op's err is normalized to ErrStall so
 // Retry treats it as retryable (rather than as a parent-ctx cancel which
@@ -50,10 +50,7 @@ func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Dur
 		defer close(done)
 		last := counter.Load()
 		lastChange := time.Now()
-		tickInterval := idle / 4
-		if tickInterval < time.Second {
-			tickInterval = time.Second
-		}
+		tickInterval := max(idle/4, time.Second)
 		t := time.NewTicker(tickInterval)
 		defer t.Stop()
 		for {
@@ -86,31 +83,24 @@ func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Dur
 	return err
 }
 
-var maxRetries int32 = 5
+var maxRetries atomic.Int32
 
-func SetMaxRetries(n int) {
-	if n < 0 {
-		n = 0
-	}
-	atomic.StoreInt32(&maxRetries, int32(n))
-}
+func init() { maxRetries.Store(5) }
 
-func MaxRetries() int {
-	return int(atomic.LoadInt32(&maxRetries))
-}
+func SetMaxRetries(n int) { maxRetries.Store(int32(max(n, 0))) }
 
-// stallTimeoutSec is the per-file idle window in seconds. If progress
-// bytes do not advance for this long, the current attempt is canceled
-// and (if invoked under Retry) retried. 0 disables stall detection.
-var stallTimeoutSec int64 = 60
+func MaxRetries() int { return int(maxRetries.Load()) }
 
-func SetStallTimeout(d time.Duration) {
-	atomic.StoreInt64(&stallTimeoutSec, int64(d/time.Second))
-}
+// stallTimeout is the per-file idle window. If progress bytes do not advance
+// for this long, the current attempt is canceled and (if invoked under
+// Retry) retried. 0 disables stall detection.
+var stallTimeout atomic.Int64
 
-func StallTimeout() time.Duration {
-	return time.Duration(atomic.LoadInt64(&stallTimeoutSec)) * time.Second
-}
+func init() { stallTimeout.Store(int64(60 * time.Second)) }
+
+func SetStallTimeout(d time.Duration) { stallTimeout.Store(int64(d)) }
+
+func StallTimeout() time.Duration { return time.Duration(stallTimeout.Load()) }
 
 // ErrStall is returned by WithStallGuard when no progress was observed for
 // the idle window. Retry treats it as a retryable failure (not permanent,
@@ -122,7 +112,7 @@ type fatalCancelKey struct{}
 // ContextWithFatalCancel attaches a cancel func that backends can invoke via
 // TriggerFatalAbort to abort the entire enclosing operation (not just the
 // current retryable attempt). Used for errors that are pointless to retry
-// or continue past — e.g. an rsync daemon module marked read only.
+// or continue past, e.g. an rsync daemon module marked read only.
 func ContextWithFatalCancel(ctx context.Context, cancel context.CancelFunc) context.Context {
 	if cancel == nil {
 		return ctx
@@ -147,39 +137,23 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrUnsupported) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted") {
-		return true
+	for _, sub := range []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported"} {
+		if strings.Contains(msg, sub) {
+			return true
+		}
 	}
-	if strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such file") {
-		return true
-	}
-	return strings.Contains(msg, "not supported")
+	return false
 }
 
 func backoffDelay(attempt int) time.Duration {
-	d := time.Duration(500<<attempt) * time.Millisecond
-	if d > 10*time.Second {
-		d = 10 * time.Second
-	}
-	return d
-}
-
-func ctxDone(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	return ctx.Err() != nil
+	return min(time.Duration(500<<attempt)*time.Millisecond, 10*time.Second)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
-	if ctx == nil {
-		time.Sleep(d)
-		return nil
-	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -191,12 +165,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // Retry runs op up to MaxRetries+1 times with exponential backoff. Returns
-// immediately if ctx is canceled. Each retry is logged to the global Log.
+// immediately if ctx is canceled. Each retry is logged to the global Log;
+// a missing capability is reported to the caller without a FAIL line.
 func Retry(ctx context.Context, proto, what string, op func() error) error {
 	max := MaxRetries()
 	var err error
 	for attempt := 0; attempt <= max; attempt++ {
-		if ctxDone(ctx) {
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		err = op()
@@ -206,8 +181,11 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 			}
 			return nil
 		}
-		if ctxDone(ctx) {
+		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, ErrUnsupported) {
+			return err
 		}
 		if isPermanentError(err) {
 			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v", what, err))
@@ -222,9 +200,7 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 			return serr
 		}
 	}
-	if err != nil {
-		Log.Add(proto, "FAIL", fmt.Sprintf("%s: gave up after %d attempts: %v", what, max+1, err))
-	}
+	Log.Add(proto, "FAIL", fmt.Sprintf("%s: gave up after %d attempts: %v", what, max+1, err))
 	return err
 }
 

@@ -14,14 +14,49 @@ import (
 
 const fakeScheme = "fake://"
 
-func IsRemote(arg string) bool {
-	for _, p := range []string{"sftp://", "ssh://", "scp://", "ftp://", "ftps://", "ftpes://", "rsync+ssh://", "rsync://", "webdav://", "webdavs://", "restic://", "restics://", rcloneScheme, fakeScheme} {
-		if strings.HasPrefix(arg, p) {
-			return true
+type opener func(arg string, insecure bool, parallel int) (model.Backend, error)
+
+// schemes maps URL prefixes to constructors; IsRemote and OpenBackend both
+// read it, so a new protocol is one line here.
+var schemes = []struct {
+	prefix string
+	open   opener
+}{
+	{"sftp://", openSFTP},
+	{"ssh://", openSSHBackend},
+	{"scp://", openSSHBackend},
+	{"ftp://", openFTP},
+	{"ftps://", openFTP},
+	{"ftpes://", openFTP},
+	{"rsync+ssh://", openRsyncSSH},
+	{"rsync://", openRsync},
+	{"webdav://", openWebDAV},
+	{"webdavs://", openWebDAV},
+	{"restic://", openRestic},
+	{"restics://", openRestic},
+	{rcloneScheme, openRclone},
+	{fakeScheme, openFake},
+}
+
+func openSFTP(a string, i bool, p int) (model.Backend, error)     { return NewSFTPBackend(a, i, p) }
+func openFTP(a string, i bool, p int) (model.Backend, error)      { return NewFTPBackend(a, i, p) }
+func openRsyncSSH(a string, i bool, _ int) (model.Backend, error) { return NewRsyncSSHBackend(a, i) }
+func openRsync(a string, _ bool, _ int) (model.Backend, error)    { return NewRsyncBackend(a) }
+func openWebDAV(a string, i bool, p int) (model.Backend, error)   { return NewWebDAVBackend(a, i, p) }
+func openRestic(a string, i bool, p int) (model.Backend, error)   { return NewResticBackend(a, i, p) }
+func openRclone(a string, i bool, _ int) (model.Backend, error)   { return NewRcloneBackend(a, i) }
+func openFake(a string, _ bool, _ int) (model.Backend, error)     { return NewFakeBackend(a) }
+
+func lookupScheme(arg string) opener {
+	for _, s := range schemes {
+		if strings.HasPrefix(arg, s.prefix) {
+			return s.open
 		}
 	}
-	return false
+	return nil
 }
+
+func IsRemote(arg string) bool { return lookupScheme(arg) != nil }
 
 func MaskURLPassword(rawURL string) string {
 	if strings.HasPrefix(rawURL, rcloneScheme) {
@@ -50,59 +85,32 @@ func MaskURLPassword(rawURL string) string {
 	return rawURL[:idx+3] + creds[:ci] + ":xxxxx@" + authority[ai+1:] + tail
 }
 
+// OpenBackend connects synchronously; anything without a known scheme is a
+// local directory.
 func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
-	if strings.HasPrefix(arg, "sftp://") {
-		return NewSFTPBackend(arg, parallel)
-	}
-	if strings.HasPrefix(arg, "ssh://") || strings.HasPrefix(arg, "scp://") {
-		return openSSHBackend(arg, parallel)
-	}
-	if strings.HasPrefix(arg, "ftp://") || strings.HasPrefix(arg, "ftps://") || strings.HasPrefix(arg, "ftpes://") {
-		return NewFTPBackend(arg, insecure, parallel)
-	}
-	if strings.HasPrefix(arg, "rsync+ssh://") {
-		return NewRsyncSSHBackend(arg)
-	}
-	if strings.HasPrefix(arg, "rsync://") {
-		return NewRsyncBackend(arg)
-	}
-	if strings.HasPrefix(arg, "webdav://") || strings.HasPrefix(arg, "webdavs://") {
-		return NewWebDAVBackend(arg, insecure, parallel)
-	}
-	if strings.HasPrefix(arg, "restic://") || strings.HasPrefix(arg, "restics://") {
-		return NewResticBackend(arg, insecure, parallel)
-	}
-	if strings.HasPrefix(arg, rcloneScheme) {
-		return NewRcloneBackend(arg, insecure)
-	}
-	if strings.HasPrefix(arg, fakeScheme) {
-		return NewFakeBackend(arg)
+	if open := lookupScheme(arg); open != nil {
+		return open(arg, insecure, parallel)
 	}
 	return NewLocalBackend(arg), nil
 }
 
 // openSSHBackend dials SSH once, logs the server version, probes the SFTP
-// subsystem, and returns the SFTPBackend when available — otherwise the
+// subsystem, and returns the SFTPBackend when available, otherwise the
 // shell-and-cat SCPBackend. Used for ssh:// and scp:// URLs; sftp:// always
 // goes straight to SFTP without a fallback. parallel sizes the lazy
 // connection pool used for parallel transfers (1 = no extras).
-func openSSHBackend(rawURL string, parallel int) (model.Backend, error) {
-	conn, err := dialSSH(rawURL)
+func openSSHBackend(rawURL string, insecure bool, parallel int) (model.Backend, error) {
+	conn, err := dialSSH(rawURL, insecure)
 	if err != nil {
 		return nil, err
 	}
 	ver := strings.TrimRight(string(conn.client.ServerVersion()), "\r\n")
-	if probeSFTP(conn.client) {
-		Log.Add("ssh", "<<<", "SFTP available — using SFTP backend ("+ver+")")
-		b, err := newSFTPBackendFromConn(conn, rawURL, parallel)
-		if err != nil {
-			conn.client.Close()
-			return nil, err
-		}
-		return b, nil
+	if !probeSFTP(conn.client) {
+		Log.Add("ssh", "<<<", "SFTP unavailable, falling back to shell backend ("+ver+")")
+		return newSCPBackend(conn, rawURL, insecure, parallel), nil
 	}
-	Log.Add("ssh", "<<<", "SFTP unavailable — falling back to shell backend ("+ver+")")
-	b, err := newSCPBackendFromConn(conn, rawURL, parallel)
+	Log.Add("ssh", "<<<", "SFTP available, using SFTP backend ("+ver+")")
+	b, err := newSFTPBackend(conn, rawURL, insecure, parallel)
 	if err != nil {
 		conn.client.Close()
 		return nil, err
@@ -120,40 +128,13 @@ func probeSFTP(client *ssh.Client) bool {
 		return false
 	}
 	defer sess.Close()
-	if err := sess.RequestSubsystem("sftp"); err != nil {
-		return false
-	}
-	return true
+	return sess.RequestSubsystem("sftp") == nil
 }
 
-// fake:// is built eagerly: it has no connection to defer, and the lazy
-// wrapper's per-call retry plumbing would only add noise to profiles.
-func OpenBackendLazy(arg string, insecure bool, parallel int) model.Backend {
-	if strings.HasPrefix(arg, fakeScheme) {
-		b, err := NewFakeBackend(arg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		return b
-	}
-	if !IsRemote(arg) {
-		info, err := os.Stat(arg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %s: %v\n", arg, err)
-			os.Exit(1)
-		}
-		if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "error: %s: not a directory\n", arg)
-			os.Exit(1)
-		}
-		return NewLocalBackend(arg)
-	}
-	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
-		return OpenBackend(arg, insecure, parallel)
-	})
-}
-
+// TryOpenBackend validates the argument and returns a backend. Remote schemes
+// connect lazily on first use; fake:// is built eagerly since it has no
+// connection to defer and the lazy wrapper's retry plumbing would only add
+// noise to profiles.
 func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
 	if strings.HasPrefix(arg, fakeScheme) {
 		return NewFakeBackend(arg)

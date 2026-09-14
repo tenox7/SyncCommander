@@ -1,17 +1,20 @@
 package transport
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // sshKeepaliveInterval is how often we send keepalive@openssh.com global
@@ -39,12 +42,7 @@ func parseRemoteURL(rawURL string) (scheme, user, pass, host, port, remotePath s
 	if ai := strings.LastIndexByte(rest, '@'); ai >= 0 {
 		creds := rest[:ai]
 		hostport = rest[ai+1:]
-		if ci := strings.IndexByte(creds, ':'); ci >= 0 {
-			user = creds[:ci]
-			pass = creds[ci+1:]
-		} else {
-			user = creds
-		}
+		user, pass, _ = strings.Cut(creds, ":")
 	}
 
 	if strings.HasPrefix(hostport, "[") {
@@ -74,10 +72,9 @@ type sshConn struct {
 	basePath string
 }
 
-func dialSSH(rawURL string) (*sshConn, error) {
+func dialSSH(rawURL string, insecure bool) (*sshConn, error) {
 	scheme, user, pass, alias, port, remotePath := parseRemoteURL(rawURL)
 	host := alias
-	hasPass := pass != ""
 
 	cfgHost, cfgUser, cfgPort, cfgKeys := lookupSSHConfig(alias)
 	if cfgHost != "" {
@@ -93,19 +90,25 @@ func dialSSH(rawURL string) (*sshConn, error) {
 		user = cfgUser
 	}
 	if user == "" {
-		user = os.Getenv("USER")
+		user = loginUser()
+	}
+	hostKeys, err := hostKeyCallback(insecure)
+	if err != nil {
+		return nil, err
 	}
 
 	var auths []ssh.AuthMethod
-	if hasPass {
+	if pass != "" {
 		auths = append(auths, ssh.Password(pass))
 	}
 
 	var signers []ssh.Signer
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if conn, err := net.Dial("unix", sock); err == nil {
-			agentClient := agent.NewClient(conn)
-			if agentSigners, err := agentClient.Signers(); err == nil {
+		if agentConn, err := net.Dial("unix", sock); err == nil {
+			// The agent signs during the handshake, so its socket stays open
+			// until this function returns.
+			defer agentConn.Close()
+			if agentSigners, err := agent.NewClient(agentConn).Signers(); err == nil {
 				signers = append(signers, agentSigners...)
 			}
 		}
@@ -149,13 +152,13 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeys,
 		Timeout:         10 * time.Second,
 	}
 	c, chans, reqs, err := ssh.NewClientConn(tracked, addr, cfg)
 	if err != nil {
 		rawConn.Close()
-		return nil, fmt.Errorf("ssh handshake %s: %v", addr, err)
+		return nil, fmt.Errorf("ssh handshake %s: %v", addr, hostKeyHint(err))
 	}
 	client := ssh.NewClient(c, chans, reqs)
 	go sshKeepalive(client, tracked, scheme)
@@ -170,9 +173,63 @@ func dialSSH(rawURL string) (*sshConn, error) {
 	}, nil
 }
 
+// loginUser is the local account name, the ssh default for a missing user.
+func loginUser() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	u, err := user.Current()
+	if err != nil {
+		return ""
+	}
+	name := u.Username
+	if i := strings.LastIndexByte(name, '\\'); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// hostKeyCallback verifies against ~/.ssh/known_hosts unless -insecure.
+func hostKeyCallback(insecure bool) (ssh.HostKeyCallback, error) {
+	if insecure {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, name := range []string{"known_hosts", "known_hosts2"} {
+		if p := filepath.Join(home, ".ssh", name); fileExists(p) {
+			files = append(files, p)
+		}
+	}
+	if len(files) == 0 {
+		return nil, errors.New("ssh: no ~/.ssh/known_hosts; connect with ssh once or pass -insecure")
+	}
+	return knownhosts.New(files...)
+}
+
+// hostKeyHint turns knownhosts' terse errors into the action to take.
+func hostKeyHint(err error) error {
+	var ke *knownhosts.KeyError
+	if !errors.As(err, &ke) {
+		return err
+	}
+	if len(ke.Want) == 0 {
+		return errors.New("host key not in known_hosts; connect with ssh once or pass -insecure")
+	}
+	return fmt.Errorf("HOST KEY MISMATCH: %v", err)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // trackedConn wraps a net.Conn and records the nanosecond timestamp of the
 // most recent Read that returned bytes. The keepalive goroutine consults
-// this to skip its probe when the peer has been actively talking — under
+// this to skip its probe when the peer has been actively talking: under
 // heavy throughput, queueing a SendRequest behind file data can exceed the
 // timeout even on a healthy link, causing false-positive disconnects.
 type trackedConn struct {
@@ -200,10 +257,10 @@ func (c *trackedConn) idleFor() time.Duration {
 
 // sshKeepalive sends keepalive@openssh.com global requests on an interval.
 // Skips the probe when the connection has had read activity within the
-// interval — a recent read is proof the peer is alive, and probing while
-// the transport is saturated risks false-positive timeouts. Closes the
-// client if a probe errors or times out so any blocked session/SFTP write
-// unblocks with an error.
+// interval: a recent read is proof the peer is alive, and probing while the
+// transport is saturated risks false-positive timeouts. Closes the client if
+// a probe errors or times out so any blocked session/SFTP write unblocks
+// with an error.
 func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
 	t := time.NewTicker(sshKeepaliveInterval)
 	defer t.Stop()
@@ -217,7 +274,7 @@ func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
 		case <-done:
 			return
 		case <-t.C:
-			if conn != nil && conn.idleFor() < sshKeepaliveInterval {
+			if conn.idleFor() < sshKeepaliveInterval {
 				continue
 			}
 			errCh := make(chan error, 1)
@@ -228,12 +285,12 @@ func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
 			select {
 			case err := <-errCh:
 				if err != nil {
-					Log.Add(proto, "ERR", "ssh keepalive: "+err.Error()+" — closing connection")
+					Log.Add(proto, "ERR", "ssh keepalive: "+err.Error()+", closing connection")
 					client.Close()
 					return
 				}
 			case <-time.After(sshKeepaliveTimeout):
-				Log.Add(proto, "ERR", "ssh keepalive timeout — closing connection")
+				Log.Add(proto, "ERR", "ssh keepalive timeout, closing connection")
 				client.Close()
 				return
 			case <-done:
@@ -249,63 +306,6 @@ func sshDisplayURL(conn *sshConn, remotePath string) string {
 		displayHost = net.JoinHostPort(conn.alias, conn.port)
 	}
 	return fmt.Sprintf("%s://%s@%s%s", conn.scheme, conn.user, displayHost, remotePath)
-}
-
-var cksumProbes = []struct {
-	algo string
-	test string
-	cmd  string
-}{
-	{"sha256", "echo -n test | sha256sum >/dev/null 2>&1", "sha256sum"},
-	{"sha256", "echo -n test | shasum -a 256 >/dev/null 2>&1", "shasum -a 256"},
-	{"sha1", "echo -n test | sha1sum >/dev/null 2>&1", "sha1sum"},
-	{"sha1", "echo -n test | shasum >/dev/null 2>&1", "shasum"},
-	{"md5", "echo -n test | md5sum >/dev/null 2>&1", "md5sum"},
-	{"md5", "md5 -q -s test >/dev/null 2>&1", "md5 -q"},
-}
-
-func probeSSHChecksums(run func(string) (string, error)) (algos []string, cmds map[string]string) {
-	cmds = make(map[string]string)
-	seen := make(map[string]bool)
-	for _, p := range cksumProbes {
-		if cmds[p.algo] != "" {
-			continue
-		}
-		if _, err := run(p.test); err == nil {
-			cmds[p.algo] = p.cmd
-			if !seen[p.algo] {
-				algos = append(algos, p.algo)
-				seen[p.algo] = true
-			}
-		}
-	}
-	return
-}
-
-func runSSHCmd(client interface{ NewSession() (*ssh.Session, error) }, proto, cmd string) (string, error) {
-	return runSSHCmdCtx(nil, client, proto, cmd)
-}
-
-func runSSHCmdCtx(ctx context.Context, client interface{ NewSession() (*ssh.Session, error) }, proto, cmd string) (string, error) {
-	Log.Add(proto, ">>>", cmd)
-	session, err := client.NewSession()
-	if err != nil {
-		Log.Add(proto, "ERR", err.Error())
-		return "", err
-	}
-	defer session.Close()
-	defer cancelCloser(ctx, session)()
-	var stdout bytes.Buffer
-	session.Stdout = &stdout
-	if err := session.Run(cmd); err != nil {
-		Log.Add(proto, "ERR", err.Error())
-		return "", err
-	}
-	out := stdout.String()
-	if out != "" {
-		Log.Add(proto, "<<<", strings.TrimRight(out, "\n"))
-	}
-	return out, nil
 }
 
 func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles []string) {

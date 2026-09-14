@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -46,57 +45,36 @@ func (c *sftpConn) close() {
 }
 
 type SFTPBackend struct {
-	base      string
-	rawURL    string
-	client    *sftp.Client
-	sshClient *ssh.Client
-	display   string
-	cksumAlgo string
-	cksumCmds map[string]string
-	pool      *sshPool[*sftpConn]
+	sshShell
+	sftp *sftp.Client
+	pool *sshPool[*sftpConn]
 }
 
-func NewSFTPBackend(rawURL string, parallel int) (*SFTPBackend, error) {
-	conn, err := dialSSH(rawURL)
+func NewSFTPBackend(rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
+	conn, err := dialSSH(rawURL, insecure)
 	if err != nil {
 		return nil, err
 	}
-	b, err := newSFTPBackendFromConn(conn, rawURL, parallel)
+	b, err := newSFTPBackend(conn, rawURL, insecure, parallel)
 	if err != nil {
 		conn.client.Close()
 	}
 	return b, err
 }
 
-// newSFTPBackendFromConn builds an SFTPBackend over an already-dialed sshConn.
-// rawURL is retained so the pool can dial fresh SSH connections for parallel
-// transfers. parallel sizes the pool's extras (= parallel-1, so total
-// concurrent slots = parallel). On error the caller is responsible for
-// closing conn.client.
-func newSFTPBackendFromConn(conn *sshConn, rawURL string, parallel int) (*SFTPBackend, error) {
-	sftpClient, err := sftp.NewClient(conn.client, sftpFastOpts()...)
+// newSFTPBackend builds an SFTPBackend over an already-dialed sshConn; on
+// error the caller closes conn.client. rawURL lets the pool dial extra
+// connections for parallel transfers (parallel-1 of them).
+func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
+	client, err := sftp.NewClient(conn.client, sftpFastOpts()...)
 	if err != nil {
 		return nil, fmt.Errorf("sftp: %v", err)
 	}
-
-	remotePath := conn.basePath
-	switch {
-	case remotePath == "" || remotePath == "/" || remotePath == "/~":
-		if wd, err := sftpClient.Getwd(); err == nil {
-			remotePath = wd
-		} else {
-			remotePath = "/"
-		}
-	case strings.HasPrefix(remotePath, "/~/"):
-		if wd, err := sftpClient.Getwd(); err == nil {
-			remotePath = path.Join(wd, remotePath[3:])
-		}
-	}
-
-	primary := &sftpConn{sftp: sftpClient, ssh: conn.client}
-	maxExtras := parallel - 1
+	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp"}, sftp: client}
+	b.base = expandHome(conn.basePath, client.Getwd)
+	b.display = sshDisplayURL(conn, b.base)
 	dial := func() (*sftpConn, error) {
-		c, err := dialSSH(rawURL)
+		c, err := dialSSH(rawURL, insecure)
 		if err != nil {
 			return nil, err
 		}
@@ -108,30 +86,20 @@ func newSFTPBackendFromConn(conn *sshConn, rawURL string, parallel int) (*SFTPBa
 		Log.Add("sftp", "<<<", "extra connection dialed")
 		return &sftpConn{sftp: sc, ssh: c.client}, nil
 	}
-	pool := newSSHPool(primary, maxExtras, dial, func(c *sftpConn) { c.close() })
-
-	return &SFTPBackend{
-		base:      remotePath,
-		rawURL:    rawURL,
-		client:    sftpClient,
-		sshClient: conn.client,
-		display:   sshDisplayURL(conn, remotePath),
-		pool:      pool,
-	}, nil
+	b.pool = newSSHPool(&sftpConn{sftp: client, ssh: conn.client}, parallel-1, dial, func(c *sftpConn) { c.close() })
+	return b, nil
 }
-
-func (b *SFTPBackend) BasePath() string { return b.display }
 
 func (b *SFTPBackend) Close() error {
 	b.pool.close()
-	b.client.Close()
-	return b.sshClient.Close()
+	b.sftp.Close()
+	return b.client.Close()
 }
 
 func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	dir := path.Join(b.base, relDir)
+	dir := b.abs(relDir)
 	Log.Add("sftp", ">>>", "READDIR "+dir)
-	entries, err := b.client.ReadDir(dir)
+	entries, err := b.sftp.ReadDir(dir)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return nil, err
@@ -161,148 +129,114 @@ func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntr
 	return result, nil
 }
 
-func (b *SFTPBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	if b.cksumAlgo == "" {
-		return "", fmt.Errorf("no checksum algorithm configured")
-	}
-	cmd := fmt.Sprintf("%s %s", b.cksumCmds[b.cksumAlgo], shellQuote(path.Join(b.base, relPath)))
-	out, err := runSSHCmdCtx(ctx, b.sshClient, "sftp", cmd)
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(strings.TrimSpace(out))
-	if len(fields) == 0 {
-		return "", fmt.Errorf("empty checksum output")
-	}
-	return strings.TrimPrefix(fields[0], "\\"), nil
-}
-
-func (b *SFTPBackend) ProbeChecksums() []string {
-	if b.cksumCmds == nil {
-		run := func(cmd string) (string, error) { return runSSHCmd(b.sshClient, "sftp", cmd) }
-		var algos []string
-		algos, b.cksumCmds = probeSSHChecksums(run)
-		return algos
-	}
-	var algos []string
-	seen := make(map[string]bool)
-	for _, p := range cksumProbes {
-		if _, ok := b.cksumCmds[p.algo]; ok && !seen[p.algo] {
-			algos = append(algos, p.algo)
-			seen[p.algo] = true
-		}
-	}
-	return algos
-}
-
-func (b *SFTPBackend) SetChecksumAlgo(algo string) {
-	b.cksumAlgo = algo
-}
-
 func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {
-	err := b.client.Chtimes(path.Join(b.base, relPath), atime, mtime)
+	if atime.IsZero() {
+		atime = mtime
+	}
+	err := b.sftp.Chtimes(b.abs(relPath), atime, mtime)
 	if err != nil {
 		Log.Add("sftp", "ERR", "CHTIMES "+relPath+": "+err.Error())
 	}
 	return err
 }
 
-func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	Log.Add("sftp", ">>>", "STOR "+relPath)
-	fullPath := path.Join(b.base, relPath)
-	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+// write streams src into fullPath from offset on a pooled connection, then
+// applies mode. Close is checked: pkg/sftp reports the final flush status
+// there, so ignoring it would report a short file as copied.
+func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, offset int64, src io.Reader, mode os.FileMode) error {
+	if err := b.sftp.MkdirAll(path.Dir(fullPath)); err != nil {
 		return err
 	}
 	conn, release := b.pool.acquire()
 	defer release()
-	f, err := conn.sftp.Create(fullPath)
+	f, err := conn.sftp.OpenFile(fullPath, flags)
 	if err != nil {
-		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
-	defer f.Close()
-	defer cancelCloser(ctx, f)()
-	if _, err := io.Copy(f, src); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
+	stop := cancelCloser(ctx, f)
+	if offset > 0 {
+		if err = f.Truncate(offset); err == nil {
+			_, err = f.Seek(offset, io.SeekStart)
+		}
 	}
-	if err := conn.sftp.Chmod(fullPath, mode); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
+	if err == nil {
+		_, err = io.Copy(f, src)
 	}
-	return nil
+	stop()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = conn.sftp.Chmod(fullPath, mode)
+	}
+	return err
 }
 
+func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+	Log.Add("sftp", ">>>", "STOR "+relPath)
+	err := b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0, src, mode)
+	if err != nil {
+		Log.Add("sftp", "ERR", err.Error())
+	}
+	return err
+}
+
+// AppendFrom resumes at offset; the destination is truncated there first so a
+// file that shrank underneath us does not end up with a zero-filled hole.
 func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	Log.Add("sftp", ">>>", fmt.Sprintf("APPEND %s @%d", relPath, offset))
-	fullPath := path.Join(b.base, relPath)
-	if err := b.client.MkdirAll(path.Dir(fullPath)); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
-	}
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
 	defer rd.Close()
-	conn, release := b.pool.acquire()
-	defer release()
-	f, err := conn.sftp.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE)
+	err = b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE, offset, rd, mode)
 	if err != nil {
 		Log.Add("sftp", "ERR", err.Error())
-		return err
 	}
-	defer f.Close()
-	defer cancelCloser(ctx, f)()
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
-	}
-	if _, err := io.Copy(f, rd); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
-	}
-	if err := conn.sftp.Chmod(fullPath, mode); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
-		return err
-	}
-	return nil
+	return err
+}
+
+func (b *SFTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
+	return b.openAt(relPath, 0)
 }
 
 func (b *SFTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	return b.openAt(relPath, offset)
+}
+
+func (b *SFTPBackend) openAt(relPath string, offset int64) (io.ReadCloser, error) {
 	conn, release := b.pool.acquire()
-	rc, err := conn.sftp.Open(path.Join(b.base, relPath))
+	rc, err := conn.sftp.Open(b.abs(relPath))
+	if err == nil && offset > 0 {
+		if _, err = rc.Seek(offset, io.SeekStart); err != nil {
+			rc.Close()
+		}
+	}
 	if err != nil {
 		release()
 		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
-		return nil, err
-	}
-	if _, err := rc.Seek(offset, io.SeekStart); err != nil {
-		rc.Close()
-		release()
-		Log.Add("sftp", "ERR", "SEEK "+relPath+": "+err.Error())
 		return nil, err
 	}
 	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
 }
 
 func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
-	fullPath := path.Join(b.base, relPath)
+	fullPath := b.abs(relPath)
 	Log.Add("sftp", ">>>", "MKDIR "+relPath)
-	if err := b.client.MkdirAll(fullPath); err != nil {
+	if err := b.sftp.MkdirAll(fullPath); err != nil {
 		Log.Add("sftp", "ERR", err.Error())
 		return err
 	}
 	if mode != 0 {
-		_ = b.client.Chmod(fullPath, mode.Perm())
+		_ = b.sftp.Chmod(fullPath, mode.Perm())
 	}
 	return nil
 }
 
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	err := b.client.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+	err := b.sftp.Rename(b.abs(oldRelPath), b.abs(newRelPath))
 	if err != nil {
 		Log.Add("sftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
 	}
@@ -310,7 +244,7 @@ func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) e
 }
 
 func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
-	err := b.client.Remove(path.Join(b.base, relPath))
+	err := b.sftp.Remove(b.abs(relPath))
 	if err != nil {
 		Log.Add("sftp", "ERR", "REMOVE "+relPath+": "+err.Error())
 	}
@@ -318,7 +252,10 @@ func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
 }
 
 func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
-	err := b.removeAll(path.Join(b.base, relPath))
+	if isBaseRel(relPath) {
+		return fmt.Errorf("sftp: refusing to remove the base directory")
+	}
+	err := b.removeAll(b.abs(relPath))
 	if err != nil {
 		Log.Add("sftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
 	}
@@ -326,41 +263,29 @@ func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
 }
 
 func (b *SFTPBackend) removeAll(fullPath string) error {
-	info, err := b.client.Stat(fullPath)
+	info, err := b.sftp.Stat(fullPath)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return b.client.Remove(fullPath)
+		return b.sftp.Remove(fullPath)
 	}
-	entries, err := b.client.ReadDir(fullPath)
+	entries, err := b.sftp.ReadDir(fullPath)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		child := path.Join(fullPath, e.Name())
 		if e.IsDir() {
-			if err := b.removeAll(child); err != nil {
-				return err
-			}
-			continue
+			err = b.removeAll(child)
+		} else {
+			err = b.sftp.Remove(child)
 		}
-		if err := b.client.Remove(child); err != nil {
+		if err != nil {
 			return err
 		}
 	}
-	return b.client.RemoveDirectory(fullPath)
-}
-
-func (b *SFTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	conn, release := b.pool.acquire()
-	rc, err := conn.sftp.Open(path.Join(b.base, relPath))
-	if err != nil {
-		release()
-		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
-		return nil, err
-	}
-	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
+	return b.sftp.RemoveDirectory(fullPath)
 }
 
 // sftpPooledReader wraps an sftp.File so the underlying connection is

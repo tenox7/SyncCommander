@@ -3,7 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -22,23 +21,9 @@ import (
 	"sc/model"
 )
 
-// rsyncTransferFlags are passed to every rsync invocation that moves file
-// data. -t preserves mtime; --inplace writes directly to the destination
-// (resume keeps the partial body in place); --partial keeps interrupted
-// files for the next run; -W disables the delta-sync algorithm so the sender
-// streams the whole file. -W is intentional: gokrazy/rsync's hashSearch path
-// (internal/sender/fileio.go) misclassifies read errors as "file has changed
-// mid-transfer", and on this workload delta-sync saves no bandwidth anyway
-// (mostly immutable archives). --ignore-times bypasses rsync's quick-check
-// (skip when size+mtime match): SC only invokes these calls on user-initiated
-// copies, so we must transfer unconditionally — otherwise a same-size,
-// same-mtime, different-content file is silently skipped.
-var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "-W", "--ignore-times"}
-
-func rsyncFlagsForCtx(_ context.Context) []string {
-	return append([]string{}, rsyncTransferFlags...)
-}
-
+// RsyncBackend talks to an rsync daemon (rsync://). Listings and MD4 sums
+// come from dry runs of the in-process client; transfers run through the
+// rsync URL form so the daemon can recreate leading directories with -r.
 type RsyncBackend struct {
 	host        string
 	user        string
@@ -48,152 +33,8 @@ type RsyncBackend struct {
 	display     string
 	useChecksum bool
 	cksumAlgo   string
-	md4mu       sync.Mutex
-	md4cache    map[string]string
-	listCache   *rsyncListCache
-}
-
-// rsyncListCache stores per-directory entries populated by an in-flight
-// recursive listing call. List() consults this cache and waits for the dir
-// to land before falling back to a live per-dir listing. preloadCtx is the
-// outer scan context used by await, so per-call stall timeouts on List()
-// don't prematurely abandon the cache when the remote is slow.
-type rsyncListCache struct {
-	mu         sync.Mutex
-	cond       *sync.Cond
-	entries    map[string][]model.FileEntry
-	scope      string
-	active     bool
-	done       bool
-	preloadCtx context.Context
-}
-
-func newRsyncListCache() *rsyncListCache {
-	c := &rsyncListCache{entries: make(map[string][]model.FileEntry)}
-	c.cond = sync.NewCond(&c.mu)
-	return c
-}
-
-func (c *rsyncListCache) reset(ctx context.Context, scope string) {
-	c.mu.Lock()
-	c.entries = make(map[string][]model.FileEntry)
-	c.scope = scope
-	c.active = true
-	c.done = false
-	c.preloadCtx = ctx
-	c.mu.Unlock()
-}
-
-// emit appends entries for parent. We deliberately do NOT broadcast here:
-// rsync's recursive output revisits the same parent multiple times (e.g.
-// after descending into bin/, it returns to the top level for contrib/),
-// so any single emit can be a partial view. Only finish() broadcasts; List
-// awaiters block until the full listing is in.
-func (c *rsyncListCache) emit(parent string, entries []model.FileEntry) {
-	c.mu.Lock()
-	c.entries[parent] = append(c.entries[parent], entries...)
-	c.mu.Unlock()
-}
-
-func (c *rsyncListCache) finish() {
-	c.mu.Lock()
-	c.done = true
-	c.cond.Broadcast()
-	c.mu.Unlock()
-}
-
-func (c *rsyncListCache) invalidate(relDir string) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	delete(c.entries, relDir)
-	c.mu.Unlock()
-}
-
-// invalidateAncestors clears cache entries for every ancestor dir of relPath
-// up to and including "". Writes that may create intermediate dirs via an
-// implicit mkdir -p (CopyFrom, AppendFrom, SendLocalFile, Mkdir of a deep
-// path) must use this — invalidating only parentDir(relPath) leaves stale
-// listings for shallower ancestors that gained a new child.
-func (c *rsyncListCache) invalidateAncestors(relPath string) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	p := parentDir(relPath)
-	for {
-		delete(c.entries, p)
-		if p == "" {
-			return
-		}
-		p = parentDir(p)
-	}
-}
-
-func (c *rsyncListCache) invalidateTree(prefix string) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k := range c.entries {
-		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			delete(c.entries, k)
-		}
-	}
-}
-
-func parentDir(relPath string) string {
-	p := path.Dir(relPath)
-	if p == "." {
-		return ""
-	}
-	return p
-}
-
-func (c *rsyncListCache) lookup(relDir string) (entries []model.FileEntry, hit, active, done bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entries, hit = c.entries[relDir]
-	active = c.active
-	done = c.done
-	return
-}
-
-// await blocks until the preload finishes (or the preload context is
-// canceled), then returns whatever is in the cache for relDir. We do NOT
-// return on first cache hit because rsync's recursive output interleaves
-// entries from different parents — a partial cache view is unsafe to act
-// on. Intentionally ignores the caller's per-call ctx: that ctx typically
-// carries a per-list stall timeout (~120s) which is unsuited to a slow
-// remote where one recursive listing legitimately takes minutes.
-func (c *rsyncListCache) await(relDir string) ([]model.FileEntry, bool) {
-	c.mu.Lock()
-	pctx := c.preloadCtx
-	c.mu.Unlock()
-
-	notify := make(chan struct{})
-	if pctx != nil {
-		go func() {
-			select {
-			case <-pctx.Done():
-				c.mu.Lock()
-				c.cond.Broadcast()
-				c.mu.Unlock()
-			case <-notify:
-			}
-		}()
-	}
-	c.mu.Lock()
-	for !c.done && (pctx == nil || pctx.Err() == nil) {
-		c.cond.Wait()
-	}
-	entries, ok := c.entries[relDir]
-	c.mu.Unlock()
-	close(notify)
-	return entries, ok
+	md4         md4Cache
+	listCache   *listCache
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -201,17 +42,11 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 	if port == "" {
 		port = "873"
 	}
-
-	p := strings.TrimPrefix(remotePath, "/")
-	parts := strings.SplitN(p, "/", 2)
-	module := parts[0]
+	module, base, _ := strings.Cut(strings.TrimPrefix(remotePath, "/"), "/")
 	if module == "" {
-		return nil, fmt.Errorf("rsync: module name required in URL")
+		return nil, errors.New("rsync: module name required in URL")
 	}
-	base := ""
-	if len(parts) > 1 {
-		base = strings.Trim(parts[1], "/")
-	}
+	base = strings.Trim(base, "/")
 
 	displayHost := host
 	if port != "873" {
@@ -221,14 +56,19 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 	if base != "" {
 		display += "/" + base
 	}
-
+	// gorsync's daemon exchange takes the username only from the environment;
+	// the password goes through a per-call --password-file.
+	if user != "" {
+		os.Setenv("RSYNC_USERNAME", user)
+	}
 	return &RsyncBackend{
-		host:    net.JoinHostPort(host, port),
-		user:    user,
-		pass:    pass,
-		module:  module,
-		base:    base,
-		display: display,
+		host:      net.JoinHostPort(host, port),
+		user:      user,
+		pass:      pass,
+		module:    module,
+		base:      base,
+		display:   display,
+		listCache: newListCache(),
 	}, nil
 }
 
@@ -236,13 +76,29 @@ func (b *RsyncBackend) BasePath() string { return b.display }
 
 func (b *RsyncBackend) OwnsCopyProgress() bool { return true }
 
-func (b *RsyncBackend) remoteURL(relPath string) string {
+// modulePath is the daemon-protocol path module/base/rel, with a trailing
+// slash when the contents of a directory are wanted.
+func (b *RsyncBackend) modulePath(relPath string, dir bool) string {
 	p := b.module
 	if b.base != "" {
-		p = p + "/" + b.base
+		p += "/" + b.base
 	}
 	if relPath != "" {
-		p = p + "/" + relPath
+		p += "/" + relPath
+	}
+	if dir {
+		p += "/"
+	}
+	return p
+}
+
+// remoteURL is the rsync:// form for transfers. gorsync parses it with
+// net/url, so every path segment is percent-encoded or a name holding '#',
+// '?' or '%' would cut or corrupt the path.
+func (b *RsyncBackend) remoteURL(relPath string) string {
+	segs := strings.Split(b.modulePath(relPath, false), "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
 	}
 	hostPart := b.host
 	if b.user != "" {
@@ -252,7 +108,7 @@ func (b *RsyncBackend) remoteURL(relPath string) string {
 		}
 		hostPart = userinfo + "@" + b.host
 	}
-	return "rsync://" + hostPart + "/" + p
+	return "rsync://" + hostPart + "/" + strings.Join(segs, "/")
 }
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
@@ -272,23 +128,23 @@ func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...
 	cmd.Stdout = w
 	cmd.Stderr = &stderr
 	_, err := cmd.Run(ctx)
-	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if strings.Contains(errMsg, "module is read only") {
-			Log.Add("rsync", "FATAL", "module is read only — aborting operation")
-			TriggerFatalAbort(ctx)
-		}
-		if errMsg != "" {
-			return fmt.Errorf("%v: %s", err, errMsg)
-		}
-		return err
+	if err == nil {
+		return nil
 	}
-	return nil
+	errMsg := strings.TrimSpace(stderr.String())
+	if strings.Contains(errMsg, "module is read only") {
+		Log.Add("rsync", "FATAL", "module is read only, aborting operation")
+		TriggerFatalAbort(ctx)
+	}
+	if errMsg != "" {
+		return fmt.Errorf("%v: %s", err, errMsg)
+	}
+	return err
 }
 
 // dialLimited is the dialer gorsync uses to reach an rsync:// daemon. gorsync
 // opens that socket itself, so this hook is the only place the daemon's bytes
-// can be metered — every other protocol is wrapped where sc dials.
+// can be metered; every other protocol is wrapped where sc dials.
 // The Go resolver mirrors gorsync's own dialer: its restrict mode needs to
 // know which files name resolution touches.
 func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -298,6 +154,43 @@ func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
 		return nil, err
 	}
 	return LimitConn(c), nil
+}
+
+// runDaemon dials the daemon and runs client's dry run against remotePath,
+// returning the file list. The password travels in a 0600 file via
+// --password-file so no process-wide state is involved.
+func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string) (*rsyncclient.Result, error) {
+	tmpDir, err := os.MkdirTemp("", "rsync-daemon-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	if b.pass != "" {
+		pw := filepath.Join(tmpDir, "pw")
+		if err := os.WriteFile(pw, []byte(b.pass), 0600); err != nil {
+			return nil, err
+		}
+		flags = append(flags, "--password-file="+pw)
+	}
+	dst := filepath.Join(tmpDir, "dst")
+	if err := os.Mkdir(dst, 0700); err != nil {
+		return nil, err
+	}
+	client, err := newRsyncClient(flags, rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
+	if err != nil {
+		return nil, err
+	}
+	conn, err := dialLimited(ctx, "tcp", b.host)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	Log.Add("rsync", ">>>", label+" "+remotePath)
+	result, err := client.RunDaemon(ctx, conn, remotePath, []string{dst + "/"})
+	if err != nil {
+		Log.Add("rsync", "ERR", label+" "+remotePath+": "+err.Error())
+	}
+	return result, err
 }
 
 // rsyncProgressWriter consumes `rsync --progress` output and credits the
@@ -315,301 +208,54 @@ func (w *rsyncProgressWriter) Write(p []byte) (int, error) {
 	for {
 		i := bytes.IndexAny(w.buf, "\r\n")
 		if i < 0 {
-			break
+			return len(p), nil
 		}
 		line := bytes.TrimSpace(w.buf[:i])
 		w.buf = w.buf[i+1:]
-		if len(line) == 0 {
-			continue
-		}
 		end := bytes.IndexByte(line, ' ')
 		if end < 0 {
 			continue
 		}
 		off, err := strconv.ParseInt(string(line[:end]), 10, 64)
-		if err != nil {
-			continue
-		}
-		if off > w.last {
+		if err == nil && off > w.last {
 			w.adder.Add(off - w.last)
 			w.last = off
 		}
 	}
-	return len(p), nil
 }
 
 func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	if b.listCache != nil {
-		entries, hit, active, done := b.listCache.lookup(relDir)
-		if hit {
-			return entries, nil
-		}
-		if active && !done {
-			if e, ok := b.listCache.await(relDir); ok {
-				return e, nil
-			}
-		}
-	}
-	return b.liveList(ctx, relDir)
+	return b.listCache.serve(ctx, relDir, b.liveList)
 }
 
 func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	u := b.remoteURL(relDir) + "/"
-	Log.Add("rsync", ">>>", "LIST "+u)
-	args := []string{}
-	if b.useChecksum {
-		args = append(args, "-c")
-	}
-	args = append(args, u)
-	out, err := b.rsyncRun(ctx, args...)
+	result, err := b.runDaemon(ctx, "LIST", []string{"-n"}, b.modulePath(relDir, true))
 	if err != nil {
-		Log.Add("rsync", "ERR", err.Error())
 		return nil, err
 	}
-
-	var entries []model.FileEntry
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		entry, ok := parseRsyncListLine(line, relDir)
-		if !ok || entry.Name == "." || entry.Name == ".." {
-			continue
-		}
-		entries = append(entries, entry)
-	}
+	entries := fileListEntries(relDir, result.FileList)
 	Log.Add("rsync", "<<<", fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
 
-// PreloadRecursive fires a single rsync -r listing in the background,
-// streaming entries into the cache. Returns immediately. Subsequent List
-// calls under scope hit or wait on the cache. A second preload while one is
-// in flight is a no-op.
+// PreloadRecursive fires one recursive dry run in the background and feeds
+// the cache; List calls under scope then hit or wait on it.
 func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error {
-	if b.listCache == nil {
-		b.listCache = newRsyncListCache()
-	}
-	c := b.listCache
-	c.mu.Lock()
-	if c.active && !c.done {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	c.reset(ctx, scope)
-
-	go func() {
-		_ = b.runRecursiveList(ctx, scope, c.emit)
-		c.finish()
-	}()
+	b.listCache.start(ctx, scope, b.runRecursiveList)
 	return nil
 }
 
 func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
-	u := b.remoteURL(scope) + "/"
-	Log.Add("rsync", ">>>", "RLIST "+u)
-
-	var current string
-	var haveCurrent bool
-	var batch []model.FileEntry
-	var seenDirs []string
-	flush := func() {
-		if !haveCurrent {
-			return
-		}
-		emit(current, batch)
-		batch = nil
-		haveCurrent = false
-	}
-
-	lw := newLineWriter(func(line string) {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			return
-		}
-		parent, entry, ok := parseRsyncRecursiveLine(line, scope)
-		if !ok {
-			return
-		}
-		if !haveCurrent || parent != current {
-			flush()
-			current = parent
-			haveCurrent = true
-		}
-		batch = append(batch, entry)
-		if entry.IsDir {
-			seenDirs = append(seenDirs, entry.RelPath)
-		}
-	})
-
-	args := []string{"-r"}
-	if b.useChecksum {
-		args = append(args, "-c")
-	}
-	args = append(args, u)
-	cmd := rsynccmd.Command("rsync", args...)
-	var stderr bytes.Buffer
-	cmd.Stdout = lw
-	cmd.Stderr = &stderr
-	_, err := cmd.Run(ctx)
-	lw.flush()
-	flush()
-	// Touch every dir we saw so the cache reports a hit (with no children)
-	// instead of falling through to a per-dir live LIST. Without this,
-	// every empty leaf dir costs a fresh TCP+handshake round trip.
-	for _, d := range seenDirs {
-		emit(d, nil)
-	}
+	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, b.modulePath(scope, true))
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			err = fmt.Errorf("%v: %s", err, msg)
-		}
-		Log.Add("rsync", "ERR", "RLIST: "+err.Error())
 		return err
 	}
-	Log.Add("rsync", "<<<", "RLIST done")
+	emitFileList(scope, result.FileList, emit)
+	Log.Add("rsync", "<<<", fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }
 
-// lineWriter buffers stdout bytes and invokes cb for each complete '\n'-
-// terminated line. Used to stream-parse rsync recursive listings as they
-// arrive instead of buffering the full output.
-type lineWriter struct {
-	buf []byte
-	cb  func(string)
-}
-
-func newLineWriter(cb func(string)) *lineWriter {
-	return &lineWriter{cb: cb}
-}
-
-func (w *lineWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	for {
-		i := bytes.IndexByte(w.buf, '\n')
-		if i < 0 {
-			break
-		}
-		w.cb(string(w.buf[:i]))
-		w.buf = w.buf[i+1:]
-	}
-	return len(p), nil
-}
-
-func (w *lineWriter) flush() {
-	if len(w.buf) > 0 {
-		w.cb(string(w.buf))
-		w.buf = nil
-	}
-}
-
-// parseRsyncRecursiveLine parses one line of `rsync -r URL/scope/` output.
-// Each entry's path is relative to scope; we return the parent dir relative
-// to the backend's base (i.e. path.Join(scope, path.Dir(name))).
-func parseRsyncRecursiveLine(line, scope string) (parentRel string, entry model.FileEntry, ok bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 5 {
-		return "", model.FileEntry{}, false
-	}
-	modeStr := fields[0]
-	if len(modeStr) > 0 && modeStr[0] == 'l' {
-		return "", model.FileEntry{}, false
-	}
-	size, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return "", model.FileEntry{}, false
-	}
-	modTime, err := time.ParseInLocation("2006/01/02 15:04:05", fields[2]+" "+fields[3], time.Local)
-	if err != nil {
-		return "", model.FileEntry{}, false
-	}
-	nameIdx := strings.Index(line, fields[3]) + len(fields[3])
-	if nameIdx >= len(line) {
-		return "", model.FileEntry{}, false
-	}
-	full := strings.TrimLeft(line[nameIdx:], " ")
-	if full == "." || full == ".." {
-		return "", model.FileEntry{}, false
-	}
-	parent := path.Dir(full)
-	if parent == "." {
-		parent = ""
-	}
-	base := path.Base(full)
-	isDir := len(modeStr) > 0 && modeStr[0] == 'd'
-
-	parentRel = path.Join(scope, parent)
-
-	return parentRel, model.FileEntry{
-		RelPath: path.Join(scope, full),
-		Name:    base,
-		Size:    size,
-		ModTime: modTime,
-		IsDir:   isDir,
-		Mode:    parseRsyncMode(modeStr),
-	}, true
-}
-
-func parseRsyncListLine(line, relDir string) (model.FileEntry, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 5 {
-		return model.FileEntry{}, false
-	}
-	modeStr := fields[0]
-	size, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return model.FileEntry{}, false
-	}
-	modTime, err := time.ParseInLocation("2006/01/02 15:04:05", fields[2]+" "+fields[3], time.Local)
-	if err != nil {
-		return model.FileEntry{}, false
-	}
-	nameIdx := strings.Index(line, fields[3]) + len(fields[3])
-	if nameIdx >= len(line) {
-		return model.FileEntry{}, false
-	}
-	name := strings.TrimLeft(line[nameIdx:], " ")
-	if len(modeStr) > 0 && modeStr[0] == 'l' {
-		return model.FileEntry{}, false
-	}
-	isDir := len(modeStr) > 0 && modeStr[0] == 'd'
-
-	return model.FileEntry{
-		RelPath: path.Join(relDir, name),
-		Name:    name,
-		Size:    size,
-		ModTime: modTime,
-		IsDir:   isDir,
-		Mode:    parseRsyncMode(modeStr),
-	}, true
-}
-
-func parseRsyncMode(s string) os.FileMode {
-	if len(s) < 10 {
-		return 0644
-	}
-	var mode os.FileMode
-	if s[0] == 'd' {
-		mode |= os.ModeDir
-	}
-	if s[0] == 'l' {
-		mode |= os.ModeSymlink
-	}
-	bits := [9]os.FileMode{0400, 0200, 0100, 0040, 0020, 0010, 0004, 0002, 0001}
-	for i, b := range bits {
-		if s[1+i] != '-' {
-			mode |= b
-		}
-	}
-	return mode
-}
-
-func (b *RsyncBackend) ProbeChecksums() []string {
-	return []string{"md4", "rsync"}
-}
+func (b *RsyncBackend) ProbeChecksums() []string { return []string{"md4", "rsync"} }
 
 func (b *RsyncBackend) SetChecksumAlgo(algo string) {
 	b.cksumAlgo = algo
@@ -617,25 +263,11 @@ func (b *RsyncBackend) SetChecksumAlgo(algo string) {
 }
 
 func (b *RsyncBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	if b.cksumAlgo == "md4" {
-		b.md4mu.Lock()
-		sum, ok := b.md4cache[relPath]
-		b.md4mu.Unlock()
-		if ok {
-			return sum, nil
-		}
-		got, err := b.fetchMD4(ctx, relPath, false)
-		if err != nil {
-			return "", err
-		}
-		sum, ok = got[relPath]
-		if !ok {
-			return "", fmt.Errorf("md4: no checksum for %s", relPath)
-		}
-		return sum, nil
-	}
-	if !b.useChecksum {
-		return "", fmt.Errorf("rsync: checksum not enabled")
+	switch {
+	case b.cksumAlgo == "md4":
+		return b.md4.lookup(ctx, relPath, b.fetchMD4)
+	case !b.useChecksum:
+		return "", errors.New("rsync: checksum not enabled")
 	}
 	return "rsync_internal", nil
 }
@@ -648,116 +280,27 @@ func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope string, recu
 	return err
 }
 
-// invalidateMD4 drops one path's cached MD4 hash. md4cache is populated in
-// bulk by PrefetchChecksums and has no TTL, so writes that change a file's
-// content must clear its entry or a follow-up Checksum returns the pre-write
-// hash.
-func (b *RsyncBackend) invalidateMD4(relPath string) {
-	b.md4mu.Lock()
-	delete(b.md4cache, relPath)
-	b.md4mu.Unlock()
-}
-
-// invalidateMD4Tree drops all cached MD4 hashes at or under prefix. Used by
-// RemoveAll.
-func (b *RsyncBackend) invalidateMD4Tree(prefix string) {
-	b.md4mu.Lock()
-	defer b.md4mu.Unlock()
-	for k := range b.md4cache {
-		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			delete(b.md4cache, k)
-		}
-	}
-}
-
 func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
-	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
+	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), b.modulePath(scope, recursive))
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-
-	// -n (--dry-run): the sender computes MD4 of each file as part of
-	// filelist generation when -c is set and includes it in the FileList
-	// we read below. Without -n, rsync still downloads every file body to
-	// tmpDir — wasteful gigabytes for "just give me the checksums".
-	args := []string{"-c", "-n"}
-	if recursive {
-		args = append(args, "-r")
-	}
-	client, err := rsyncclient.New(args, rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(io.Discard), rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
-	if err != nil {
-		return nil, err
-	}
-
-	remotePath := b.module + "/"
-	if b.base != "" {
-		remotePath += b.base + "/"
-	}
-	if scope != "" {
-		remotePath += scope
-		if recursive {
-			remotePath += "/"
-		}
-	}
-
-	if b.user != "" {
-		os.Setenv("RSYNC_USERNAME", b.user)
-	}
-	if b.pass != "" {
-		os.Setenv("RSYNC_PASSWORD", b.pass)
-	}
-
-	rawConn, err := net.DialTimeout("tcp", b.host, 30*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer rawConn.Close()
-	conn := LimitConn(rawConn)
-
-	Log.Add("rsync", ">>>", "MD4 "+remotePath)
-	result, err := client.RunDaemon(ctx, conn, remotePath, []string{tmpDir + "/"})
-	if err != nil {
-		return nil, err
-	}
-
-	prefix := ""
-	if recursive {
-		prefix = scope
-	} else if scope != "" {
-		prefix = path.Dir(scope)
-		if prefix == "." {
-			prefix = ""
-		}
-	}
-
-	got := make(map[string]string, len(result.FileList))
-	var zero [16]byte
-	for _, fi := range result.FileList {
-		if fi.Checksum == zero {
-			continue
-		}
-		key := fi.Name
-		if prefix != "" {
-			key = path.Join(prefix, fi.Name)
-		}
-		got[key] = hex.EncodeToString(fi.Checksum[:])
-	}
+	got := b.md4.fromFileList(scope, recursive, result.FileList)
 	Log.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(got)))
-
-	b.md4mu.Lock()
-	if b.md4cache == nil {
-		b.md4cache = make(map[string]string, len(got))
-	}
-	for k, v := range got {
-		b.md4cache[k] = v
-	}
-	b.md4mu.Unlock()
 	return got, nil
 }
 
-func (b *RsyncBackend) SetTimes(_ context.Context, _ string, _, _, _ time.Time) error {
-	return fmt.Errorf("rsync: set times not supported")
+func (b *RsyncBackend) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
+	return errors.New("rsync: set times not supported")
+}
+
+// transferArgs are the flags for one data-moving call plus extra.
+func (b *RsyncBackend) transferArgs(extra ...string) []string {
+	args := transferFlags()
+	if b.useChecksum {
+		args = append(args, "-c")
+	}
+	return append(args, extra...)
 }
 
 // stageUploadPath builds, under tmpDir, the full relPath directory chain with
@@ -775,118 +318,64 @@ func stageUploadPath(tmpDir, relPath string) (stageTop, leaf string, err error) 
 	return filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0]), leaf, nil
 }
 
-// SendLocalFile sends an existing local file to the rsync daemon. Progress:
-// --progress drives the in-process rsync sender to emit byte-offset lines on
-// stdout; we parse them into the counter so the stall guard sees movement. On
-// error in-band credit is rolled back; on success a cap-bounded top-up brings
-// the total to fileSize.
+// push runs one recursive send of src to dest, crediting adder from the
+// --progress output and settling it against budget afterwards.
+func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder *CappedAdder, budget int64) error {
+	args := b.transferArgs("-r")
+	var stdout io.Writer = io.Discard
+	if adder != nil {
+		stdout = &rsyncProgressWriter{adder: adder}
+		args = append(args, "--progress")
+	}
+	Log.Add("rsync", ">>>", label+" ["+strings.Join(args, " ")+"]")
+	err := b.rsyncRunStdout(ctx, stdout, append(args, src, dest)...)
+	if err != nil {
+		Log.Add("rsync", "ERR", err.Error())
+	}
+	settlePush(ctx, adder, budget, err)
+	return err
+}
+
+// SendLocalFile sends an existing local file to the daemon. The file is
+// hardlinked under its full relPath and the top component sent with -r so the
+// daemon recreates the leading dirs; across filesystems the link fails and a
+// Mkdir plus flat send takes over.
 func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
 	tmpDir, err := os.MkdirTemp("", "rsync-send-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-
-	parentRel := path.Dir(relPath)
-	if parentRel == "." {
-		parentRel = ""
-	}
-
-	// Stage srcPath under its full relPath and recursively send the top
-	// component so -r recreates the leading dirs (the daemon can't mkdir). A
-	// hardlink avoids copying the (often large) body; across filesystems
-	// os.Link fails, so fall back to a recursive mkdir then a flat send.
+	parentRel := parentDir(relPath)
 	src, dest := srcPath, b.remoteURL(parentRel)+"/"
 	if stageTop, link, perr := stageUploadPath(tmpDir, relPath); perr == nil && os.Link(srcPath, link) == nil {
 		src, dest = stageTop, b.remoteURL("")+"/"
 	} else if err := b.Mkdir(ctx, parentRel, 0o755); err != nil {
 		return err
 	}
-
-	args := append(rsyncFlagsForCtx(ctx), "-r")
-	if b.useChecksum {
-		args = append(args, "-c")
-	}
-	counter := progressFromContext(ctx)
-	fileSize := fileSizeFromContext(ctx)
 	var adder *CappedAdder
-	var stdout io.Writer = io.Discard
-	if counter != nil && fileSize > 0 {
+	fileSize, _ := fileSizeFromContext(ctx)
+	if counter := progressFromContext(ctx); counter != nil && fileSize > 0 {
 		adder = NewCappedAdder(counter, fileSize)
-		stdout = &rsyncProgressWriter{adder: adder}
-		args = append(args, "--progress")
 	}
-	args = append(args, src, dest)
-	Log.Add("rsync", ">>>", "SEND "+srcPath+" -> "+relPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
-	err = b.rsyncRunStdout(ctx, stdout, args...)
+	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest, adder, fileSize)
 	b.listCache.invalidateAncestors(relPath)
-	b.invalidateMD4(relPath)
-	if err != nil {
-		if adder != nil {
-			counter.Add(-adder.Used())
-		}
-		Log.Add("rsync", "ERR", err.Error())
-		return err
-	}
-	if adder != nil {
-		adder.Add(fileSize)
-	}
-	return nil
+	b.md4.invalidate(relPath)
+	return err
 }
 
-// RecvToLocalFile downloads a file from the rsync daemon directly to a local
-// path, no tmp dir. With --inplace any existing prefix at dstPath is reused
-// for delta sync (resume).
+// RecvToLocalFile downloads directly to dstPath; --inplace reuses an existing
+// prefix there for resume.
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	parent := filepath.Dir(dstPath)
-	if err := os.MkdirAll(parent, 0755); err != nil {
-		return err
-	}
-	if fi, err := os.Stat(dstPath); err == nil && fi.IsDir() {
-		return fmt.Errorf("rsync: refuse to receive into existing directory %s", dstPath)
-	}
-
-	counter := progressFromContext(ctx)
-	base := baseProgressFromContext(ctx)
-	var stop chan struct{}
-	if counter != nil {
-		size := fileSizeFromContext(ctx)
-		if size <= 0 {
-			size = 1 << 62
+	return rsyncRecvToLocal(ctx, "rsync", relPath, dstPath, func(dstDir string) error {
+		args := b.transferArgs(b.remoteURL(relPath), dstDir)
+		Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath)
+		_, err := b.rsyncRun(ctx, args...)
+		if err != nil {
+			Log.Add("rsync", "ERR", err.Error())
 		}
-		var baseAdder *CappedAdder
-		if base != nil {
-			baseAdder = NewCappedAdder(base, size)
-		}
-		stop = make(chan struct{})
-		go tailDirSize(stop, parent, filepath.Base(dstPath), NewCappedAdder(counter, size), baseAdder)
-	}
-
-	u := b.remoteURL(relPath)
-	args := rsyncFlagsForCtx(ctx)
-	if b.useChecksum {
-		args = append(args, "-c")
-	}
-	args = append(args, u, parent+"/")
-	Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath+" ["+strings.Join(args[:len(args)-2], " ")+"]")
-	_, err := b.rsyncRun(ctx, args...)
-	if stop != nil {
-		close(stop)
-	}
-	if err != nil {
-		Log.Add("rsync", "ERR", err.Error())
 		return err
-	}
-	if fi, statErr := os.Stat(dstPath); statErr != nil {
-		Log.Add("rsync", "ERR", "RECV "+relPath+": dst missing after rsync: "+statErr.Error())
-		return fmt.Errorf("rsync: dst missing after recv: %w", statErr)
-	} else if fi.IsDir() {
-		Log.Add("rsync", "ERR", "RECV "+relPath+": dst is a directory after rsync (rsync misbehavior)")
-		return fmt.Errorf("rsync: dst became a directory after recv: %s", dstPath)
-	} else {
-		Log.Add("rsync", "<<<", fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
-	}
-	return nil
+	})
 }
 
 func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
@@ -895,69 +384,18 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-
 	stageTop, tmpFile, err := stageUploadPath(tmpDir, relPath)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, mode)
 	if err != nil {
 		return err
 	}
-
-	// Split the per-file progress budget so the rsync push phase also credits
-	// the counter — otherwise after the local copy exhausts the cap, a slow
-	// push can stall the guard even though bytes are flowing on the wire.
-	counter := progressFromContext(ctx)
-	fileSize := fileSizeFromContext(ctx)
-	var readAdder, pushAdder *CappedAdder
-	var readBudget, pushBudget int64
-	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
-		readBudget = fileSize / 2
-		pushBudget = fileSize - readBudget
-		readAdder = NewCappedAdder(counter, readBudget)
-		pushAdder = NewCappedAdder(counter, pushBudget)
-	}
-	var copyDst io.Writer = f
-	if readAdder != nil {
-		copyDst = &CountingWriter{W: f, Adder: readAdder}
-	}
-	if _, err := io.Copy(copyDst, src); err != nil {
-		f.Close()
-		if readAdder != nil {
-			counter.Add(-readAdder.Used())
-		}
-		return err
-	}
-	f.Close()
-
-	dest := b.remoteURL("") + "/"
-	sendArgs := append(rsyncFlagsForCtx(ctx), "-r")
-	if b.useChecksum {
-		sendArgs = append(sendArgs, "-c")
-	}
-	var stdout io.Writer = io.Discard
-	if pushAdder != nil {
-		stdout = &rsyncProgressWriter{adder: pushAdder}
-		sendArgs = append(sendArgs, "--progress")
-	}
-	sendArgs = append(sendArgs, stageTop, dest)
-	Log.Add("rsync", ">>>", "SEND "+relPath+" ["+strings.Join(sendArgs[:len(sendArgs)-2], " ")+"]")
-	err = b.rsyncRunStdout(ctx, stdout, sendArgs...)
+	err = b.push(ctx, "SEND "+relPath, stageTop, b.remoteURL("")+"/", pushAdder, pushBudget)
 	b.listCache.invalidateAncestors(relPath)
-	b.invalidateMD4(relPath)
-	if err != nil {
-		if pushAdder != nil {
-			counter.Add(-pushAdder.Used())
-		}
-		Log.Add("rsync", "ERR", err.Error())
-		return err
-	}
-	if pushAdder != nil {
-		pushAdder.Add(pushBudget)
-	}
-	Log.Add("rsync", "<<<", "OK")
-	return nil
+	b.md4.invalidate(relPath)
+	return err
 }
 
 func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
@@ -970,46 +408,32 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-
 	dirMode := mode.Perm()
 	if dirMode == 0 {
 		dirMode = 0755
 	}
-	stageLeaf := filepath.Join(tmpDir, filepath.FromSlash(clean))
-	if err := os.MkdirAll(stageLeaf, dirMode); err != nil {
+	if err := os.MkdirAll(filepath.Join(tmpDir, filepath.FromSlash(clean)), dirMode); err != nil {
 		return err
 	}
-
-	topLeaf := strings.SplitN(clean, "/", 2)[0]
-	stageTop := filepath.Join(tmpDir, topLeaf)
-	dest := b.remoteURL("") + "/"
-	args := []string{"-r", "-t", stageTop, dest}
-	Log.Add("rsync", ">>>", "MKDIR "+clean+" ["+strings.Join(args[:len(args)-2], " ")+"]")
-	_, err = b.rsyncRun(ctx, args...)
+	stageTop := filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0])
+	Log.Add("rsync", ">>>", "MKDIR "+clean)
+	_, err = b.rsyncRun(ctx, "-r", "-t", stageTop, b.remoteURL("")+"/")
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", "ERR", err.Error())
-	} else {
-		Log.Add("rsync", "<<<", "MKDIR "+clean+" OK")
 	}
 	return err
 }
 
-func (b *RsyncBackend) Rename(_ context.Context, _, _ string) error {
-	return fmt.Errorf("rsync: rename not supported")
+func (b *RsyncBackend) Rename(context.Context, string, string) error {
+	return errors.New("rsync: rename not supported")
 }
 
 func rsyncFilterEscape(name string) string {
 	if !strings.ContainsAny(name, "*?[") {
 		return name
 	}
-	return strings.NewReplacer(
-		`\`, `\\`,
-		`*`, `\*`,
-		`?`, `\?`,
-		`[`, `\[`,
-		`]`, `\]`,
-	).Replace(name)
+	return strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`).Replace(name)
 }
 
 func (b *RsyncBackend) Remove(ctx context.Context, relPath string) error {
@@ -1020,42 +444,34 @@ func (b *RsyncBackend) RemoveAll(ctx context.Context, relPath string) error {
 	return b.remove(ctx, relPath, true)
 }
 
+// remove deletes relPath by pushing an empty staging dir to its parent with
+// --delete and a filter that names only the victim.
 func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive bool) error {
+	if isBaseRel(relPath) {
+		return errors.New("rsync: refusing to remove module root")
+	}
 	clean := strings.Trim(path.Clean(relPath), "/")
-	if clean == "" || clean == "." {
-		return fmt.Errorf("rsync: refusing to remove module root")
-	}
-	parent := path.Dir(clean)
-	base := path.Base(clean)
-	if parent == "." {
-		parent = ""
-	}
-
 	tmpDir, err := os.MkdirTemp("", "rsync-remove-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dest := b.remoteURL(parent) + "/"
-	esc := rsyncFilterEscape(base)
+	esc := rsyncFilterEscape(path.Base(clean))
 	args := []string{"-r", "--delete", "--include=/" + esc}
-	if recursive {
-		args = append(args, "--include=/"+esc+"/***")
-	}
-	args = append(args, "--exclude=*", tmpDir+"/", dest)
-
 	op := "REMOVE"
 	if recursive {
+		args = append(args, "--include=/"+esc+"/***")
 		op = "REMOVEALL"
 	}
+	args = append(args, "--exclude=*", tmpDir+"/", b.remoteURL(parentDir(clean))+"/")
 	Log.Add("rsync", ">>>", op+" "+clean)
 	_, err = b.rsyncRun(ctx, args...)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
-		b.invalidateMD4Tree(relPath)
+		b.md4.invalidateTree(relPath)
 	} else {
-		b.invalidateMD4(relPath)
+		b.md4.invalidate(relPath)
 	}
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
@@ -1067,63 +483,13 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 }
 
 func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	tmpDir, err := os.MkdirTemp("", "rsync-download-*")
-	if err != nil {
-		return nil, err
-	}
-
-	counter := progressFromContext(ctx)
-	base := baseProgressFromContext(ctx)
-	var stop chan struct{}
-	if counter != nil {
-		size := fileSizeFromContext(ctx)
-		if size <= 0 {
-			size = 1 << 62
+	return rsyncOpenViaTemp(ctx, relPath, func(dstDir string) error {
+		args := b.transferArgs(b.remoteURL(relPath), dstDir)
+		Log.Add("rsync", ">>>", "RECV "+relPath)
+		_, err := b.rsyncRun(ctx, args...)
+		if err != nil {
+			Log.Add("rsync", "ERR", err.Error())
 		}
-		var baseAdder *CappedAdder
-		if base != nil {
-			baseAdder = NewCappedAdder(base, size)
-		}
-		stop = make(chan struct{})
-		go tailDirSize(stop, tmpDir, filepath.Base(relPath), NewCappedAdder(counter, size), baseAdder)
-	}
-
-	u := b.remoteURL(relPath)
-	recvArgs := rsyncFlagsForCtx(ctx)
-	if b.useChecksum {
-		recvArgs = append(recvArgs, "-c")
-	}
-	recvArgs = append(recvArgs, u, tmpDir+"/")
-	Log.Add("rsync", ">>>", "RECV "+relPath+" ["+strings.Join(recvArgs[:len(recvArgs)-2], " ")+"]")
-	_, err = b.rsyncRun(ctx, recvArgs...)
-	if stop != nil {
-		close(stop)
-	}
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		Log.Add("rsync", "ERR", err.Error())
-		return nil, err
-	}
-	Log.Add("rsync", "<<<", "OK")
-
-	f, err := os.Open(filepath.Join(tmpDir, filepath.Base(relPath)))
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return nil, err
-	}
-	rc := &tempReadCloser{File: f, tmpDir: tmpDir}
-	if counter != nil {
-		return WrapPreCounted(rc), nil
-	}
-	return rc, nil
-}
-
-type tempReadCloser struct {
-	*os.File
-	tmpDir string
-}
-
-func (t *tempReadCloser) Close() error {
-	t.File.Close()
-	return os.RemoveAll(t.tmpDir)
+		return err
+	})
 }

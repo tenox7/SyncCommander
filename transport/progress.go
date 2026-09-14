@@ -47,9 +47,9 @@ func ContextWithFileSize(ctx context.Context, size int64) context.Context {
 	return context.WithValue(ctx, fileSizeKey{}, size)
 }
 
-func fileSizeFromContext(ctx context.Context) int64 {
-	s, _ := ctx.Value(fileSizeKey{}).(int64)
-	return s
+func fileSizeFromContext(ctx context.Context) (int64, bool) {
+	s, ok := ctx.Value(fileSizeKey{}).(int64)
+	return s, ok
 }
 
 type modTimeKey struct{}

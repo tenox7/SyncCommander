@@ -46,7 +46,7 @@ type RcloneBackend struct {
 	feat      *fs.Features
 	ht        hash.Type
 	avail     []string
-	listCache *rsyncListCache
+	listCache *listCache
 	objs      *rcObjCache
 }
 
@@ -117,10 +117,11 @@ func NewRcloneBackend(rawURL string, insecure bool) (*RcloneBackend, error) {
 		return nil, fmt.Errorf("rclone: %v", err)
 	}
 	b := &RcloneBackend{
-		url:  MaskURLPassword(rawURL),
-		f:    f,
-		feat: f.Features(),
-		objs: newRcObjCache(rcloneObjCacheLimit),
+		url:       MaskURLPassword(rawURL),
+		f:         f,
+		feat:      f.Features(),
+		objs:      newRcObjCache(rcloneObjCacheLimit),
+		listCache: newListCache(),
 	}
 	b.avail = rcloneHashNames(f.Hashes())
 	if len(b.avail) > 0 {
@@ -187,18 +188,7 @@ func (b *RcloneBackend) object(ctx context.Context, relPath string) (fs.Object, 
 }
 
 func (b *RcloneBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	if b.listCache != nil {
-		entries, hit, active, done := b.listCache.lookup(relDir)
-		if hit {
-			return entries, nil
-		}
-		if active && !done {
-			if e, ok := b.listCache.await(relDir); ok {
-				return e, nil
-			}
-		}
-	}
-	return b.liveList(ctx, relDir)
+	return b.listCache.serve(ctx, relDir, b.liveList)
 }
 
 func (b *RcloneBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -468,24 +458,7 @@ func (b *RcloneBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	if !b.canListRecursive() {
 		return nil
 	}
-	if b.listCache == nil {
-		b.listCache = newRsyncListCache()
-	}
-	c := b.listCache
-	c.mu.Lock()
-	if c.active && !c.done {
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	c.reset(ctx, scope)
-
-	go func() {
-		if err := b.runRecursiveList(ctx, scope, c.emit); err != nil {
-			Log.Add("rclone", "ERR", "preload: "+err.Error())
-		}
-		c.finish()
-	}()
+	b.listCache.start(ctx, scope, b.runRecursiveList)
 	return nil
 }
 
@@ -530,8 +503,12 @@ func (b *RcloneBackend) runRecursiveList(ctx context.Context, scope string, emit
 		return nil
 	}
 	err := b.feat.ListR(ctx, scope, cb)
+	if err != nil {
+		Log.Add("rclone", "ERR", "recursive list: "+err.Error())
+		return err
+	}
 	Log.Add("rclone", "<<<", fmt.Sprintf("recursive list: %d entries", count))
-	return err
+	return nil
 }
 
 // rcObjectInfo is the fs.ObjectInfo sc hands to Put — enough for rclone to
