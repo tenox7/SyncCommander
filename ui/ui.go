@@ -513,7 +513,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "=":
 		m.settings.Open()
 	case "S", "s":
-		if !m.scanning() && !m.copying && !m.deleting {
+		if !m.busy() {
 			m.swapSides()
 		}
 	case "w":
@@ -546,10 +546,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if leftPath == m.leftArg && rightPath == m.rightArg {
 			break
 		}
-		cmd, _ := m.reopenBackends(leftPath, rightPath)
-		if cmd != nil {
-			return m, cmd
-		}
+		return m, m.reopenOrExplain(leftPath, rightPath)
 	case "o":
 		node := m.activePanel().CursorNode()
 		if node != nil && node.IsAttr {
@@ -588,10 +585,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !descend {
 			break
 		}
-		cmd, _ := m.reopenBackends(leftPath, rightPath)
-		if cmd != nil {
-			return m, cmd
-		}
+		return m, m.reopenOrExplain(leftPath, rightPath)
 	}
 	return m, nil
 }
@@ -753,6 +747,19 @@ func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.HandleKey(msg)
 	}
 	return m, nil
+}
+
+// reopenOrExplain reopens both sides or, when one cannot be opened, shows the
+// attempted locations in the URL dialog with the error, so a failed parent or
+// descend key is never silent.
+func (m *Model) reopenOrExplain(leftPath, rightPath string) tea.Cmd {
+	cmd, errMsg := m.reopenBackends(leftPath, rightPath)
+	if errMsg == "" {
+		return cmd
+	}
+	m.openDlg.Open(transport.MaskURLPassword(leftPath), transport.MaskURLPassword(rightPath))
+	m.openDlg.SetError(errMsg)
+	return nil
 }
 
 // reopenBackends switches to new open arguments; an unchanged side keeps its
@@ -1102,25 +1109,32 @@ func (m *Model) openRename(node *model.TreeNode) {
 			newRel += "/"
 		}
 		newRel += newName
+		left, right, scanner := m.left, m.right, m.scanner
 		return func() tea.Msg {
 			ctx := context.Background()
 			var err error
 			switch presence {
 			case model.PresenceLeftOnly:
-				err = m.left.Rename(ctx, oldRel, newRel)
+				err = left.Rename(ctx, oldRel, newRel)
 			case model.PresenceRightOnly:
-				err = m.right.Rename(ctx, oldRel, newRel)
+				err = right.Rename(ctx, oldRel, newRel)
 			default:
-				err = m.left.Rename(ctx, oldRel, newRel)
-				if rerr := m.right.Rename(ctx, oldRel, newRel); err == nil {
+				err = left.Rename(ctx, oldRel, newRel)
+				if rerr := right.Rename(ctx, oldRel, newRel); err == nil {
 					err = rerr
 				}
 			}
 			if err != nil {
 				transport.Log.Add("rename", "ERR", oldRel+" -> "+newRel+": "+err.Error())
+				// One side may have been renamed: re-list the parent so the
+				// tree shows what is really there instead of the old row.
+				parent := model.DirOf(oldRel)
+				if le, re, lerr := scanner.ListBothDir(ctx, parent); lerr == nil {
+					scanner.RefreshDir(parent, le, re, opts)
+				}
 				return renameDoneMsg{err: err}
 			}
-			if m.scanner.RenameNode(node, newName, newRel, oldRel, opts) {
+			if scanner.RenameNode(node, newName, newRel, oldRel, opts) {
 				return renameDoneMsg{rescan: node}
 			}
 			return renameDoneMsg{}
