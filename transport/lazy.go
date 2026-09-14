@@ -44,9 +44,9 @@ func isConnLost(err error) bool {
 	return false
 }
 
-// ErrResumeUnsupported is returned by lazyBackend.AppendFrom/OpenAt when the
+// ErrUnsupported is returned by lazyBackend.AppendFrom/OpenAt when the
 // underlying backend does not implement the corresponding optional interface.
-var ErrResumeUnsupported = errors.New("resume not supported by this backend")
+var ErrUnsupported = errors.New("resume not supported by this backend")
 
 type lazyBackend struct {
 	factory         func() (model.Backend, error)
@@ -306,7 +306,7 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.
 	}
 	r, ok := inner.(model.Resumer)
 	if !ok {
-		return ErrResumeUnsupported
+		return ErrUnsupported
 	}
 	return b.markBrokenIf(r.AppendFrom(ctx, relPath, src, mode, offset))
 }
@@ -317,7 +317,7 @@ func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 		return nil, err
 	}
 	if _, ok := inner.(model.SeekableOpener); !ok {
-		return nil, ErrResumeUnsupported
+		return nil, ErrUnsupported
 	}
 	return RetryVal(ctx, b.proto, "openat "+relPath, func() (io.ReadCloser, error) {
 		inner, err := b.ensureConnected()
@@ -326,7 +326,7 @@ func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 		}
 		o, ok := inner.(model.SeekableOpener)
 		if !ok {
-			return nil, ErrResumeUnsupported
+			return nil, ErrUnsupported
 		}
 		rc, err := o.OpenAt(ctx, relPath, offset)
 		return rc, b.markBrokenIf(err)
@@ -339,7 +339,7 @@ func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string
 		return err
 	}
 	if _, ok := inner.(model.LocalSender); !ok {
-		return ErrResumeUnsupported
+		return ErrUnsupported
 	}
 	return Retry(ctx, b.proto, "send "+relPath, func() error {
 		inner, err := b.ensureConnected()
@@ -348,7 +348,7 @@ func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string
 		}
 		s, ok := inner.(model.LocalSender)
 		if !ok {
-			return ErrResumeUnsupported
+			return ErrUnsupported
 		}
 		return b.markBrokenIf(s.SendLocalFile(ctx, srcPath, relPath, mode))
 	})
@@ -360,7 +360,7 @@ func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string
 		return err
 	}
 	if _, ok := inner.(model.BatchSender); !ok {
-		return ErrResumeUnsupported
+		return ErrUnsupported
 	}
 	return Retry(ctx, b.proto, "batch send "+relPath, func() error {
 		inner, err := b.ensureConnected()
@@ -369,7 +369,7 @@ func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string
 		}
 		s, ok := inner.(model.BatchSender)
 		if !ok {
-			return ErrResumeUnsupported
+			return ErrUnsupported
 		}
 		return b.markBrokenIf(s.SendLocalTree(ctx, srcRoot, relPath, onFile))
 	})
@@ -393,7 +393,7 @@ func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath stri
 		return err
 	}
 	if _, ok := inner.(model.LocalReceiver); !ok {
-		return ErrResumeUnsupported
+		return ErrUnsupported
 	}
 	return Retry(ctx, b.proto, "recv "+relPath, func() error {
 		inner, err := b.ensureConnected()
@@ -402,7 +402,7 @@ func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath stri
 		}
 		r, ok := inner.(model.LocalReceiver)
 		if !ok {
-			return ErrResumeUnsupported
+			return ErrUnsupported
 		}
 		return b.markBrokenIf(r.RecvToLocalFile(ctx, relPath, dstPath))
 	})

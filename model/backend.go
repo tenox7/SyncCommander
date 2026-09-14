@@ -163,7 +163,7 @@ func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 		if err == nil {
 			return rd, nil
 		}
-		// Fall back below on any error (notably ErrResumeUnsupported).
+		// Fall back below on any error (notably ErrUnsupported).
 	}
 	rd, err := r.Backend.Open(ctx, r.RelPath)
 	if err != nil {

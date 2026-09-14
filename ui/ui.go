@@ -1339,7 +1339,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							batched = true
 							transport.Log.Add("copy", "<<<", "BATCH "+nodeRel+" OK")
 						} else {
-							if !errors.Is(err, transport.ErrResumeUnsupported) {
+							if !errors.Is(err, transport.ErrUnsupported) {
 								transport.Log.Add("copy", "ERR", "BATCH "+nodeRel+": "+err.Error())
 							}
 							progress.Total.Store(int64(len(files)))
@@ -1471,7 +1471,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 							if err == nil {
 								return nil
 							}
-							if !errors.Is(err, transport.ErrResumeUnsupported) && !errors.Is(err, errResumeMismatch) {
+							if !errors.Is(err, transport.ErrUnsupported) && !errors.Is(err, errResumeMismatch) {
 								return err
 							}
 						}
@@ -1629,7 +1629,7 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 }
 
 // errResumeMismatch reports that a resumed file did not match the source after
-// the append. Callers treat it like ErrResumeUnsupported: fall back to a full
+// the append. Callers treat it like ErrUnsupported: fall back to a full
 // overwrite copy rather than retrying the append.
 var errResumeMismatch = errors.New("resumed file does not match source")
 
@@ -1685,14 +1685,14 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 
 // resumeAttempt resumes a partial upload by appending bytes from offset onward,
 // then runs verify (if any) against the finished file. Returns
-// transport.ErrResumeUnsupported if dst can't append, errResumeMismatch if the
+// transport.ErrUnsupported if dst can't append, errResumeMismatch if the
 // result doesn't match the source; on any error the progress credited during
 // the attempt is rolled back. The offset portion is also tracked in BaseBytes
 // so it doesn't inflate the transfer-rate calculation.
 func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context) error) error {
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
-		return transport.ErrResumeUnsupported
+		return transport.ErrUnsupported
 	}
 	bytes.Add(offset)
 	baseBytes.Add(offset)
@@ -1786,7 +1786,7 @@ func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 	var rd io.ReadCloser
 	if seeker, ok := o.Backend.(model.SeekableOpener); ok {
 		r, err := seeker.OpenAt(ctx, o.RelPath, offset)
-		if err != nil && !errors.Is(err, transport.ErrResumeUnsupported) {
+		if err != nil && !errors.Is(err, transport.ErrUnsupported) {
 			return nil, err
 		}
 		rd = r

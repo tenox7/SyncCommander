@@ -159,8 +159,8 @@ func TestResumeVerifierDisabled(t *testing.T) {
 func TestResumeMismatchIsTreatedLikeUnsupported(t *testing.T) {
 	// The copy loop falls back to a full copy for both sentinels; assert they
 	// stay distinguishable from a generic transfer error.
-	if errors.Is(errResumeMismatch, transport.ErrResumeUnsupported) {
-		t.Error("errResumeMismatch must not alias ErrResumeUnsupported")
+	if errors.Is(errResumeMismatch, transport.ErrUnsupported) {
+		t.Error("errResumeMismatch must not alias ErrUnsupported")
 	}
 	wrapped := errors.Join(errResumeMismatch, errors.New("ctx"))
 	if !errors.Is(wrapped, errResumeMismatch) {
