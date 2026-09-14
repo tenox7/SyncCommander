@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"sc/transport"
 )
@@ -34,34 +35,22 @@ func (d *LogDialog) ToggleErrFilter() {
 	d.follow = true
 }
 
-func isErrLogLine(line string) bool {
-	parts := strings.SplitN(line, " ", 4)
-	if len(parts) < 3 {
-		return false
+// count and window read only the lines on screen; the log itself may hold
+// a hundred thousand.
+func (d *LogDialog) count() int {
+	if d.errOnly {
+		return transport.Log.ErrLen()
 	}
-	return parts[2] == "ERR" || parts[2] == "FAIL" || parts[2] == "FATAL"
+	return transport.Log.Len()
 }
 
-func (d *LogDialog) filteredLines() []string {
-	lines := transport.Log.Lines()
-	if !d.errOnly {
-		return lines
+func (d *LogDialog) window(from, to int) []string {
+	if d.errOnly {
+		return transport.Log.ErrSlice(from, to)
 	}
-	out := lines[:0:0]
-	for _, l := range lines {
-		if isErrLogLine(l) {
-			out = append(out, l)
-		}
-	}
-	return out
+	return transport.Log.Slice(from, to)
 }
 
-func (d *LogDialog) filteredLen() int {
-	if !d.errOnly {
-		return transport.Log.Len()
-	}
-	return len(d.filteredLines())
-}
 func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()
@@ -69,6 +58,8 @@ func (d *LogDialog) Close() {
 	d.lastSeenFatal = transport.Log.FatalCount()
 }
 
+// AutoOpen pops the log on new errors, but not within five seconds of the
+// user closing it; a fatal error always opens it in errors-only mode.
 func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 	if fatalCount > d.lastSeenFatal {
 		d.lastSeenErrs = errCount
@@ -88,94 +79,51 @@ func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 	d.visible = true
 	d.follow = true
 }
+
 func (d *LogDialog) IsOpen() bool { return d.visible }
 
-func (d *LogDialog) viewHeight() int {
-	h := d.height - 6
-	if h < 1 {
-		h = 1
-	}
-	return h
-}
+func (d *LogDialog) viewHeight() int { return max(d.height-6, 1) }
 
-func (d *LogDialog) ScrollUp() {
-	d.follow = false
-	d.offset -= d.viewHeight() / 2
-	if d.offset < 0 {
-		d.offset = 0
+func (d *LogDialog) scrollBy(delta int) {
+	d.offset = max(d.offset+delta, 0)
+	if delta < 0 {
+		d.follow = false
+		return
 	}
-}
-
-func (d *LogDialog) ScrollDown() {
-	lines := d.filteredLen()
-	vh := d.viewHeight()
-	d.offset += vh / 2
-	max := lines - vh
-	if max < 0 {
-		max = 0
-	}
-	if d.offset >= max {
-		d.offset = max
+	if end := max(d.count()-d.viewHeight(), 0); d.offset >= end {
+		d.offset = end
 		d.follow = true
 	}
 }
 
-func (d *LogDialog) PageUp() {
-	d.follow = false
-	d.offset -= d.viewHeight()
-	if d.offset < 0 {
-		d.offset = 0
-	}
-}
-
-func (d *LogDialog) PageDown() {
-	lines := d.filteredLen()
-	vh := d.viewHeight()
-	d.offset += vh
-	max := lines - vh
-	if max < 0 {
-		max = 0
-	}
-	if d.offset >= max {
-		d.offset = max
-		d.follow = true
-	}
-}
+func (d *LogDialog) ScrollUp()   { d.scrollBy(-d.viewHeight() / 2) }
+func (d *LogDialog) ScrollDown() { d.scrollBy(d.viewHeight() / 2) }
+func (d *LogDialog) PageUp()     { d.scrollBy(-d.viewHeight()) }
+func (d *LogDialog) PageDown()   { d.scrollBy(d.viewHeight()) }
 
 func (d *LogDialog) Home() {
 	d.follow = false
 	d.offset = 0
 }
 
-func (d *LogDialog) End() {
-	d.follow = true
-}
+func (d *LogDialog) End() { d.follow = true }
 
 func (d *LogDialog) View(width, height int, spinner string) string {
 	if !d.visible {
 		return ""
 	}
-	d.width = width
-	d.height = height
-
-	lines := d.filteredLines()
+	d.width, d.height = width, height
+	total := d.count()
 	vh := d.viewHeight()
-	contentWidth := width - 6
-	if contentWidth < 20 {
-		contentWidth = 20
-	}
-
+	contentWidth := max(width-6, 20)
 	if d.follow {
-		d.offset = len(lines) - vh
-		if d.offset < 0 {
-			d.offset = 0
-		}
+		d.offset = max(total-vh, 0)
 	}
+	end := min(d.offset+vh, total)
+	lines := d.window(d.offset, end)
 
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-
-	var sb strings.Builder
 	followMark := " "
 	if d.follow {
 		followMark = "▼"
@@ -184,27 +132,19 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 	if d.errOnly {
 		filterTag = "  [errors only]"
 	}
-	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", spinner, followMark, len(lines), filterTag)))
+
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", spinner, followMark, total, filterTag)))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
-
-	end := d.offset + vh
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := d.offset; i < end; i++ {
-		line := lines[i]
-		if len(line) > contentWidth {
-			line = line[:contentWidth]
-		}
-		sb.WriteString(line)
+	for _, line := range lines {
+		sb.WriteString(ansi.Truncate(line, contentWidth, ""))
 		sb.WriteString("\n")
 	}
-	for i := end - d.offset; i < vh; i++ {
+	for i := len(lines); i < vh; i++ {
 		sb.WriteString("\n")
 	}
-
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  Esc=close"))
@@ -214,7 +154,5 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 		BorderForeground(lipgloss.Color("4")).
 		Padding(0, 1).
 		Width(contentWidth + 2)
-
-	dialog := style.Render(sb.String())
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, dialog)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, style.Render(sb.String()))
 }
