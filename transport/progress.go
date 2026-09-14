@@ -78,9 +78,21 @@ func WrapPreCounted(rc io.ReadCloser) io.ReadCloser {
 	return preCountedReadCloser{ReadCloser: rc}
 }
 
+// IsPreCounted reports whether r, or a reader it wraps (via Unwrap), was
+// marked pre-counted: the producer already credited its bytes to the progress
+// counter, so the consumer must not count them again.
 func IsPreCounted(r io.Reader) bool {
-	_, ok := r.(PreCounted)
-	return ok
+	for r != nil {
+		if _, ok := r.(PreCounted); ok {
+			return true
+		}
+		u, ok := r.(interface{ Unwrap() io.Reader })
+		if !ok {
+			return false
+		}
+		r = u.Unwrap()
+	}
+	return false
 }
 
 // ProgressOwner is implemented by backends whose CopyFrom counts its own bytes

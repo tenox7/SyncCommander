@@ -46,7 +46,7 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 		return err
 	}
 	defer session.Close()
-	defer cancelCloser(ctx, session)()
+	defer CancelCloser(ctx, session)()
 	var stderr bytes.Buffer
 	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, &stderr
 	if err := session.Run(cmd); err != nil {
@@ -382,7 +382,7 @@ func (s *sshShell) stream(ctx context.Context, client *ssh.Client, cmd string, r
 		return nil, err
 	}
 	r.Reader = rd
-	r.stop = cancelCloser(ctx, session)
+	r.stop = CancelCloser(ctx, session)
 	return r, nil
 }
 

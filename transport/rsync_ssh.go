@@ -76,7 +76,7 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, client *rs
 		return nil, err
 	}
 	defer session.Close()
-	defer cancelCloser(ctx, session)()
+	defer CancelCloser(ctx, session)()
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		return nil, err

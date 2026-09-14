@@ -153,7 +153,7 @@ func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, off
 	if err != nil {
 		return err
 	}
-	stop := cancelCloser(ctx, f)
+	stop := CancelCloser(ctx, f)
 	if offset > 0 {
 		if err = f.Truncate(offset); err == nil {
 			_, err = f.Seek(offset, io.SeekStart)

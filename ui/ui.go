@@ -1772,13 +1772,13 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 		return err
 	}
 	defer reader.Close()
-	defer startCancelCloser(ctx, reader)()
+	defer transport.CancelCloser(ctx, reader)()
 	dstOwnsProgress := false
 	if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
 		dstOwnsProgress = true
 	}
 	var added atomic.Int64
-	var srcReader io.Reader = sizedReader{Reader: reader, size: srcEntry.Size}
+	var srcReader io.Reader = reader
 	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
 		srcReader = &trackedReader{r: srcReader, target: counter, added: &added}
 	}
@@ -1867,7 +1867,8 @@ func (t *trackedReadCloser) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (t *trackedReadCloser) Close() error { return t.rc.Close() }
+func (t *trackedReadCloser) Close() error      { return t.rc.Close() }
+func (t *trackedReadCloser) Unwrap() io.Reader { return t.rc }
 
 type cancelReadCloser struct {
 	rc  io.ReadCloser
@@ -1881,7 +1882,8 @@ func (c *cancelReadCloser) Read(p []byte) (int, error) {
 	return c.rc.Read(p)
 }
 
-func (c *cancelReadCloser) Close() error { return c.rc.Close() }
+func (c *cancelReadCloser) Close() error      { return c.rc.Close() }
+func (c *cancelReadCloser) Unwrap() io.Reader { return c.rc }
 
 type trackedReader struct {
 	r      io.Reader
@@ -1898,6 +1900,8 @@ func (t *trackedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (t *trackedReader) Unwrap() io.Reader { return t.r }
+
 type cancelReader struct {
 	r   io.Reader
 	ctx context.Context
@@ -1910,17 +1914,7 @@ func (c *cancelReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-func startCancelCloser(ctx context.Context, c io.Closer) func() {
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = c.Close()
-		case <-done:
-		}
-	}()
-	return func() { close(done) }
-}
+func (c *cancelReader) Unwrap() io.Reader { return c.r }
 
 func (m *Model) openRename(node *model.TreeNode) {
 	var oldName string
@@ -2603,25 +2597,3 @@ func (m *Model) View() string {
 
 	return screen
 }
-
-// Size forwards the source length through the copy reader chain so
-// destinations that must declare it up front (model.Sized) still see it.
-func (t *trackedReader) Size() int64 { return sizeOf(t.r) }
-
-func (c *cancelReader) Size() int64 { return sizeOf(c.r) }
-
-func sizeOf(r io.Reader) int64 {
-	if s, ok := r.(model.Sized); ok {
-		return s.Size()
-	}
-	return -1
-}
-
-// sizedReader carries the known source length alongside the stream. Only the
-// scanned entry knows it — Backend.Open returns a plain io.ReadCloser.
-type sizedReader struct {
-	io.Reader
-	size int64
-}
-
-func (s sizedReader) Size() int64 { return s.size }

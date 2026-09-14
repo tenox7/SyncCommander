@@ -174,7 +174,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 // TCP keepalive via the shared Dialer, so dead peers there are detected
 // at the OS level.
 func (b *FTPBackend) abortOnCancel(ctx context.Context) func() {
-	return cancelCloser(ctx, b.rawConn)
+	return CancelCloser(ctx, b.rawConn)
 }
 
 func (b *FTPBackend) BasePath() string { return b.display }
@@ -200,7 +200,7 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 		poolRelease()
 		return nil, nil, false
 	}
-	// On cancel, cancelCloser force-closes this conn's control socket, so it
+	// On cancel, CancelCloser force-closes this conn's control socket, so it
 	// goes back dead. Zero lastUsed to force a liveness probe on next acquire
 	// rather than handing out a corpse within the 60s trust window.
 	release := func() {
@@ -383,7 +383,7 @@ func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, o
 }
 
 func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, raw net.Conn, fullPath string, src io.Reader, offset int64) error {
-	defer cancelCloser(ctx, raw)()
+	defer CancelCloser(ctx, raw)()
 	err := b.ensureDir(conn, path.Dir(fullPath))
 	if err == nil && offset > 0 {
 		err = conn.StorFrom(fullPath, src, uint64(offset))
@@ -514,7 +514,7 @@ func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io
 			Log.Add("ftp", "ERR", err.Error())
 			return nil, err
 		}
-		return &ftpReader{rc: resp, stop: cancelCloser(ctx, ex.rawConn), done: release}, nil
+		return &ftpReader{rc: resp, stop: CancelCloser(ctx, ex.rawConn), done: release}, nil
 	}
 	b.mu.Lock()
 	resp, err := retrFrom(b.conn, fullPath, offset)

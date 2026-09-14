@@ -35,6 +35,8 @@ func main() {
 	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences (hour-modulo)")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate and ssh host key verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
+	stallTimeout := flag.Duration("stall-timeout", 60*time.Second, "abort and retry a transfer with no progress for this long (0 = never)")
+	listTimeout := flag.Duration("list-timeout", 120*time.Second, "abort one directory listing after this long (0 = never)")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	bwLimit := flag.String("bwlimit", "0", "bandwidth limit per direction, e.g. 512k, 4M (0 = unlimited)")
@@ -89,6 +91,9 @@ func main() {
 	transport.SetBandwidthOut(bwOut)
 
 	transport.SetMaxRetries(*maxRetries)
+	transport.SetStallTimeout(*stallTimeout)
+	model.ListTimeout = *listTimeout
+	model.LogFn = transport.Log.Add
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
 	transport.SetResticIdleTimeout(*resticTimeout)
 

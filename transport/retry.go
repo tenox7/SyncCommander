@@ -11,12 +11,12 @@ import (
 	"time"
 )
 
-// cancelCloser starts a watcher that closes c when ctx is canceled. The
+// CancelCloser starts a watcher that closes c when ctx is canceled. The
 // returned stop func cancels the watcher; call it on normal completion
 // (e.g. via defer) so the goroutine doesn't leak after the close. Closing
 // the destination handle is what actually unblocks an in-flight Write on
 // SFTP/SSH backends; ctx cancellation alone does not. c may be nil.
-func cancelCloser(ctx context.Context, c io.Closer) func() {
+func CancelCloser(ctx context.Context, c io.Closer) func() {
 	if c == nil {
 		return func() {}
 	}
@@ -141,7 +141,7 @@ func isPermanentError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	for _, sub := range []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported"} {
+	for _, sub := range []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported", "unknown module"} {
 		if strings.Contains(msg, sub) {
 			return true
 		}

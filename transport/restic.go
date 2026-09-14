@@ -42,13 +42,6 @@ type ResticBackend struct {
 	listCache *listCache
 }
 
-var (
-	_ model.Backend            = (*ResticBackend)(nil)
-	_ model.ChecksumProber     = (*ResticBackend)(nil)
-	_ model.SeekableOpener     = (*ResticBackend)(nil)
-	_ model.RecursivePreloader = (*ResticBackend)(nil)
-)
-
 func NewResticBackend(rawURL string, insecure bool, parallel int) (*ResticBackend, error) {
 	scheme, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	hb, err := newHTTPBase("restic", scheme == "restics", host, port, remotePath, user, pass, insecure, parallel, resticIdle.get())

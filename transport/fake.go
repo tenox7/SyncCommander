@@ -503,7 +503,7 @@ func (b *FakeBackend) openEntry(relPath string, e model.FileEntry, offset int64)
 	if offset > e.Size {
 		offset = e.Size
 	}
-	return LimitReadCloser(&fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size}), nil
+	return LimitReadCloser(&fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size, have: -1}), nil
 }
 
 // fakeReader streams deterministic bytes for a synthetic file without ever
@@ -514,16 +514,11 @@ type fakeReader struct {
 	size  int64
 	block [4096]byte
 	have  int64 // block index currently in block[], -1 when empty
-	first bool
 }
 
 func (r *fakeReader) Read(p []byte) (int, error) {
 	if r.off >= r.size {
 		return 0, io.EOF
-	}
-	if !r.first {
-		r.have = -1
-		r.first = true
 	}
 	n := 0
 	for n < len(p) && r.off < r.size {
