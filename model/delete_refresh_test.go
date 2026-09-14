@@ -11,14 +11,14 @@ func TestRefreshDirAfterRightDeletePrunesSubtree(t *testing.T) {
 
 	dir := &TreeNode{
 		RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true, Depth: 1, Parent: root,
-		Left:  &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
-		Right: &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
+		Left:   &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
+		Right:  &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
 		Listed: true, Expanded: true,
 	}
 	sub := &TreeNode{
 		RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true, Depth: 2, Parent: dir,
-		Left:  &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
-		Right: &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
+		Left:   &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
+		Right:  &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
 		Listed: true,
 	}
 	sub.Children = []*TreeNode{{
@@ -37,7 +37,7 @@ func TestRefreshDirAfterRightDeletePrunesSubtree(t *testing.T) {
 	s := &Scanner{tree: root}
 	// Right side deleted: parent re-list returns the dir on the left only.
 	left := []FileEntry{{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true}}
-	s.RefreshDir("", left, nil, false, false, false)
+	s.RefreshDir("", left, nil, CompareOpts{})
 
 	got := findChild(root.Children, "cbc1 pcb")
 	if got == nil {
@@ -70,8 +70,8 @@ func TestRefreshDirPruneDropsGoneSideOnlyDescendant(t *testing.T) {
 	root := NewRootNode()
 	dir := &TreeNode{
 		RelPath: "d", Name: "d", IsDir: true, Depth: 1, Parent: root,
-		Left:  &FileEntry{RelPath: "d", Name: "d", IsDir: true},
-		Right: &FileEntry{RelPath: "d", Name: "d", IsDir: true},
+		Left:   &FileEntry{RelPath: "d", Name: "d", IsDir: true},
+		Right:  &FileEntry{RelPath: "d", Name: "d", IsDir: true},
 		Listed: true,
 	}
 	dir.Children = []*TreeNode{
@@ -84,7 +84,7 @@ func TestRefreshDirPruneDropsGoneSideOnlyDescendant(t *testing.T) {
 	root.Children = []*TreeNode{dir}
 
 	s := &Scanner{tree: root}
-	s.RefreshDir("", []FileEntry{{RelPath: "d", Name: "d", IsDir: true}}, nil, false, false, false)
+	s.RefreshDir("", []FileEntry{{RelPath: "d", Name: "d", IsDir: true}}, nil, CompareOpts{})
 
 	got := findChild(root.Children, "d")
 	if len(got.Children) != 1 || got.Children[0].Name != "both.txt" {

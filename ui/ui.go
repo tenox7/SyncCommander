@@ -1072,9 +1072,7 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	isDir := node.IsDir
 	var relPath string
 	var files, dirs int
@@ -1142,7 +1140,7 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 		parentDir := model.DirOf(relPath)
 		le, re, err := scanner.ListBothDir(refreshCtx, parentDir)
 		if err == nil {
-			scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace, ignoreTZDST)
+			scanner.RefreshDir(parentDir, le, re, opts)
 		}
 		return deleteDoneMsg{}
 	}
@@ -1199,7 +1197,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, mirror bool) te
 		// Copy and mirror-delete enumerate the in-memory tree, which shows an
 		// unlisted dir as empty. List the whole subtree first or the copy
 		// silently skips it and mirror under-counts what to delete.
-		if nodeIsDir && !scanner.EnsureSubtreeListed(ctx, node, opts.SubSecond, opts.TimeGrace, opts.IgnoreTZDST) {
+		if nodeIsDir && !scanner.EnsureSubtreeListed(ctx, node, opts) {
 			transport.Log.Add("copy", "ERR", "aborted "+nodeRel+": subtree could not be fully listed")
 			return copyDoneMsg{}
 		}
@@ -1890,6 +1888,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 		if newName == "" || newName == oldName {
 			return nil
 		}
+		opts := *m.cmpOpts
 		var oldRel string
 		var presence model.Presence
 		m.readTree(func(*model.TreeNode) {
@@ -1919,7 +1918,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 				transport.Log.Add("rename", "ERR", oldRel+" -> "+newRel+": "+err.Error())
 				return renameDoneMsg{err: err}
 			}
-			if m.scanner.RenameNode(node, newName, newRel, oldRel, m.cmpOpts.SubSecond, m.cmpOpts.TimeGrace, m.cmpOpts.IgnoreTZDST) {
+			if m.scanner.RenameNode(node, newName, newRel, oldRel, opts) {
 				return renameDoneMsg{rescan: node}
 			}
 			return renameDoneMsg{}
@@ -1931,9 +1930,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	left := m.left
 	right := m.right
 	scanner := m.scanner
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	return func() tea.Msg {
 		ctx := context.Background()
 		var l, r *model.FileEntry
@@ -1965,7 +1962,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		parentDir := model.DirOf(relPath)
 		le, re, err := scanner.ListBothDir(ctx, parentDir)
 		if err == nil {
-			scanner.RefreshDir(parentDir, le, re, subSecond, timeGrace, ignoreTZDST)
+			scanner.RefreshDir(parentDir, le, re, opts)
 		}
 		return touchDoneMsg{}
 	}
@@ -2084,14 +2081,11 @@ func (m *Model) syncPanels() {
 
 func (m *Model) startScan() tea.Cmd {
 	m.scanning = true
-	checksum := m.cmpOpts.Checksum
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	scanner := m.scanner
 	return func() tea.Msg {
 		timeScan("dir scan", "/", func() {
-			scanner.Scan(context.Background(), checksum, subSecond, timeGrace, ignoreTZDST)
+			scanner.Scan(context.Background(), opts)
 		})
 		return scanDoneMsg{}
 	}
@@ -2106,63 +2100,52 @@ func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
 }
 
 func (m *Model) rescanNode(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
-	checksum := m.cmpOpts.Checksum
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
-			scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST, changed)
+			scanner.RescanNode(context.Background(), node, opts, changed)
 		})
 		return rescanDoneMsg{}
 	}
 }
 
 func (m *Model) rescanWithTopLevel(node *model.TreeNode) tea.Cmd {
-	checksum := m.cmpOpts.Checksum
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	rescanCursor := node != nil && node.RelPath != ""
 	return func() tea.Msg {
 		timeScan("rescan", target, func() {
 			if rescanCursor {
-				scanner.RescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST, nil)
+				scanner.RescanNode(context.Background(), node, opts, nil)
 			}
-			scanner.RefreshTopLevel(context.Background(), subSecond, timeGrace, ignoreTZDST)
+			scanner.RefreshTopLevel(context.Background(), opts)
 		})
 		return rescanDoneMsg{}
 	}
 }
 
 func (m *Model) deepRescanNode(node *model.TreeNode) tea.Cmd {
-	checksum := m.cmpOpts.Checksum
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("deep scan", target, func() {
-			scanner.DeepRescanNode(context.Background(), node, checksum, subSecond, timeGrace, ignoreTZDST)
+			scanner.DeepRescanNode(context.Background(), node, opts)
 		})
 		return rescanDoneMsg{}
 	}
 }
 
 func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
-	subSecond := m.cmpOpts.SubSecond
-	timeGrace := m.cmpOpts.TimeGrace
-	ignoreTZDST := m.cmpOpts.IgnoreTZDST
+	opts := *m.cmpOpts
 	scanner := m.scanner
 	target := scanTargetLabel(node)
 	return func() tea.Msg {
 		timeScan("list", target, func() {
-			scanner.ListNode(context.Background(), node, subSecond, timeGrace, ignoreTZDST)
+			scanner.ListNode(context.Background(), node, opts)
 		})
 		return rescanDoneMsg{}
 	}
@@ -2311,11 +2294,11 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		if start := m.deleteProgress.Start.Load(); start > 0 {
 			info.Elapsed = time.Since(time.Unix(0, start))
 		}
-	case m.checksumming || progress.Phase == "checksumming...":
+	case m.checksumming || progress.Phase == model.PhaseChecksumming:
 		info.State = "CHECKSUM"
 		info.ChecksumDone = progress.ChecksumDone
 		info.ChecksumTotal = progress.ChecksumFiles
-	case m.scanning || progress.Phase == "scanning...":
+	case m.scanning || progress.Phase == model.PhaseScanning:
 		info.State = "DIR SCAN"
 		info.DirsListed = progress.DirsListed
 		info.DirsTotal = progress.DirsTotal
@@ -2353,7 +2336,7 @@ func (m Model) View() string {
 	progress := m.scanner.Progress()
 
 	spinner := ""
-	if (progress.Phase != "" && progress.Phase != "done") || m.scanning || m.deleting || m.copying || m.checksumming {
+	if (progress.Phase != "" && progress.Phase != model.PhaseDone) || m.scanning || m.deleting || m.copying || m.checksumming {
 		spinner = spinnerFrames[m.spinFrame]
 	}
 	operation := ""

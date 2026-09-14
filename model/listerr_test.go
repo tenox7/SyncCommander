@@ -56,7 +56,7 @@ func TestScanListFailureDoesNotMergePartialResult(t *testing.T) {
 	}, fail: map[string]bool{"d": true}}
 
 	s := NewScanner(left, right, 1, 1, true)
-	s.Scan(context.Background(), false, false, false, false)
+	s.Scan(context.Background(), CompareOpts{})
 
 	d := findChild(s.Tree().Children, "d")
 	if d == nil {
@@ -106,7 +106,7 @@ func TestEnsureSubtreeListedFillsShallowTree(t *testing.T) {
 	right := &stubBackend{dirs: dirs}
 
 	s := NewScanner(left, right, 1, 1, false) // shallow
-	s.Scan(context.Background(), false, false, false, false)
+	s.Scan(context.Background(), CompareOpts{})
 
 	d := findChild(s.Tree().Children, "d")
 	if UnlistedDir(d) == nil {
@@ -117,7 +117,7 @@ func TestEnsureSubtreeListedFillsShallowTree(t *testing.T) {
 		t.Fatalf("unlisted subtree already yields %d files", len(files))
 	}
 
-	if !s.EnsureSubtreeListed(context.Background(), d, false, false, false) {
+	if !s.EnsureSubtreeListed(context.Background(), d, CompareOpts{}) {
 		t.Fatal("EnsureSubtreeListed reported failure")
 	}
 	if n := UnlistedDir(d); n != nil {
@@ -141,11 +141,11 @@ func TestEnsureSubtreeListedReportsFailure(t *testing.T) {
 	right := &stubBackend{dirs: dirs}
 
 	s := NewScanner(left, right, 1, 1, false)
-	s.Scan(context.Background(), false, false, false, false)
+	s.Scan(context.Background(), CompareOpts{})
 	d := findChild(s.Tree().Children, "d")
 
 	right.fail = map[string]bool{"d/sub": true}
-	if s.EnsureSubtreeListed(context.Background(), d, false, false, false) {
+	if s.EnsureSubtreeListed(context.Background(), d, CompareOpts{}) {
 		t.Fatal("EnsureSubtreeListed reported success despite a failing listing")
 	}
 }

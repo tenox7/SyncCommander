@@ -44,7 +44,7 @@ func TestPerfScan(t *testing.T) {
 	runtime.ReadMemStats(&m0)
 
 	t0 := time.Now()
-	scanner.Scan(context.Background(), false, false, true, true)
+	scanner.Scan(context.Background(), model.CompareOpts{TimeGrace: true, IgnoreTZDST: true})
 	scanElapsed := time.Since(t0)
 
 	runtime.ReadMemStats(&m1)

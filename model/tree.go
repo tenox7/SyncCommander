@@ -3,7 +3,7 @@ package model
 import (
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -128,20 +128,26 @@ func (n *TreeNode) OverallStatus() AttrStatus {
 	if n.Compare.Presence != PresenceBoth {
 		return AttrDifferent
 	}
-	attrs := []AttrStatus{n.Compare.Size, n.Compare.ModTime, n.Compare.ATime, n.Compare.CTime, n.Compare.BirthTime, n.Compare.Mode, n.Compare.Checksum}
-	hasUnknown := false
-	for _, a := range attrs {
-		if a == AttrDifferent {
-			return AttrDifferent
-		}
-		if a == AttrUnknown || a == AttrScanning {
-			hasUnknown = true
-		}
-	}
-	if hasUnknown {
+	c := &n.Compare
+	return combineStatus([]AttrStatus{c.Size, c.ModTime, c.ATime, c.CTime, c.BirthTime, c.Mode, c.Checksum})
+}
+
+// combineStatus folds attribute results: any difference wins, otherwise any
+// unknown, otherwise equal. An empty set is unknown.
+func combineStatus(attrs []AttrStatus) AttrStatus {
+	if len(attrs) == 0 {
 		return AttrUnknown
 	}
-	return AttrEqual
+	result := AttrEqual
+	for _, a := range attrs {
+		switch a {
+		case AttrDifferent:
+			return AttrDifferent
+		case AttrUnknown, AttrScanning:
+			result = AttrUnknown
+		}
+	}
+	return result
 }
 
 func NewRootNode() *TreeNode {
@@ -203,15 +209,11 @@ func (c *ChangedPaths) touchesSubtree(dir string) bool {
 	return false
 }
 
-// mergeChildrenPreserving merges fresh entries into parent's children while
-// reusing existing TreeNodes (by name+isDir). Existing nodes keep their
-// Children/Listed/Expanded; new entries are added, missing ones dropped.
-// Used to refresh a single directory level without wiping nested state.
-func mergeChildrenPreserving(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
-	return mergeChildrenPreservingWithChanged(parent, leftEntries, rightEntries, depth, subSecond, timeGrace, ignoreTZDST, nil)
-}
-
-func mergeChildrenPreservingWithChanged(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool, changed *ChangedPaths) []*TreeNode {
+// MergeChildren merges fresh entries into parent's children, reusing existing
+// TreeNodes by (name, isDir) so already-listed subtrees keep their
+// Children/Listed/Expanded state; new entries are added, missing ones
+// dropped. changed names paths whose cached checksums must not survive.
+func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, opts CompareOpts, changed *ChangedPaths) []*TreeNode {
 	keyFor := func(name string, isDir bool) string {
 		if isDir {
 			return name + "/"
@@ -256,24 +258,18 @@ func mergeChildrenPreservingWithChanged(parent *TreeNode, leftEntries, rightEntr
 	}
 	nodes := make([]*TreeNode, 0, len(byKey))
 	for _, n := range byKey {
-		compareNode(n, subSecond, timeGrace, ignoreTZDST)
+		compareNode(n, opts)
 		revalidateChecksum(n, changed)
 		if n.IsDir && len(n.Children) > 0 && n.Compare.Presence != PresenceBoth {
-			n.Children = pruneSubtreeToSide(n.Children, n.Compare.Presence == PresenceLeftOnly, subSecond, timeGrace, ignoreTZDST)
+			n.Children = pruneSubtreeToSide(n.Children, n.Compare.Presence == PresenceLeftOnly, opts)
 		}
 		nodes = append(nodes, n)
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		a, b := nodes[i], nodes[j]
-		if a.IsDir != b.IsDir {
-			return a.IsDir
-		}
-		return a.Name < b.Name
-	})
+	sortNodes(nodes)
 	return nodes
 }
 
-func pruneSubtreeToSide(children []*TreeNode, keepLeft, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
+func pruneSubtreeToSide(children []*TreeNode, keepLeft bool, opts CompareOpts) []*TreeNode {
 	kept := children[:0]
 	for _, c := range children {
 		if keepLeft {
@@ -294,12 +290,12 @@ func pruneSubtreeToSide(children []*TreeNode, keepLeft, subSecond, timeGrace, ig
 		if c.Left == nil && c.Right == nil {
 			continue
 		}
-		compareNode(c, subSecond, timeGrace, ignoreTZDST)
+		compareNode(c, opts)
 		if !c.IsDir {
 			c.Compare.Checksum = AttrNA
 		}
 		if c.IsDir && len(c.Children) > 0 {
-			c.Children = pruneSubtreeToSide(c.Children, keepLeft, subSecond, timeGrace, ignoreTZDST)
+			c.Children = pruneSubtreeToSide(c.Children, keepLeft, opts)
 		}
 		kept = append(kept, c)
 	}
@@ -335,79 +331,39 @@ func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
 		n.RightCksumSize = 0
 		n.RightCksumModTime = time.Time{}
 	}
-	switch {
-	case n.Compare.Presence != PresenceBoth:
+	if n.Compare.Presence != PresenceBoth {
 		n.Compare.Checksum = AttrNA
+		return
+	}
+	n.Compare.Checksum = checksumStatus(n)
+}
+
+// checksumStatus derives Compare.Checksum from the cached sums of a file
+// present on both sides.
+func checksumStatus(n *TreeNode) AttrStatus {
+	switch {
 	case n.LeftChecksum == "" || n.RightChecksum == "":
-		n.Compare.Checksum = AttrUnknown
+		return AttrUnknown
 	case n.LeftChecksum == n.RightChecksum:
-		n.Compare.Checksum = AttrEqual
-	default:
-		n.Compare.Checksum = AttrDifferent
+		return AttrEqual
 	}
+	return AttrDifferent
 }
 
-func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, subSecond, timeGrace, ignoreTZDST bool) []*TreeNode {
-	keyFor := func(name string, isDir bool) string {
-		if isDir {
-			return name + "/"
-		}
-		return name
-	}
-	byKey := make(map[string]*TreeNode)
-
-	for i := range leftEntries {
-		e := &leftEntries[i]
-		key := keyFor(e.Name, e.IsDir)
-		node := byKey[key]
-		if node == nil {
-			node = &TreeNode{
-				RelPath: e.RelPath,
-				Name:    e.Name,
-				IsDir:   e.IsDir,
-				Depth:   depth,
-				Parent:  parent,
-			}
-			byKey[key] = node
-		}
-		node.Left = e
-	}
-
-	for i := range rightEntries {
-		e := &rightEntries[i]
-		key := keyFor(e.Name, e.IsDir)
-		node := byKey[key]
-		if node == nil {
-			node = &TreeNode{
-				RelPath: e.RelPath,
-				Name:    e.Name,
-				IsDir:   e.IsDir,
-				Depth:   depth,
-				Parent:  parent,
-			}
-			byKey[key] = node
-		}
-		node.Right = e
-	}
-
-	nodes := make([]*TreeNode, 0, len(byKey))
-	for _, n := range byKey {
-		compareNode(n, subSecond, timeGrace, ignoreTZDST)
-		nodes = append(nodes, n)
-	}
-
-	sort.Slice(nodes, func(i, j int) bool {
-		a, b := nodes[i], nodes[j]
+// sortNodes orders directories first, then by name.
+func sortNodes(nodes []*TreeNode) {
+	slices.SortFunc(nodes, func(a, b *TreeNode) int {
 		if a.IsDir != b.IsDir {
-			return a.IsDir
+			if a.IsDir {
+				return -1
+			}
+			return 1
 		}
-		return a.Name < b.Name
+		return strings.Compare(a.Name, b.Name)
 	})
-
-	return nodes
 }
 
-func compareNode(n *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
+func compareNode(n *TreeNode, opts CompareOpts) {
 	n.Compare.Presence = PresenceBoth
 	if n.Left == nil {
 		n.Compare.Presence = PresenceRightOnly
@@ -428,15 +384,15 @@ func compareNode(n *TreeNode, subSecond, timeGrace, ignoreTZDST bool) {
 		return
 	}
 	n.Compare.Size = cmpAttr(n.Left.Size == n.Right.Size)
-	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, subSecond, timeGrace, ignoreTZDST)
-	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, subSecond, timeGrace, ignoreTZDST)
-	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, subSecond, timeGrace, ignoreTZDST)
-	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, subSecond, timeGrace, ignoreTZDST)
+	n.Compare.ModTime = cmpTime(n.Left.ModTime, n.Right.ModTime, opts)
+	n.Compare.ATime = cmpTime(n.Left.ATime, n.Right.ATime, opts)
+	n.Compare.CTime = cmpTime(n.Left.CTime, n.Right.CTime, opts)
+	n.Compare.BirthTime = cmpTime(n.Left.BirthTime, n.Right.BirthTime, opts)
 	n.Compare.Mode = cmpAttr(n.Left.Mode == n.Right.Mode)
 }
 
-func cmpTime(a, b time.Time, subSecond, timeGrace, ignoreTZDST bool) AttrStatus {
-	if !subSecond {
+func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
+	if !opts.SubSecond {
 		a = a.Truncate(time.Second)
 		b = b.Truncate(time.Second)
 	}
@@ -444,13 +400,13 @@ func cmpTime(a, b time.Time, subSecond, timeGrace, ignoreTZDST bool) AttrStatus 
 	if diff < 0 {
 		diff = -diff
 	}
-	if ignoreTZDST {
+	if opts.IgnoreTZDST {
 		diff %= time.Hour
 		if diff > 30*time.Minute {
 			diff = time.Hour - diff
 		}
 	}
-	if timeGrace {
+	if opts.TimeGrace {
 		return cmpAttr(diff <= time.Second)
 	}
 	return cmpAttr(diff == 0)
@@ -656,41 +612,19 @@ func nodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	if opts == nil {
 		return AttrUnknown
 	}
-	attrs := []AttrStatus{}
-	if opts.Size {
-		attrs = append(attrs, node.Compare.Size)
-	}
-	if opts.ModTime {
-		attrs = append(attrs, node.Compare.ModTime)
-	}
-	if opts.ATime {
-		attrs = append(attrs, node.Compare.ATime)
-	}
-	if opts.CTime {
-		attrs = append(attrs, node.Compare.CTime)
-	}
-	if opts.BTime {
-		attrs = append(attrs, node.Compare.BirthTime)
-	}
-	if opts.Mode {
-		attrs = append(attrs, node.Compare.Mode)
-	}
-	if opts.Checksum {
-		attrs = append(attrs, node.Compare.Checksum)
-	}
-	hasUnknown := false
-	for _, a := range attrs {
-		if a == AttrDifferent {
-			return AttrDifferent
-		}
-		if a == AttrUnknown || a == AttrScanning {
-			hasUnknown = true
+	c := &node.Compare
+	var attrs [7]AttrStatus
+	n := 0
+	for _, a := range [...]struct {
+		on bool
+		s  AttrStatus
+	}{{opts.Size, c.Size}, {opts.ModTime, c.ModTime}, {opts.ATime, c.ATime}, {opts.CTime, c.CTime}, {opts.BTime, c.BirthTime}, {opts.Mode, c.Mode}, {opts.Checksum, c.Checksum}} {
+		if a.on {
+			attrs[n] = a.s
+			n++
 		}
 	}
-	if hasUnknown || len(attrs) == 0 {
-		return AttrUnknown
-	}
-	return AttrEqual
+	return combineStatus(attrs[:n])
 }
 
 func flattenNode(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*TreeNode) {

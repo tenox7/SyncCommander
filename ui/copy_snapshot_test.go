@@ -17,7 +17,7 @@ func TestCopyNodeCopiesWholeSubtree(t *testing.T) {
 	dst := openBackendOrSkip(t, dstDir)
 
 	m := newTestModel(t, src, dst)
-	m.scanner.Scan(context.Background(), false, false, true, true)
+	m.scanner.Scan(context.Background(), model.CompareOpts{TimeGrace: true, IgnoreTZDST: true})
 
 	var subtree *model.TreeNode
 	for _, c := range m.scanner.Tree().Children {

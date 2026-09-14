@@ -39,7 +39,7 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 	writeFile(t, filepath.Join(r, "a/orphandir/y.txt"), "stale")
 
 	s := model.NewScanner(NewLocalBackend(l), NewLocalBackend(r), 4, 8, false)
-	s.Scan(context.Background(), false, false, false, false)
+	s.Scan(context.Background(), model.CompareOpts{Checksum: false, SubSecond: false, TimeGrace: false, IgnoreTZDST: false})
 
 	node := childNamed(s.Tree(), "a")
 	if node == nil {
@@ -54,7 +54,7 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 		t.Fatalf("shallow tree yields %d/%d mirror deletes; test needs an unlisted subtree", f, d)
 	}
 
-	if !s.EnsureSubtreeListed(context.Background(), node, false, false, false) {
+	if !s.EnsureSubtreeListed(context.Background(), node, model.CompareOpts{SubSecond: false, TimeGrace: false, IgnoreTZDST: false}) {
 		t.Fatal("EnsureSubtreeListed reported failure")
 	}
 

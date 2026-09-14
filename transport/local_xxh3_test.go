@@ -44,7 +44,7 @@ func TestLocalXXH3NegotiatedAndCompared(t *testing.T) {
 	write(right, "diff", "beta")
 
 	s := model.NewScanner(NewLocalBackend(left), NewLocalBackend(right), 4, 8, true)
-	s.Scan(context.Background(), true, false, false, false)
+	s.Scan(context.Background(), model.CompareOpts{Checksum: true, SubSecond: false, TimeGrace: false, IgnoreTZDST: false})
 
 	if algo := s.ChecksumAlgo(); algo != "xxh3" {
 		t.Fatalf("negotiated algo = %q, want xxh3", algo)

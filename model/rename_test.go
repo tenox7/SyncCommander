@@ -29,7 +29,7 @@ func TestRenameRightMergesWithLeft(t *testing.T) {
 	root := NewRootNode()
 	left := []FileEntry{{RelPath: "foo", Name: "foo", Size: 1}}
 	right := []FileEntry{{RelPath: "foo-bar", Name: "foo-bar", Size: 2}}
-	root.Children = MergeChildren(root, left, right, 1, false, false, false)
+	root.Children = MergeChildren(root, left, right, 1, CompareOpts{}, nil)
 
 	bar := findChild(root.Children, "foo-bar")
 	if bar == nil {
@@ -37,7 +37,7 @@ func TestRenameRightMergesWithLeft(t *testing.T) {
 	}
 
 	s := &Scanner{tree: root}
-	s.RenameNode(bar, "foo", "foo", "foo-bar", false, false, false)
+	s.RenameNode(bar, "foo", "foo", "foo-bar", CompareOpts{})
 
 	both, leftOnly, rightOnly := countByPresence(root.Children)
 	if len(root.Children) != 1 || both != 1 {
@@ -56,11 +56,11 @@ func TestRenameLeftMergesWithRight(t *testing.T) {
 	root := NewRootNode()
 	left := []FileEntry{{RelPath: "baz", Name: "baz"}}
 	right := []FileEntry{{RelPath: "foo", Name: "foo"}}
-	root.Children = MergeChildren(root, left, right, 1, false, false, false)
+	root.Children = MergeChildren(root, left, right, 1, CompareOpts{}, nil)
 
 	baz := findChild(root.Children, "baz")
 	s := &Scanner{tree: root}
-	s.RenameNode(baz, "foo", "foo", "baz", false, false, false)
+	s.RenameNode(baz, "foo", "foo", "baz", CompareOpts{})
 
 	both, _, _ := countByPresence(root.Children)
 	if len(root.Children) != 1 || both != 1 {
@@ -72,7 +72,7 @@ func TestRenameDirMergesAndRelists(t *testing.T) {
 	root := NewRootNode()
 	left := []FileEntry{{RelPath: "d1", Name: "d1", IsDir: true}}
 	right := []FileEntry{{RelPath: "d2", Name: "d2", IsDir: true}}
-	root.Children = MergeChildren(root, left, right, 1, false, false, false)
+	root.Children = MergeChildren(root, left, right, 1, CompareOpts{}, nil)
 
 	d2 := findChild(root.Children, "d2")
 	d2.Listed = true
@@ -80,7 +80,7 @@ func TestRenameDirMergesAndRelists(t *testing.T) {
 	d2.Children = []*TreeNode{{Name: "inner", RelPath: "d2/inner", Parent: d2}}
 
 	s := &Scanner{tree: root}
-	if !s.RenameNode(d2, "d1", "d1", "d2", false, false, false) {
+	if !s.RenameNode(d2, "d1", "d1", "d2", CompareOpts{}) {
 		t.Error("merging rename must report true so the caller re-scans")
 	}
 
@@ -100,11 +100,11 @@ func TestRenameNoCollision(t *testing.T) {
 	root := NewRootNode()
 	left := []FileEntry{{RelPath: "a", Name: "a"}}
 	right := []FileEntry{{RelPath: "a", Name: "a"}}
-	root.Children = MergeChildren(root, left, right, 1, false, false, false)
+	root.Children = MergeChildren(root, left, right, 1, CompareOpts{}, nil)
 
 	a := findChild(root.Children, "a")
 	s := &Scanner{tree: root}
-	if s.RenameNode(a, "b", "b", "a", false, false, false) {
+	if s.RenameNode(a, "b", "b", "a", CompareOpts{}) {
 		t.Error("plain rename must not report a merge")
 	}
 
@@ -120,11 +120,11 @@ func TestRenameSameSideNoMerge(t *testing.T) {
 	root := NewRootNode()
 	var left []FileEntry
 	right := []FileEntry{{RelPath: "foo", Name: "foo"}, {RelPath: "bar", Name: "bar"}}
-	root.Children = MergeChildren(root, left, right, 1, false, false, false)
+	root.Children = MergeChildren(root, left, right, 1, CompareOpts{}, nil)
 
 	bar := findChild(root.Children, "bar")
 	s := &Scanner{tree: root}
-	s.RenameNode(bar, "foo", "foo", "bar", false, false, false)
+	s.RenameNode(bar, "foo", "foo", "bar", CompareOpts{})
 
 	if len(root.Children) != 2 {
 		t.Fatalf("same-side clash must not merge: want 2 children, got %d", len(root.Children))

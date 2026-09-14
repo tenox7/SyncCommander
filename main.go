@@ -17,6 +17,11 @@ import (
 
 var version = "dev"
 
+func fail(err error) {
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	os.Exit(1)
+}
+
 func main() {
 	size := flag.Bool("size", true, "compare file size")
 	modtime := flag.Bool("modtime", true, "compare modify time")
@@ -28,7 +33,7 @@ func main() {
 	subsec := flag.Bool("subsec", false, "sub-second time precision")
 	grace := flag.Bool("grace", true, "allow ±1s time grace")
 	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences (hour-modulo)")
-	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
+	insecure := flag.Bool("insecure", false, "skip TLS certificate and ssh host key verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
@@ -69,8 +74,7 @@ func main() {
 	mustRate := func(s string) int64 {
 		v, err := transport.ParseRate(s)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			fail(err)
 		}
 		return v
 	}
@@ -95,11 +99,9 @@ func main() {
 		if err != nil {
 			cwd = "."
 		}
-		leftPath = cwd
-		rightPath = cwd
+		leftPath, rightPath = cwd, cwd
 	case 2:
-		leftPath = flag.Arg(0)
-		rightPath = flag.Arg(1)
+		leftPath, rightPath = flag.Arg(0), flag.Arg(1)
 	default:
 		flag.Usage()
 		os.Exit(1)
@@ -118,17 +120,19 @@ func main() {
 		IgnoreTZDST: *tzdst,
 	}
 
-	if *parallel < 1 {
-		*parallel = 1
+	*parallel = max(*parallel, 1)
+	left, err := transport.TryOpenBackend(leftPath, *insecure, *parallel)
+	if err != nil {
+		fail(err)
 	}
-	left := transport.OpenBackendLazy(leftPath, *insecure, *parallel)
-	right := transport.OpenBackendLazy(rightPath, *insecure, *parallel)
+	right, err := transport.TryOpenBackend(rightPath, *insecure, *parallel)
+	if err != nil {
+		fail(err)
+	}
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
 	mdl := ui.NewModel(left, right, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
-	p := tea.NewProgram(mdl, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	if _, err := tea.NewProgram(mdl, tea.WithAltScreen()).Run(); err != nil {
+		fail(err)
 	}
 }

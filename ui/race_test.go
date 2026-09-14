@@ -36,9 +36,9 @@ func TestUIRaceAgainstScanner(t *testing.T) {
 	scanned := make(chan struct{})
 	go func() {
 		defer close(scanned)
-		sc.Scan(ctx, true, false, true, true)
+		sc.Scan(ctx, model.CompareOpts{Checksum: true, TimeGrace: true, IgnoreTZDST: true})
 		if root := sc.Tree(); root != nil {
-			sc.RescanNode(ctx, root, true, false, true, true, nil)
+			sc.RescanNode(ctx, root, model.CompareOpts{Checksum: true, TimeGrace: true, IgnoreTZDST: true}, nil)
 		}
 	}()
 
