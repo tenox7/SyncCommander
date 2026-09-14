@@ -217,6 +217,10 @@ func (lw limitedWriter) Write(p []byte) (int, error) {
 // LimitReader throttles a source stream against the inbound budget.
 func LimitReader(r io.Reader) io.Reader { return limitedReader{r: r, l: &bwIn} }
 
+// LimitOutReader throttles a stream that is about to leave sc (an upload read
+// by a client library) against the outbound budget.
+func LimitOutReader(r io.Reader) io.Reader { return limitedReader{r: r, l: &bwOut} }
+
 // LimitReadCloser is LimitReader for a stream the caller must close.
 func LimitReadCloser(rc io.ReadCloser) io.ReadCloser {
 	return limitedReadCloser{limitedReader: limitedReader{r: rc, l: &bwIn}, c: rc}

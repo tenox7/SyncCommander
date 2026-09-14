@@ -48,6 +48,8 @@ type RcloneBackend struct {
 	avail     []string
 	listCache *listCache
 	objs      *rcObjCache
+	dirs      sync.Map // directories known to exist
+	putMtime  sync.Map // mtime stamped at Put, so SetTimes can skip a redundant round trip
 }
 
 var rcloneInit sync.Once
@@ -246,6 +248,9 @@ func (b *RcloneBackend) Checksum(ctx context.Context, relPath string) (string, e
 }
 
 func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
+	if put, ok := b.putMtime.LoadAndDelete(relPath); ok && put.(time.Time).Equal(mtime) {
+		return nil
+	}
 	o, err := b.object(ctx, relPath)
 	if err != nil {
 		return err
@@ -275,13 +280,13 @@ func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, ati
 	return nil
 }
 
-func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	if err := b.Mkdir(ctx, parentDir(relPath), 0755); err != nil {
+func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		return err
 	}
-	size := int64(-1)
-	if s, ok := src.(model.Sized); ok {
-		size = s.Size()
+	size, ok := fileSizeFromContext(ctx)
+	if !ok {
+		size = -1
 	}
 	put := b.f.Put
 	if size < 0 {
@@ -298,11 +303,18 @@ func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 			put = b.feat.PutStream
 		}
 	}
-	info := &rcObjectInfo{fs: b.f, remote: relPath, size: size, modTime: time.Now()}
-	o, err := put(ctx, LimitReader(src), info)
+	// Stamping the source mtime here makes the later SetTimes a no-op on
+	// stores that would otherwise implement it as a copy of the object.
+	mtime, ok := modTimeFromContext(ctx)
+	if !ok {
+		mtime = time.Now()
+	}
+	info := &rcObjectInfo{fs: b.f, remote: relPath, size: size, modTime: mtime}
+	o, err := put(ctx, LimitOutReader(src), info)
 	if err != nil {
 		return err
 	}
+	b.putMtime.Store(relPath, mtime)
 	b.objs.put(relPath, o)
 	b.listCache.invalidateAncestors(relPath)
 	return nil
@@ -331,25 +343,37 @@ func spoolToTemp(src io.Reader) (io.Reader, int64, func(), error) {
 	return tmp, n, cleanup, nil
 }
 
-// Mkdir walks the components so remotes whose Mkdir is not recursive still
-// get the full path. Bucket backends no-op on each step.
 func (b *RcloneBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
-	relPath = strings.Trim(relPath, "/")
-	if relPath == "" {
-		return nil
-	}
-	var cur string
-	for _, part := range strings.Split(relPath, "/") {
-		cur = path.Join(cur, part)
-		if err := b.f.Mkdir(ctx, cur); err != nil {
-			return err
-		}
+	if err := b.ensureDir(ctx, relPath); err != nil {
+		return err
 	}
 	b.listCache.invalidateAncestors(relPath)
 	return nil
 }
 
+// ensureDir walks the components so remotes whose Mkdir is not recursive
+// still get the full path, remembering what exists so a copy of many files
+// into one directory is not a Mkdir per file. Bucket backends no-op anyway.
+func (b *RcloneBackend) ensureDir(ctx context.Context, relPath string) error {
+	relPath = strings.Trim(relPath, "/")
+	if relPath == "" {
+		return nil
+	}
+	if _, ok := b.dirs.Load(relPath); ok {
+		return nil
+	}
+	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
+		return err
+	}
+	if err := b.f.Mkdir(ctx, relPath); err != nil {
+		return err
+	}
+	b.dirs.Store(relPath, struct{}{})
+	return nil
+}
+
 func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	b.dirs.Clear()
 	defer func() {
 		b.objs.drop(oldRelPath)
 		b.listCache.invalidateAncestors(oldRelPath)
@@ -392,6 +416,7 @@ func (b *RcloneBackend) RemoveAll(ctx context.Context, relPath string) error {
 	if strings.Trim(relPath, "/") == "" {
 		return errors.New("rclone: refuse to purge the remote root")
 	}
+	b.dirs.Clear()
 	defer func() {
 		b.objs.drop(relPath)
 		b.listCache.invalidateAncestors(relPath)
