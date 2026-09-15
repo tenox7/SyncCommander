@@ -285,12 +285,12 @@ func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
 			select {
 			case err := <-errCh:
 				if err != nil {
-					Log.Add(proto, "ERR", "ssh keepalive: "+err.Error()+", closing connection")
+					Log.Add(proto, DirErr, "ssh keepalive: "+err.Error()+", closing connection")
 					client.Close()
 					return
 				}
 			case <-time.After(sshKeepaliveTimeout):
-				Log.Add(proto, "ERR", "ssh keepalive timeout, closing connection")
+				Log.Add(proto, DirErr, "ssh keepalive timeout, closing connection")
 				client.Close()
 				return
 			case <-done:

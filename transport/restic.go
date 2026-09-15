@@ -185,7 +185,7 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 			entries = append(entries, objectEntry(typeName, it.Name, it.Size))
 		}
 	}
-	Log.Add("restic", "<<<", fmt.Sprintf("%s/: %d objects", typeName, len(entries)))
+	Log.Add("restic", DirIn, fmt.Sprintf("%s/: %d objects", typeName, len(entries)))
 	return entries, nil
 }
 
@@ -197,7 +197,7 @@ func (b *ResticBackend) decodeListV1(resp *http.Response, typeName string) ([]mo
 	if err := json.NewDecoder(resp.Body).Decode(&names); err != nil {
 		return nil, fmt.Errorf("restic: list %s (v1): %v", typeName, err)
 	}
-	Log.Add("restic", "<<<", fmt.Sprintf("v1 %s/: %d objects, HEAD per object for sizes", typeName, len(names)))
+	Log.Add("restic", DirIn, fmt.Sprintf("v1 %s/: %d objects, HEAD per object for sizes", typeName, len(names)))
 	entries := make([]model.FileEntry, 0, len(names))
 	for _, name := range names {
 		if name != "" {
@@ -250,7 +250,7 @@ func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit
 		}
 		entries, err := b.listType(ctx, t)
 		if err != nil {
-			Log.Add("restic", "ERR", "preload "+t+": "+err.Error())
+			Log.Add("restic", DirErr, "preload "+t+": "+err.Error())
 			return err
 		}
 		// Emit even when empty so the type dir registers a cache hit (with no
@@ -325,7 +325,7 @@ func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 { // restic POST succeeds with 200, not 201
 		err := fmt.Errorf("restic: POST %s: %s", relPath, resp.Status)
-		Log.Add("restic", "ERR", err.Error())
+		Log.Add("restic", DirErr, err.Error())
 		return err
 	}
 	b.listCache.invalidateAncestors(relPath)
@@ -360,7 +360,7 @@ func (b *ResticBackend) delete(ctx context.Context, relPath string) error {
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
 		err := fmt.Errorf("restic: DELETE %s: %s", relPath, resp.Status)
-		Log.Add("restic", "ERR", err.Error())
+		Log.Add("restic", DirErr, err.Error())
 		return err
 	}
 	b.listCache.invalidateAncestors(relPath)

@@ -258,7 +258,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 		b.sums.put(e.RelPath, sums)
 		entries = append(entries, e)
 	}
-	Log.Add("webdav", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("webdav", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
 
@@ -276,7 +276,7 @@ func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) erro
 }
 
 func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
-	Log.Add("webdav", ">>>", "RPROPFIND "+b.pathFor(scope))
+	Log.Add("webdav", DirOut, "RPROPFIND "+b.pathFor(scope))
 	resp, err := b.do(ctx, "PROPFIND", b.urlFor(scope, true), strings.NewReader(wdPropfindBody), map[string]string{
 		"Depth":        "infinity",
 		"Content-Type": "application/xml",
@@ -287,12 +287,12 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	defer drainClose(resp.Body)
 	if resp.StatusCode == http.StatusForbidden {
 		b.noInfinity.Store(true)
-		Log.Add("webdav", "ERR", "RPROPFIND rejected ("+resp.Status+"); falling back to per-dir Depth:1")
+		Log.Add("webdav", DirErr, "RPROPFIND rejected ("+resp.Status+"); falling back to per-dir Depth:1")
 		return fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
 	}
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
-		Log.Add("webdav", "ERR", "RPROPFIND: "+err.Error())
+		Log.Add("webdav", DirErr, "RPROPFIND: "+err.Error())
 		return err
 	}
 
@@ -308,7 +308,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 			break
 		}
 		if err != nil {
-			Log.Add("webdav", "ERR", "RPROPFIND decode: "+err.Error())
+			Log.Add("webdav", DirErr, "RPROPFIND decode: "+err.Error())
 			return err
 		}
 		se, ok := tok.(xml.StartElement)
@@ -328,7 +328,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 		n++
 	}
 	g.finish()
-	Log.Add("webdav", "<<<", fmt.Sprintf("RPROPFIND %d entries", n))
+	Log.Add("webdav", DirIn, fmt.Sprintf("RPROPFIND %d entries", n))
 	return nil
 }
 
@@ -427,7 +427,7 @@ func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, 
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("PROPPATCH %s: %s", relPath, resp.Status)
-		Log.Add("webdav", "ERR", err.Error())
+		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
 	var ms wdMultistatus
@@ -435,7 +435,7 @@ func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, 
 		for _, r := range ms.Response {
 			if !propstatOK(r.Propstat) {
 				err := fmt.Errorf("PROPPATCH %s: property update rejected", relPath)
-				Log.Add("webdav", "ERR", err.Error())
+				Log.Add("webdav", DirErr, err.Error())
 				return err
 			}
 		}
@@ -449,7 +449,7 @@ func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, 
 // here because the PUT's own status is the verdict.
 func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
-		Log.Add("webdav", "ERR", "mkcol parents: "+err.Error())
+		Log.Add("webdav", DirErr, "mkcol parents: "+err.Error())
 	}
 	req, err := b.newReq(ctx, "PUT", b.urlFor(relPath, false), src)
 	if err != nil {
@@ -468,7 +468,7 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("PUT %s: %s", relPath, resp.Status)
-		Log.Add("webdav", "ERR", err.Error())
+		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
 	b.dirs.Store(parentDir(relPath), struct{}{})
@@ -515,7 +515,7 @@ func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 
 func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
 	if err := b.ensureDir(ctx, parentDir(newRelPath)); err != nil {
-		Log.Add("webdav", "ERR", "mkcol parents: "+err.Error())
+		Log.Add("webdav", DirErr, "mkcol parents: "+err.Error())
 	}
 	resp, err := b.do(ctx, "MOVE", b.urlFor(oldRelPath, false), nil, map[string]string{
 		"Destination": b.urlFor(newRelPath, false),
@@ -527,7 +527,7 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("MOVE %s: %s", oldRelPath, resp.Status)
-		Log.Add("webdav", "ERR", err.Error())
+		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
 	b.dirs.Clear()
@@ -554,7 +554,7 @@ func (b *WebDAVBackend) delete(ctx context.Context, relPath string) error {
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
 		err := fmt.Errorf("DELETE %s: %s", relPath, resp.Status)
-		Log.Add("webdav", "ERR", err.Error())
+		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
 	b.dirs.Clear()

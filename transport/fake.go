@@ -120,7 +120,7 @@ func NewFakeBackend(rawURL string) (*FakeBackend, error) {
 	if approx {
 		tilde = ">"
 	}
-	Log.Add("fake", "<<<", fmt.Sprintf("%s: dirs=%d files=%d depth=%d seed=%d → %s%s dirs, %s%s files",
+	Log.Add("fake", DirIn, fmt.Sprintf("%s: dirs=%d files=%d depth=%d seed=%d → %s%s dirs, %s%s files",
 		rawURL, b.dirs, b.files, b.depth, b.seed, tilde, formatCount(dirs), tilde, formatCount(files)))
 	return b, nil
 }

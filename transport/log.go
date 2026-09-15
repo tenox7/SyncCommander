@@ -29,31 +29,48 @@ type RemoteLog struct {
 	fatalCount     int
 }
 
-func (l *RemoteLog) Add(proto, direction, msg string) {
-	if direction == "ERR" && (strings.Contains(msg, "context canceled") || msg == "EOF") {
+// Dir tags a log line: the way data moved, or the kind of failure.
+type Dir int
+
+const (
+	DirOut   Dir = iota // a command or upload sent to the remote
+	DirIn               // a reply or download received
+	DirErr              // an operation failed; Retry may still recover it
+	DirRetry            // Retry is about to try again
+	DirRec              // an operation recovered after retries
+	DirFail             // Retry gave up
+	DirFatal            // the whole run is aborting
+)
+
+func (d Dir) String() string {
+	return [...]string{">>>", "<<<", "ERR", "RETRY", "REC", "FAIL", "FATAL"}[d]
+}
+
+func (l *RemoteLog) Add(proto string, dir Dir, msg string) {
+	if dir == DirErr && (strings.Contains(msg, "context canceled") || msg == "EOF") {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ts := time.Now().Format("15:04:05.000")
-	isErr := direction == "ERR" || direction == "FAIL" || direction == "FATAL"
+	isErr := dir == DirErr || dir == DirFail || dir == DirFatal
 	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
-		line = fmt.Sprintf("%s %s %s %s", ts, proto, direction, line)
+		line = fmt.Sprintf("%s %s %s %s", ts, proto, dir, line)
 		l.lines = appendBounded(l.lines, line)
 		if isErr {
 			l.errLines = appendBounded(l.errLines, line)
 		}
 	}
-	switch direction {
-	case "ERR":
+	switch dir {
+	case DirErr:
 		l.errCount++
-	case "RETRY":
+	case DirRetry:
 		l.retryCount++
-	case "REC":
+	case DirRec:
 		l.recoveredCount++
-	case "FAIL":
+	case DirFail:
 		l.failedCount++
-	case "FATAL":
+	case DirFatal:
 		l.fatalCount++
 	}
 }

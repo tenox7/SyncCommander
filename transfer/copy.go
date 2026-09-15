@@ -76,7 +76,7 @@ func Copy(ctx context.Context, req Request) Result {
 	listed := !isDir || req.Scanner.EnsureSubtreeListed(ctx, req.Node, req.Opts)
 	p.Listing.Store(false)
 	if !listed {
-		transport.Log.Add("copy", "ERR", "aborted "+req.RelPath+": subtree could not be fully listed")
+		transport.Log.Add("copy", transport.DirErr, "aborted "+req.RelPath+": subtree could not be fully listed")
 		return Result{}
 	}
 
@@ -100,7 +100,7 @@ func Copy(ctx context.Context, req Request) Result {
 		res.RescanRoot = req.Scanner.FindNearestDestNode(model.DirOf(req.RelPath), req.LeftToRight)
 	}
 	if failed := p.Failed.Load(); failed > 0 {
-		transport.Log.Add("copy", "ERR", fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
+		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
 	}
 	// Batch rewrites every file in the subtree, not just the diff set, so the
 	// whole subtree's cached checksums go rather than the diff paths alone.
@@ -148,10 +148,10 @@ func (c *copier) clearCollisions(collisions []entry) {
 		}
 		if err := c.remove(e); err != nil {
 			c.p.Failed.Add(1)
-			transport.Log.Add("copy", "ERR", "type-collision cleanup "+e.relPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "type-collision cleanup "+e.relPath+": "+err.Error())
 			continue
 		}
-		transport.Log.Add("copy", "<<<", "type-collision cleanup "+e.relPath)
+		transport.Log.Add("copy", transport.DirIn, "type-collision cleanup "+e.relPath)
 	}
 }
 
@@ -198,7 +198,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.InFlight.Store(1)
 	p.Parallel.Store(1)
 	p.Batched.Store(true)
-	transport.Log.Add("copy", ">>>", fmt.Sprintf("BATCH %s (%d files, %s)", c.req.RelPath, batchFiles, model.FormatSize(batchBytes)))
+	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("BATCH %s (%d files, %s)", c.req.RelPath, batchFiles, model.FormatSize(batchBytes)))
 	err := bs.SendLocalTree(transport.ContextWithFileSize(c.ctx, batchBytes), srcRoot, c.req.RelPath, func(name string) {
 		p.File.Store(name)
 		if p.Done.Load() < p.Total.Load() {
@@ -209,7 +209,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.Batched.Store(false)
 	if err != nil {
 		if !errors.Is(err, transport.ErrUnsupported) {
-			transport.Log.Add("copy", "ERR", "BATCH "+c.req.RelPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "BATCH "+c.req.RelPath+": "+err.Error())
 		}
 		p.Total.Store(int64(len(files)))
 		p.TotalBytes.Store(totalBytes)
@@ -222,7 +222,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.Done.Store(p.Total.Load())
 	p.CompletedBytes.Store(p.Bytes.Load())
 	p.CompletedBaseBytes.Store(p.BaseBytes.Load())
-	transport.Log.Add("copy", "<<<", "BATCH "+c.req.RelPath+" OK")
+	transport.Log.Add("copy", transport.DirIn, "BATCH "+c.req.RelPath+" OK")
 	return true
 }
 
@@ -231,7 +231,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 func (c *copier) runParallel(files []item) {
 	parallel := max(c.req.Parallel, 1)
 	if parallel > 1 {
-		transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", parallel))
+		transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("parallel=%d", parallel))
 	}
 	sem := NewDynSem(parallel)
 	c.p.Sem.Store(sem)
@@ -268,19 +268,19 @@ func (c *copier) copyOne(f item) {
 		p.beginFile(0)
 		if err := c.dst.Mkdir(ctx, f.relPath, srcEntry.Mode); err != nil {
 			p.Failed.Add(1)
-			transport.Log.Add("copy", "ERR", "mkdir "+f.relPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "mkdir "+f.relPath+": "+err.Error())
 			return
 		}
-		transport.Log.Add("copy", "<<<", "mkdir "+f.relPath)
+		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
 		return
 	}
 	if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
 		if err := c.remove(entry{relPath: f.relPath, isDir: dstEntry.IsDir}); err != nil {
 			p.Failed.Add(1)
-			transport.Log.Add("copy", "ERR", "clear dst type-mismatch "+f.relPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "clear dst type-mismatch "+f.relPath+": "+err.Error())
 			return
 		}
-		transport.Log.Add("copy", "<<<", "cleared dst type-mismatch "+f.relPath)
+		transport.Log.Add("copy", transport.DirIn, "cleared dst type-mismatch "+f.relPath)
 		dstEntry = nil
 	}
 	slot := p.claimSlot()
@@ -294,7 +294,7 @@ func (c *copier) copyOne(f item) {
 	}
 	p.File.Store(f.relPath)
 	p.beginFile(srcEntry.Size)
-	transport.Log.Add("copy", ">>>", fmt.Sprintf("COPY %s (%s)", f.relPath, model.FormatSize(srcEntry.Size)))
+	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("COPY %s (%s)", f.relPath, model.FormatSize(srcEntry.Size)))
 
 	fileCtx := transport.ContextWithProgress(ctx, slotBytes)
 	fileCtx = transport.ContextWithBaseProgress(fileCtx, slotBase)
@@ -304,10 +304,10 @@ func (c *copier) copyOne(f item) {
 	verify := resumeVerifier(c.req.VerifyResume, c.req.Scanner, c.src, c.dst, f.relPath, srcEntry.Size)
 	finish := func(how string) {
 		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
-			transport.Log.Add("copy", "ERR", "settimes "+f.relPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
 		}
 		c.markChanged(f.relPath)
-		transport.Log.Add("copy", "<<<", "COPY "+f.relPath+" OK"+how)
+		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
 	}
 	guarded := func(op func(context.Context) bool) (ok bool) {
 		_ = transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
@@ -350,7 +350,7 @@ func (c *copier) copyOne(f item) {
 	})
 	if err != nil {
 		p.Failed.Add(1)
-		transport.Log.Add("copy", "ERR", "COPY "+f.relPath+": "+err.Error())
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
 		return
 	}
 	finish("")
@@ -365,10 +365,10 @@ func (c *copier) mirrorDelete() {
 	case !c.req.Mirror:
 		return
 	case c.ctx.Err() != nil:
-		transport.Log.Add("copy", "ERR", "mirror delete skipped: copy canceled")
+		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: copy canceled")
 		return
 	case failed > 0:
-		transport.Log.Add("copy", "ERR", fmt.Sprintf("mirror delete skipped: %d file(s) failed to copy", failed))
+		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("mirror delete skipped: %d file(s) failed to copy", failed))
 		return
 	}
 	var deletes []entry
@@ -382,9 +382,9 @@ func (c *copier) mirrorDelete() {
 			return
 		}
 		if err := c.remove(d); err != nil {
-			transport.Log.Add("copy", "ERR", "mirror delete "+d.relPath+": "+err.Error())
+			transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.relPath+": "+err.Error())
 			continue
 		}
-		transport.Log.Add("copy", "<<<", "mirror delete "+d.relPath)
+		transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.relPath)
 	}
 }

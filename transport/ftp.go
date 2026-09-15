@@ -160,7 +160,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 		if derr != nil {
 			return nil, derr
 		}
-		Log.Add("ftp", "<<<", "extra connection dialed")
+		Log.Add("ftp", DirIn, "extra connection dialed")
 		return &ftpConn{conn: c, rawConn: raw, lastUsed: time.Now()}, nil
 	}
 	b.pool = newConnPool[*ftpConn](nil, parallel-1, dial, func(c *ftpConn) { c.close() })
@@ -213,14 +213,14 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 	if time.Since(c.lastUsed) > 60*time.Second && c.conn.NoOp() != nil {
 		conn, raw, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg)
 		if err != nil {
-			Log.Add("ftp", "ERR", "extra reconnect failed: "+err.Error())
+			Log.Add("ftp", DirErr, "extra reconnect failed: "+err.Error())
 			c.lastUsed = time.Time{} // still dead: keep the probe armed
 			poolRelease()
 			return nil, nil, false
 		}
 		c.conn.Quit()
 		c.conn, c.rawConn, c.lastUsed = conn, raw, time.Now()
-		Log.Add("ftp", "<<<", "extra reconnected")
+		Log.Add("ftp", DirIn, "extra reconnected")
 	}
 	return c, release, true
 }
@@ -240,7 +240,7 @@ func (b *FTPBackend) reconnectLocked() error {
 			b.hasher.algo = algo
 		}
 	}
-	Log.Add("ftp", "<<<", "reconnected")
+	Log.Add("ftp", DirIn, "reconnected")
 	return nil
 }
 
@@ -255,9 +255,9 @@ func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
 	if err == nil || ctx.Err() != nil || b.conn.NoOp() == nil {
 		return err
 	}
-	Log.Add("ftp", "ERR", "connection lost, reconnecting...")
+	Log.Add("ftp", DirErr, "connection lost, reconnecting...")
 	if rerr := b.reconnectLocked(); rerr != nil {
-		Log.Add("ftp", "ERR", "reconnect failed: "+rerr.Error())
+		Log.Add("ftp", DirErr, "reconnect failed: "+rerr.Error())
 		return err
 	}
 	return op()
@@ -277,17 +277,17 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		return nil, ctx.Err()
 	}
 	dir := path.Join(b.base, relDir)
-	Log.Add("ftp", ">>>", "LIST "+dir)
+	Log.Add("ftp", DirOut, "LIST "+dir)
 	entries, err := b.conn.List(dir)
 	if err == nil && len(entries) == 0 {
 		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
 		err = b.conn.ChangeDir(dir)
 	}
 	if err != nil {
-		Log.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", DirErr, err.Error())
 		return nil, err
 	}
-	Log.Add("ftp", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("ftp", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	// MLSD already carries exact times; only fall back to one MDTM per entry
 	// when the listing came from LIST.
 	useMDTM := b.conn.IsGetTimeSupported() && !b.conn.IsTimePreciseInList()
@@ -363,7 +363,7 @@ func (b *FTPBackend) SetChecksumAlgo(algo string) {
 func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
 	err := b.withPrimary(ctx, func() error { return b.conn.SetTime(path.Join(b.base, relPath), mtime) })
 	if err != nil {
-		Log.Add("ftp", "ERR", "MFMT "+relPath+": "+err.Error())
+		Log.Add("ftp", DirErr, "MFMT "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -391,13 +391,13 @@ func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, raw net.
 		err = conn.Stor(fullPath, src)
 	}
 	if err != nil {
-		Log.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", DirErr, err.Error())
 	}
 	return err
 }
 
 func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
-	Log.Add("ftp", ">>>", "STOR "+relPath)
+	Log.Add("ftp", DirOut, "STOR "+relPath)
 	return b.store(ctx, relPath, src, 0)
 }
 
@@ -407,13 +407,13 @@ func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 		return err
 	}
 	defer rd.Close()
-	Log.Add("ftp", ">>>", fmt.Sprintf("STOR %s @%d", relPath, offset))
+	Log.Add("ftp", DirOut, fmt.Sprintf("STOR %s @%d", relPath, offset))
 	return b.store(ctx, relPath, rd, offset)
 }
 
 func (b *FTPBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
 	fullPath := path.Join(b.base, relPath)
-	Log.Add("ftp", ">>>", "MKDIR "+fullPath)
+	Log.Add("ftp", DirOut, "MKDIR "+fullPath)
 	return b.withPrimary(ctx, func() error { return b.ensureDir(b.conn, fullPath) })
 }
 
@@ -447,7 +447,7 @@ func (b *FTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) 
 		return b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
 	})
 	if err != nil {
-		Log.Add("ftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
+		Log.Add("ftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())
 	}
 	return err
 }
@@ -455,7 +455,7 @@ func (b *FTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) 
 func (b *FTPBackend) Remove(ctx context.Context, relPath string) error {
 	err := b.withPrimary(ctx, func() error { return b.conn.Delete(path.Join(b.base, relPath)) })
 	if err != nil {
-		Log.Add("ftp", "ERR", "DELETE "+relPath+": "+err.Error())
+		Log.Add("ftp", DirErr, "DELETE "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -467,7 +467,7 @@ func (b *FTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	b.dirs.Clear()
 	err := b.withPrimary(ctx, func() error { return b.removeAllLocked(path.Join(b.base, relPath)) })
 	if err != nil {
-		Log.Add("ftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
+		Log.Add("ftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -505,13 +505,13 @@ func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (
 // retr opens a download on an extra connection when one is free; otherwise
 // it holds the primary's lock until the reader is closed.
 func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	Log.Add("ftp", ">>>", fmt.Sprintf("RETR %s @%d", relPath, offset))
+	Log.Add("ftp", DirOut, fmt.Sprintf("RETR %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
 		resp, err := retrFrom(ex.conn, fullPath, offset)
 		if err != nil {
 			release()
-			Log.Add("ftp", "ERR", err.Error())
+			Log.Add("ftp", DirErr, err.Error())
 			return nil, err
 		}
 		return &ftpReader{rc: resp, stop: CancelCloser(ctx, ex.rawConn), done: release}, nil
@@ -520,7 +520,7 @@ func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io
 	resp, err := retrFrom(b.conn, fullPath, offset)
 	if err != nil {
 		b.mu.Unlock()
-		Log.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", DirErr, err.Error())
 		return nil, err
 	}
 	return &ftpReader{rc: resp, stop: b.abortOnCancel(ctx), done: b.mu.Unlock}, nil
@@ -634,16 +634,16 @@ func (h *ftpHasher) sendCmd(format string, args ...any) (int, string, error) {
 	if strings.HasPrefix(strings.ToUpper(cmd), "PASS ") {
 		cmd = "PASS ***"
 	}
-	Log.Add("ftp", ">>>", cmd)
+	Log.Add("ftp", DirOut, cmd)
 	if err := h.writer.PrintfLine(format, args...); err != nil {
-		Log.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", DirErr, err.Error())
 		return 0, "", err
 	}
 	code, msg, err := h.readResp()
 	if err != nil {
-		Log.Add("ftp", "ERR", err.Error())
+		Log.Add("ftp", DirErr, err.Error())
 	} else {
-		Log.Add("ftp", "<<<", fmt.Sprintf("%d %s", code, msg))
+		Log.Add("ftp", DirIn, fmt.Sprintf("%d %s", code, msg))
 	}
 	return code, msg, err
 }

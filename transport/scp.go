@@ -31,7 +31,7 @@ func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) *S
 		if err != nil {
 			return nil, err
 		}
-		Log.Add("scp", "<<<", "extra connection dialed")
+		Log.Add("scp", DirIn, "extra connection dialed")
 		return c.client, nil
 	}
 	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })

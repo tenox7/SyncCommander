@@ -300,7 +300,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "x", "X":
 			if c := m.copyProgress.Cancel.Load(); c != nil {
-				transport.Log.Add("copy", "<<<", "user canceled transfer")
+				transport.Log.Add("copy", transport.DirIn, "user canceled transfer")
 				(*c)()
 			}
 		case "~", "`":
@@ -316,7 +316,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "x", "X":
 			if c := m.deleteProgress.Cancel.Load(); c != nil {
-				transport.Log.Add("delete", "<<<", "user canceled delete")
+				transport.Log.Add("delete", transport.DirIn, "user canceled delete")
 				c.f()
 			}
 		case "~", "`":
@@ -658,7 +658,7 @@ func (m *Model) adjustCopyParallel(delta int) {
 	if s := m.copyProgress.Sem.Load(); s != nil {
 		s.Resize(next)
 	}
-	transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", next))
+	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("parallel=%d", next))
 }
 
 func (m *Model) handleSettingsKey(msg tea.KeyMsg) tea.Cmd {
@@ -969,18 +969,18 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 		if delLeft && ctx.Err() == nil {
 			err := removeOne(ctx, left, relPath, isDir)
 			if err != nil {
-				transport.Log.Add("delete", "ERR", "left "+relPath+": "+err.Error())
+				transport.Log.Add("delete", transport.DirErr, "left "+relPath+": "+err.Error())
 			} else {
-				transport.Log.Add("delete", "<<<", "left "+relPath)
+				transport.Log.Add("delete", transport.DirIn, "left "+relPath)
 			}
 			progress.Done.Add(perSide)
 		}
 		if delRight && ctx.Err() == nil {
 			err := removeOne(ctx, right, relPath, isDir)
 			if err != nil {
-				transport.Log.Add("delete", "ERR", "right "+relPath+": "+err.Error())
+				transport.Log.Add("delete", transport.DirErr, "right "+relPath+": "+err.Error())
 			} else {
-				transport.Log.Add("delete", "<<<", "right "+relPath)
+				transport.Log.Add("delete", transport.DirIn, "right "+relPath)
 			}
 			progress.Done.Add(perSide)
 		}
@@ -1036,7 +1036,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 			return nil
 		}
 		if strings.ContainsAny(newName, "/\\") {
-			transport.Log.Add("rename", "ERR", oldName+": a name cannot contain a path separator")
+			transport.Log.Add("rename", transport.DirErr, oldName+": a name cannot contain a path separator")
 			return nil
 		}
 		opts := *m.cmpOpts
@@ -1067,7 +1067,7 @@ func (m *Model) openRename(node *model.TreeNode) {
 				}
 			}
 			if err != nil {
-				transport.Log.Add("rename", "ERR", oldRel+" -> "+newRel+": "+err.Error())
+				transport.Log.Add("rename", transport.DirErr, oldRel+" -> "+newRel+": "+err.Error())
 				// One side may have been renamed: re-list the parent so the
 				// tree shows what is really there instead of the old row.
 				parent := model.DirOf(oldRel)
@@ -1339,10 +1339,10 @@ func scanTargetLabel(node *model.TreeNode) string {
 }
 
 func timeScan(op, target string, fn func()) {
-	transport.Log.Add("scan", ">>>", fmt.Sprintf("%s start: %s", op, target))
+	transport.Log.Add("scan", transport.DirOut, fmt.Sprintf("%s start: %s", op, target))
 	t0 := time.Now()
 	fn()
-	transport.Log.Add("scan", "<<<", fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
+	transport.Log.Add("scan", transport.DirIn, fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
 }
 
 // readTree and mutateTree fence the UI goroutine's tree access against the

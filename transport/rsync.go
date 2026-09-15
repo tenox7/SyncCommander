@@ -133,7 +133,7 @@ func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...
 	}
 	errMsg := strings.TrimSpace(stderr.String())
 	if strings.Contains(errMsg, "module is read only") {
-		Log.Add("rsync", "FATAL", "module is read only, aborting operation")
+		Log.Add("rsync", DirFatal, "module is read only, aborting operation")
 		TriggerFatalAbort(ctx)
 	}
 	if errMsg != "" {
@@ -185,10 +185,10 @@ func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []stri
 		return nil, err
 	}
 	defer conn.Close()
-	Log.Add("rsync", ">>>", label+" "+remotePath)
+	Log.Add("rsync", DirOut, label+" "+remotePath)
 	result, err := client.RunDaemon(ctx, conn, remotePath, []string{dst + "/"})
 	if err != nil {
-		Log.Add("rsync", "ERR", label+" "+remotePath+": "+err.Error())
+		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
 	}
 	return result, err
 }
@@ -234,7 +234,7 @@ func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.Fil
 		return nil, err
 	}
 	entries := fileListEntries(relDir, result.FileList)
-	Log.Add("rsync", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("rsync", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
 
@@ -251,7 +251,7 @@ func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit 
 		return err
 	}
 	emitFileList(scope, result.FileList, emit)
-	Log.Add("rsync", "<<<", fmt.Sprintf("RLIST %d entries", len(result.FileList)))
+	Log.Add("rsync", DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }
 
@@ -286,7 +286,7 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 		return nil, err
 	}
 	got := b.md4.fromFileList(scope, recursive, result.FileList)
-	Log.Add("rsync", "<<<", fmt.Sprintf("MD4 %d checksums", len(got)))
+	Log.Add("rsync", DirIn, fmt.Sprintf("MD4 %d checksums", len(got)))
 	return got, nil
 }
 
@@ -327,10 +327,10 @@ func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder 
 		stdout = &rsyncProgressWriter{adder: adder}
 		args = append(args, "--progress")
 	}
-	Log.Add("rsync", ">>>", label+" ["+strings.Join(args, " ")+"]")
+	Log.Add("rsync", DirOut, label+" ["+strings.Join(args, " ")+"]")
 	err := b.rsyncRunStdout(ctx, stdout, append(args, src, dest)...)
 	if err != nil {
-		Log.Add("rsync", "ERR", err.Error())
+		Log.Add("rsync", DirErr, err.Error())
 	}
 	settlePush(ctx, adder, budget, err)
 	return err
@@ -369,10 +369,10 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
 	return rsyncRecvToLocal(ctx, "rsync", relPath, dstPath, func(dstDir string) error {
 		args := b.transferArgs(b.remoteURL(relPath), dstDir)
-		Log.Add("rsync", ">>>", "RECV "+relPath+" -> "+dstPath)
+		Log.Add("rsync", DirOut, "RECV "+relPath+" -> "+dstPath)
 		_, err := b.rsyncRun(ctx, args...)
 		if err != nil {
-			Log.Add("rsync", "ERR", err.Error())
+			Log.Add("rsync", DirErr, err.Error())
 		}
 		return err
 	})
@@ -416,11 +416,11 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 		return err
 	}
 	stageTop := filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0])
-	Log.Add("rsync", ">>>", "MKDIR "+clean)
+	Log.Add("rsync", DirOut, "MKDIR "+clean)
 	_, err = b.rsyncRun(ctx, "-r", "-t", stageTop, b.remoteURL("")+"/")
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
-		Log.Add("rsync", "ERR", err.Error())
+		Log.Add("rsync", DirErr, err.Error())
 	}
 	return err
 }
@@ -465,7 +465,7 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 		op = "REMOVEALL"
 	}
 	args = append(args, "--exclude=*", tmpDir+"/", b.remoteURL(parentDir(clean))+"/")
-	Log.Add("rsync", ">>>", op+" "+clean)
+	Log.Add("rsync", DirOut, op+" "+clean)
 	_, err = b.rsyncRun(ctx, args...)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
@@ -475,20 +475,20 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	}
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
-		Log.Add("rsync", "ERR", op+" "+clean+": "+err.Error())
+		Log.Add("rsync", DirErr, op+" "+clean+": "+err.Error())
 		return err
 	}
-	Log.Add("rsync", "<<<", op+" "+clean+" OK")
+	Log.Add("rsync", DirIn, op+" "+clean+" OK")
 	return nil
 }
 
 func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	return rsyncOpenViaTemp(ctx, relPath, func(dstDir string) error {
 		args := b.transferArgs(b.remoteURL(relPath), dstDir)
-		Log.Add("rsync", ">>>", "RECV "+relPath)
+		Log.Add("rsync", DirOut, "RECV "+relPath)
 		_, err := b.rsyncRun(ctx, args...)
 		if err != nil {
-			Log.Add("rsync", "ERR", err.Error())
+			Log.Add("rsync", DirErr, err.Error())
 		}
 		return err
 	})

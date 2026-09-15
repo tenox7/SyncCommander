@@ -96,10 +96,10 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	if inner := b.current(); inner != nil {
 		return inner, nil
 	}
-	Log.Add(b.proto, ">>>", "connecting to "+b.display)
+	Log.Add(b.proto, DirOut, "connecting to "+b.display)
 	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, b.factory)
 	if err != nil {
-		Log.Add(b.proto, "ERR", b.display+": "+err.Error())
+		Log.Add(b.proto, DirErr, b.display+": "+err.Error())
 		return nil, err
 	}
 	b.mu.Lock()
@@ -112,7 +112,7 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		CloseBackend(inner)
 		return nil, net.ErrClosed
 	}
-	Log.Add(b.proto, "<<<", "connected to "+b.display)
+	Log.Add(b.proto, DirIn, "connected to "+b.display)
 	return inner, nil
 }
 
@@ -127,7 +127,7 @@ func (b *lazyBackend) markBrokenIf(err error) error {
 	b.inner = nil
 	b.mu.Unlock()
 	if inner != nil {
-		Log.Add(b.proto, "ERR", "connection lost, reconnecting on next op: "+err.Error())
+		Log.Add(b.proto, DirErr, "connection lost, reconnecting on next op: "+err.Error())
 		CloseBackend(inner)
 	}
 	return err

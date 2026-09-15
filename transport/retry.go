@@ -177,7 +177,7 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		err = op()
 		if err == nil {
 			if attempt > 0 {
-				Log.Add(proto, "REC", fmt.Sprintf("%s: recovered after %d %s", what, attempt, pluralRetries(attempt)))
+				Log.Add(proto, DirRec, fmt.Sprintf("%s: recovered after %d %s", what, attempt, pluralRetries(attempt)))
 			}
 			return nil
 		}
@@ -189,19 +189,19 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 			return err
 		}
 		if isPermanentError(err) {
-			Log.Add(proto, "FAIL", fmt.Sprintf("%s: %v", what, err))
+			Log.Add(proto, DirFail, fmt.Sprintf("%s: %v", what, err))
 			return err
 		}
 		if attempt == max {
 			break
 		}
 		d := backoffDelay(attempt)
-		Log.Add(proto, "RETRY", fmt.Sprintf("%s: %v (attempt %d/%d in %v)", what, err, attempt+2, max+1, d))
+		Log.Add(proto, DirRetry, fmt.Sprintf("%s: %v (attempt %d/%d in %v)", what, err, attempt+2, max+1, d))
 		if serr := sleepCtx(ctx, d); serr != nil {
 			return serr
 		}
 	}
-	Log.Add(proto, "FAIL", fmt.Sprintf("%s: gave up after %d attempts: %v", what, max+1, err))
+	Log.Add(proto, DirFail, fmt.Sprintf("%s: gave up after %d attempts: %v", what, max+1, err))
 	return err
 }
 

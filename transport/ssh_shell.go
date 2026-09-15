@@ -39,10 +39,10 @@ func (s *sshShell) abs(relPath string) string { return path.Join(s.base, relPath
 // exec runs cmd on client with the given stdin and stdout. A failure carries
 // the command's stderr, which is what "exited with status 1" hides.
 func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader, stdout io.Writer) error {
-	Log.Add(s.proto, ">>>", cmd)
+	Log.Add(s.proto, DirOut, cmd)
 	session, err := client.NewSession()
 	if err != nil {
-		Log.Add(s.proto, "ERR", err.Error())
+		Log.Add(s.proto, DirErr, err.Error())
 		return err
 	}
 	defer session.Close()
@@ -53,7 +53,7 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			err = errors.New(msg)
 		}
-		Log.Add(s.proto, "ERR", err.Error())
+		Log.Add(s.proto, DirErr, err.Error())
 		return err
 	}
 	return nil
@@ -66,7 +66,7 @@ func (s *sshShell) run(ctx context.Context, cmd string) (string, error) {
 		return "", err
 	}
 	if t := strings.TrimRight(out.String(), "\n"); t != "" && !strings.ContainsAny(t, "\n\x00") {
-		Log.Add(s.proto, "<<<", t)
+		Log.Add(s.proto, DirIn, t)
 	}
 	return out.String(), nil
 }
@@ -364,7 +364,7 @@ func truncateCmd(path string, n int64) string {
 // only arrives through Wait, so the reader surfaces it (with stderr) once the
 // pipe drains, or a cat that failed with EACCES looks like an empty file.
 func (s *sshShell) stream(ctx context.Context, client *ssh.Client, cmd string, release func()) (io.ReadCloser, error) {
-	Log.Add(s.proto, ">>>", cmd)
+	Log.Add(s.proto, DirOut, cmd)
 	session, err := client.NewSession()
 	if err != nil {
 		release()

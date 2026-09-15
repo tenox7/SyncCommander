@@ -10,19 +10,19 @@ import (
 	"time"
 )
 
-// LogFn routes scanner-level errors into the shared operation log. model can't
+// LogErr routes scanner-level errors into the shared operation log. model can't
 // import transport (transport imports model), so main wires it up.
-var LogFn func(proto, direction, msg string)
+var LogErr func(proto, msg string)
 
 // ListTimeout caps one directory listing on backends that do not manage their
 // own liveness; zero disables the cap. Read when a Scanner is created.
 var ListTimeout = 120 * time.Second
 
 func logScanErr(err error) {
-	if err == nil || LogFn == nil || errors.Is(err, context.Canceled) {
+	if err == nil || LogErr == nil || errors.Is(err, context.Canceled) {
 		return
 	}
-	LogFn("scan", "ERR", err.Error())
+	LogErr("scan", err.Error())
 }
 
 // Scan phases as shown in the status bar.

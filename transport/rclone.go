@@ -70,9 +70,9 @@ type rcloneLogHandler struct{}
 func (rcloneLogHandler) Enabled(_ context.Context, l slog.Level) bool { return l > slog.LevelDebug }
 
 func (rcloneLogHandler) Handle(_ context.Context, r slog.Record) error {
-	dir := "<<<"
+	dir := DirIn
 	if r.Level >= slog.LevelError {
-		dir = "ERR"
+		dir = DirErr
 	}
 	Log.Add("rclone", dir, r.Message)
 	return nil
@@ -129,10 +129,10 @@ func NewRcloneBackend(rawURL string, insecure bool) (*RcloneBackend, error) {
 	if len(b.avail) > 0 {
 		_ = b.ht.Set(b.avail[0])
 	}
-	Log.Add("rclone", "<<<", fmt.Sprintf("%s: %s hashes=%v listR=%v move=%v dirmove=%v",
+	Log.Add("rclone", DirIn, fmt.Sprintf("%s: %s hashes=%v listR=%v move=%v dirmove=%v",
 		b.url, f.String(), b.avail, b.canListRecursive(), b.feat.Move != nil, b.feat.DirMove != nil))
 	if b.feat.SlowModTime && ci.UseServerModTime {
-		Log.Add("rclone", "<<<", b.url+": mtime is the server upload time; "+
+		Log.Add("rclone", DirIn, b.url+": mtime is the server upload time; "+
 			"RCLONE_USE_SERVER_MODTIME=false reads the exact one at 1 request per file")
 	}
 	return b, nil
@@ -194,13 +194,13 @@ func (b *RcloneBackend) List(ctx context.Context, relDir string) ([]model.FileEn
 }
 
 func (b *RcloneBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	Log.Add("rclone", ">>>", "list "+b.f.Name()+":"+path.Join(b.f.Root(), relDir))
+	Log.Add("rclone", DirOut, "list "+b.f.Name()+":"+path.Join(b.f.Root(), relDir))
 	dirEntries, err := b.f.List(ctx, relDir)
 	if err != nil {
 		return nil, err
 	}
 	entries := b.convert(ctx, dirEntries)
-	Log.Add("rclone", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("rclone", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
 
@@ -275,7 +275,7 @@ func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, ati
 		md["btime"] = btime.Format(time.RFC3339Nano)
 	}
 	if err := sm.SetMetadata(ctx, md); err != nil {
-		Log.Add("rclone", "ERR", "set times metadata "+relPath+": "+err.Error())
+		Log.Add("rclone", DirErr, "set times metadata "+relPath+": "+err.Error())
 	}
 	return nil
 }
@@ -489,7 +489,7 @@ func (b *RcloneBackend) PreloadRecursive(ctx context.Context, scope string) erro
 
 func (b *RcloneBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
 	scope = strings.Trim(scope, "/")
-	Log.Add("rclone", ">>>", "recursive list "+b.f.Name()+":"+path.Join(b.f.Root(), scope))
+	Log.Add("rclone", DirOut, "recursive list "+b.f.Name()+":"+path.Join(b.f.Root(), scope))
 	var count int
 	// Bucket backends return a flat object list from ListR with no directory
 	// entries at all, so every ancestor is synthesized from the object paths.
@@ -529,10 +529,10 @@ func (b *RcloneBackend) runRecursiveList(ctx context.Context, scope string, emit
 	}
 	err := b.feat.ListR(ctx, scope, cb)
 	if err != nil {
-		Log.Add("rclone", "ERR", "recursive list: "+err.Error())
+		Log.Add("rclone", DirErr, "recursive list: "+err.Error())
 		return err
 	}
-	Log.Add("rclone", "<<<", fmt.Sprintf("recursive list: %d entries", count))
+	Log.Add("rclone", DirIn, fmt.Sprintf("recursive list: %d entries", count))
 	return nil
 }
 

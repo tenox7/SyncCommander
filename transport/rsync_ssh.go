@@ -41,7 +41,7 @@ func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBa
 		if err != nil {
 			return nil, err
 		}
-		Log.Add(b.proto, "<<<", "extra connection dialed")
+		Log.Add(b.proto, DirIn, "extra connection dialed")
 		return c.client, nil
 	}
 	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
@@ -79,7 +79,7 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 		return err
 	}
 	emitFileList(scope, result.FileList, emit)
-	Log.Add(b.proto, "<<<", fmt.Sprintf("RLIST %d entries", len(result.FileList)))
+	Log.Add(b.proto, DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }
 
@@ -95,7 +95,7 @@ func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *r
 // progress.
 func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remote))
-	Log.Add(b.proto, ">>>", label+" "+serverCmd)
+	Log.Add(b.proto, DirOut, label+" "+serverCmd)
 	session, err := conn.NewSession()
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.
 		return nil, err
 	}
 	if err := session.Start(serverCmd); err != nil {
-		Log.Add(b.proto, "ERR", err.Error())
+		Log.Add(b.proto, DirErr, err.Error())
 		return nil, err
 	}
 	var rw io.ReadWriter = &sessionRW{r: stdout, w: stdin}
@@ -120,7 +120,7 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.
 	}
 	result, err := client.Run(ctx, rw, local)
 	if err != nil {
-		Log.Add(b.proto, "ERR", err.Error())
+		Log.Add(b.proto, DirErr, err.Error())
 	}
 	return result, err
 }
@@ -179,7 +179,7 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 		return nil, err
 	}
 	got := b.md4.fromFileList(scope, recursive, result.FileList)
-	Log.Add(b.proto, "<<<", fmt.Sprintf("MD4 %d checksums", len(got)))
+	Log.Add(b.proto, DirIn, fmt.Sprintf("MD4 %d checksums", len(got)))
 	return got, nil
 }
 
@@ -260,7 +260,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	_, err = b.runPooled(ctx, "BATCH "+srcPath+" via", client, remoteDest, []string{srcPath}, wrap)
 	b.invalidateAfterTreeSend(relPath)
 	if err == nil {
-		Log.Add(b.proto, "<<<", "BATCH OK")
+		Log.Add(b.proto, DirIn, "BATCH OK")
 	}
 	return err
 }

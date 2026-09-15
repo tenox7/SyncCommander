@@ -81,13 +81,13 @@ func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend
 		// every comparison would read as a mismatch; the size check above is
 		// all the verification available.
 		if !scanner.NegotiateChecksum() {
-			transport.Log.Add("copy", "ERR", "verify "+relPath+": no checksum algorithm shared by both sides, resumed content unverified")
+			transport.Log.Add("copy", transport.DirErr, "verify "+relPath+": no checksum algorithm shared by both sides, resumed content unverified")
 			return nil
 		}
 		srcSum, serr := src.Checksum(ctx, relPath)
 		dstSum, derr := dst.Checksum(ctx, relPath)
 		if serr != nil || derr != nil || srcSum == "" || dstSum == "" {
-			transport.Log.Add("copy", "ERR", "verify "+relPath+": checksum unavailable, resumed content unverified")
+			transport.Log.Add("copy", transport.DirErr, "verify "+relPath+": checksum unavailable, resumed content unverified")
 			return nil
 		}
 		if srcSum != dstSum {
@@ -140,7 +140,7 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		return nil
 	}
 	if err := verify(ctx); err != nil {
-		transport.Log.Add("copy", "ERR", err.Error()+", recopying in full")
+		transport.Log.Add("copy", transport.DirErr, err.Error()+", recopying in full")
 		rollback()
 		return err
 	}

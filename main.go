@@ -66,9 +66,9 @@ func main() {
 	if *pprofAddr != "" {
 		go func() {
 			// Errors go to the in-app log: stderr would corrupt the TUI.
-			transport.Log.Add("pprof", "<<<", "listening on "+*pprofAddr)
+			transport.Log.Add("pprof", transport.DirIn, "listening on "+*pprofAddr)
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-				transport.Log.Add("pprof", "ERR", err.Error())
+				transport.Log.Add("pprof", transport.DirErr, err.Error())
 			}
 		}()
 	}
@@ -93,7 +93,7 @@ func main() {
 	transport.SetMaxRetries(*maxRetries)
 	transport.SetStallTimeout(*stallTimeout)
 	model.ListTimeout = *listTimeout
-	model.LogFn = transport.Log.Add
+	model.LogErr = func(proto, msg string) { transport.Log.Add(proto, transport.DirErr, msg) }
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
 	transport.SetResticIdleTimeout(*resticTimeout)
 

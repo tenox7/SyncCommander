@@ -259,13 +259,13 @@ func rsyncRecvToLocal(ctx context.Context, proto, relPath, dstPath string, recv 
 	fi, err := os.Stat(dstPath)
 	switch {
 	case err != nil:
-		Log.Add(proto, "ERR", "RECV "+relPath+": dst missing after rsync: "+err.Error())
+		Log.Add(proto, DirErr, "RECV "+relPath+": dst missing after rsync: "+err.Error())
 		return fmt.Errorf("%s: dst missing after recv: %w", proto, err)
 	case fi.IsDir():
-		Log.Add(proto, "ERR", "RECV "+relPath+": dst is a directory after rsync")
+		Log.Add(proto, DirErr, "RECV "+relPath+": dst is a directory after rsync")
 		return fmt.Errorf("%s: dst became a directory after recv: %s", proto, dstPath)
 	}
-	Log.Add(proto, "<<<", fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
+	Log.Add(proto, DirIn, fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
 	return nil
 }
 

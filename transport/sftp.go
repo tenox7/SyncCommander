@@ -83,7 +83,7 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 			c.client.Close()
 			return nil, fmt.Errorf("sftp: %v", err)
 		}
-		Log.Add("sftp", "<<<", "extra connection dialed")
+		Log.Add("sftp", DirIn, "extra connection dialed")
 		return &sftpConn{sftp: sc, ssh: c.client}, nil
 	}
 	b.pool = newConnPool(&sftpConn{sftp: client, ssh: conn.client}, parallel-1, dial, func(c *sftpConn) { c.close() })
@@ -98,13 +98,13 @@ func (b *SFTPBackend) Close() error {
 
 func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := b.abs(relDir)
-	Log.Add("sftp", ">>>", "READDIR "+dir)
+	Log.Add("sftp", DirOut, "READDIR "+dir)
 	entries, err := b.sftp.ReadDir(dir)
 	if err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+		Log.Add("sftp", DirErr, err.Error())
 		return nil, err
 	}
-	Log.Add("sftp", "<<<", fmt.Sprintf("%d entries", len(entries)))
+	Log.Add("sftp", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	result := make([]model.FileEntry, 0, len(entries))
 	for _, info := range entries {
 		if ctx.Err() != nil {
@@ -135,7 +135,7 @@ func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, 
 	}
 	err := b.sftp.Chtimes(b.abs(relPath), atime, mtime)
 	if err != nil {
-		Log.Add("sftp", "ERR", "CHTIMES "+relPath+": "+err.Error())
+		Log.Add("sftp", DirErr, "CHTIMES "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -173,10 +173,10 @@ func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, off
 }
 
 func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	Log.Add("sftp", ">>>", "STOR "+relPath)
+	Log.Add("sftp", DirOut, "STOR "+relPath)
 	err := b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0, src, mode)
 	if err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+		Log.Add("sftp", DirErr, err.Error())
 	}
 	return err
 }
@@ -184,16 +184,16 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 // AppendFrom resumes at offset; the destination is truncated there first so a
 // file that shrank underneath us does not end up with a zero-filled hole.
 func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
-	Log.Add("sftp", ">>>", fmt.Sprintf("APPEND %s @%d", relPath, offset))
+	Log.Add("sftp", DirOut, fmt.Sprintf("APPEND %s @%d", relPath, offset))
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+		Log.Add("sftp", DirErr, err.Error())
 		return err
 	}
 	defer rd.Close()
 	err = b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE, offset, rd, mode)
 	if err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+		Log.Add("sftp", DirErr, err.Error())
 	}
 	return err
 }
@@ -216,7 +216,7 @@ func (b *SFTPBackend) openAt(relPath string, offset int64) (io.ReadCloser, error
 	}
 	if err != nil {
 		release()
-		Log.Add("sftp", "ERR", "OPEN "+relPath+": "+err.Error())
+		Log.Add("sftp", DirErr, "OPEN "+relPath+": "+err.Error())
 		return nil, err
 	}
 	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
@@ -224,9 +224,9 @@ func (b *SFTPBackend) openAt(relPath string, offset int64) (io.ReadCloser, error
 
 func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
 	fullPath := b.abs(relPath)
-	Log.Add("sftp", ">>>", "MKDIR "+relPath)
+	Log.Add("sftp", DirOut, "MKDIR "+relPath)
 	if err := b.sftp.MkdirAll(fullPath); err != nil {
-		Log.Add("sftp", "ERR", err.Error())
+		Log.Add("sftp", DirErr, err.Error())
 		return err
 	}
 	if mode != 0 {
@@ -238,7 +238,7 @@ func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode)
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	err := b.sftp.Rename(b.abs(oldRelPath), b.abs(newRelPath))
 	if err != nil {
-		Log.Add("sftp", "ERR", "RENAME "+oldRelPath+": "+err.Error())
+		Log.Add("sftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())
 	}
 	return err
 }
@@ -246,7 +246,7 @@ func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) e
 func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
 	err := b.sftp.Remove(b.abs(relPath))
 	if err != nil {
-		Log.Add("sftp", "ERR", "REMOVE "+relPath+": "+err.Error())
+		Log.Add("sftp", DirErr, "REMOVE "+relPath+": "+err.Error())
 	}
 	return err
 }
@@ -257,7 +257,7 @@ func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
 	}
 	err := b.removeAll(b.abs(relPath))
 	if err != nil {
-		Log.Add("sftp", "ERR", "REMOVEALL "+relPath+": "+err.Error())
+		Log.Add("sftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
 }
