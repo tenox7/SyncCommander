@@ -81,13 +81,16 @@ func (d *OpenDialog) View(width, height int) string {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(d.errMsg))
 	}
 	sb.WriteString("\n\n")
-	sb.WriteString(hintStyle.Render("/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://  restic[s]://  rclone://"))
+	const schemes = "/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://  restic[s]://  rclone://"
+	sb.WriteString(hintStyle.Render(schemes))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("Enter=open  Esc=cancel"))
 
+	// The box hugs the scheme list and wraps on screens narrower than it.
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("4")).
-		Padding(1, 2)
+		Padding(1, 2).
+		Width(min(width, lipgloss.Width(schemes)+6) - 2)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, style.Render(sb.String()))
 }
