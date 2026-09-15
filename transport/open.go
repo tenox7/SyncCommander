@@ -40,7 +40,7 @@ var schemes = []struct {
 
 func openSFTP(a string, i bool, p int) (model.Backend, error)     { return NewSFTPBackend(a, i, p) }
 func openFTP(a string, i bool, p int) (model.Backend, error)      { return NewFTPBackend(a, i, p) }
-func openRsyncSSH(a string, i bool, _ int) (model.Backend, error) { return NewRsyncSSHBackend(a, i) }
+func openRsyncSSH(a string, i bool, p int) (model.Backend, error) { return NewRsyncSSHBackend(a, i, p) }
 func openRsync(a string, _ bool, _ int) (model.Backend, error)    { return NewRsyncBackend(a) }
 func openWebDAV(a string, i bool, p int) (model.Backend, error)   { return NewWebDAVBackend(a, i, p) }
 func openRestic(a string, i bool, p int) (model.Backend, error)   { return NewResticBackend(a, i, p) }

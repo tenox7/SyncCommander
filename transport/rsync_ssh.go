@@ -11,16 +11,20 @@ import (
 	"strings"
 
 	"github.com/gokrazy/rsync/rsyncclient"
+	"golang.org/x/crypto/ssh"
 
 	"sc/model"
 )
 
 type RsyncSSHBackend struct {
 	sshShell
-	md4 md4Cache
+	md4  md4Cache
+	pool *connPool[*ssh.Client]
 }
 
-func NewRsyncSSHBackend(rawURL string, insecure bool) (*RsyncSSHBackend, error) {
+// NewRsyncSSHBackend dials rawURL; up to parallel-1 extra connections are
+// dialed lazily so parallel transfers do not share one TCP stream.
+func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
 	conn, err := dialSSH(rawURL, insecure)
 	if err != nil {
 		return nil, err
@@ -32,11 +36,24 @@ func NewRsyncSSHBackend(rawURL string, insecure bool) (*RsyncSSHBackend, error) 
 		return nil, errors.New("rsync+ssh: remote rsync not found")
 	}
 	b.display = sshDisplayURL(conn, b.base)
+	dial := func() (*ssh.Client, error) {
+		c, err := dialSSH(rawURL, insecure)
+		if err != nil {
+			return nil, err
+		}
+		Log.Add(b.proto, "<<<", "extra connection dialed")
+		return c.client, nil
+	}
+	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	return b, nil
 }
 
 func (b *RsyncSSHBackend) OwnsCopyProgress() bool { return true }
-func (b *RsyncSSHBackend) Close() error           { return b.client.Close() }
+
+func (b *RsyncSSHBackend) Close() error {
+	b.pool.close()
+	return b.client.Close()
+}
 
 func (b *RsyncSSHBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	return b.listCache.serve(ctx, relDir, b.findList)
@@ -57,7 +74,7 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-	result, err := b.runRsync(ctx, "RLIST", client, b.abs(scope)+"/", []string{tmpDir + "/"}, nil)
+	result, err := b.runRsync(ctx, "RLIST", b.client, client, b.abs(scope)+"/", []string{tmpDir + "/"}, nil)
 	if err != nil {
 		return err
 	}
@@ -66,12 +83,20 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 	return nil
 }
 
-// runRsync starts the remote rsync server for remote over a fresh session and
-// drives client against it; wrap may decorate the stream to credit progress.
-func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
+// runPooled is runRsync on a pooled connection, for data transfers.
+func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
+	conn, release := b.pool.acquire()
+	defer release()
+	return b.runRsync(ctx, label, conn, client, remote, local, wrap)
+}
+
+// runRsync starts the remote rsync server for remote over a fresh session on
+// conn and drives client against it; wrap may decorate the stream to credit
+// progress.
+func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remote))
 	Log.Add(b.proto, ">>>", label+" "+serverCmd)
-	session, err := b.client.NewSession()
+	session, err := conn.NewSession()
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +174,7 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 	if recursive {
 		remote += "/"
 	}
-	result, err := b.runRsync(ctx, "MD4", client, remote, []string{tmpDir + "/"}, nil)
+	result, err := b.runRsync(ctx, "MD4", b.client, client, remote, []string{tmpDir + "/"}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -189,13 +214,14 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 		if err != nil {
 			return err
 		}
-		_, err = b.runRsync(ctx, "RECV", client, b.abs(relPath), []string{dstDir}, nil)
+		_, err = b.runPooled(ctx, "RECV", client, b.abs(relPath), []string{dstDir}, nil)
 		return err
 	})
 }
 
 func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	return b.stream(ctx, b.client, b.tailCmd(relPath, offset), func() {})
+	conn, release := b.pool.acquire()
+	return b.stream(ctx, conn, b.tailCmd(relPath, offset), release)
 }
 
 // RecvToLocalFile downloads straight to dstPath; an existing prefix there is
@@ -206,7 +232,7 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 		if err != nil {
 			return err
 		}
-		_, err = b.runRsync(ctx, "RECV "+relPath+" -> "+dstPath+" via", client, b.abs(relPath), []string{dstDir}, nil)
+		_, err = b.runPooled(ctx, "RECV "+relPath+" -> "+dstPath+" via", client, b.abs(relPath), []string{dstDir}, nil)
 		return err
 	})
 }
@@ -231,7 +257,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	if counter := progressFromContext(ctx); counter != nil {
 		wrap = countingRW(NewCappedAdder(counter, 1<<62))
 	}
-	_, err = b.runRsync(ctx, "BATCH "+srcPath+" via", client, remoteDest, []string{srcPath}, wrap)
+	_, err = b.runPooled(ctx, "BATCH "+srcPath+" via", client, remoteDest, []string{srcPath}, wrap)
 	b.invalidateAfterTreeSend(relPath)
 	if err == nil {
 		Log.Add(b.proto, "<<<", "BATCH OK")
@@ -282,7 +308,7 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	if err != nil {
 		return err
 	}
-	_, err = b.runRsync(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
+	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	settlePush(ctx, adder, budget, err)
