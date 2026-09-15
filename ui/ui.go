@@ -361,25 +361,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshTree()
 	case "left", "h":
-		node := m.activePanel().CursorNode()
+		p := m.activePanel()
+		row, ok := p.CursorRow()
 		collapsed := false
 		m.mutateTree(func(*model.TreeNode) {
-			if node == nil {
+			if !ok {
 				return
 			}
-			if !node.IsAttr && node.Expanded {
-				node.Expanded = false
+			if row.Attr == nil && row.Node.Expanded {
+				row.Node.Expanded = false
 				collapsed = true
 				return
 			}
-			p := m.activePanel()
-			depth := node.Depth
-			if node.IsAttr {
-				depth = node.Depth - 1
-			}
+			// Otherwise jump to the enclosing directory and collapse it.
 			for i := p.cursor - 1; i >= 0; i-- {
-				n := p.nodes[i]
-				if !n.IsAttr && n.IsDir && n.Depth < depth {
+				n := p.rows[i].Node
+				if p.rows[i].Attr == nil && n.IsDir && n.Depth < row.Node.Depth {
 					p.cursor = i
 					n.Expanded = false
 					p.clampOffset()
@@ -415,11 +412,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 		m.refreshTree()
 	case "r":
-		node := m.activePanel().CursorNode()
-		if m.scanning() || (node != nil && node.IsAttr) {
+		row, ok := m.activePanel().CursorRow()
+		if m.scanning() || (ok && row.Attr != nil) {
 			break
 		}
-		return m, m.rescanWithTopLevel(node)
+		return m, m.rescanWithTopLevel(row.Node)
 	case "R":
 		tree := m.scanner.Tree()
 		if tree == nil || m.scanning() {
@@ -430,7 +427,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		node := m.activePanel().CursorNode()
 		touch := false
 		m.readTree(func(*model.TreeNode) {
-			touch = node != nil && !node.IsAttr && node.Compare.Presence == model.PresenceBoth
+			touch = node != nil && node.Compare.Presence == model.PresenceBoth
 		})
 		if touch {
 			return m, m.touchNode(node)
@@ -439,24 +436,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.checksumming() {
 			break
 		}
-		node := m.activePanel().CursorNode()
-		if node != nil && node.IsAttr {
-			node = m.parentFileNode()
-		}
-		if node != nil {
+		if node := m.activePanel().CursorFile(); node != nil {
 			return m, m.checksumNode(node)
 		}
 	case "e":
-		node := m.activePanel().CursorNode()
-		if node != nil && !node.IsAttr {
+		if node := m.activePanel().CursorNode(); node != nil {
 			m.openRename(node)
 		}
 	case "d":
 		if m.deleting {
 			break
 		}
-		node := m.activePanel().CursorNode()
-		if node != nil && !node.IsAttr {
+		if node := m.activePanel().CursorNode(); node != nil {
 			m.openDelete(node)
 		}
 	case ">":
@@ -501,10 +492,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.reopenOrExplain(leftPath, rightPath)
 	case "o":
-		node := m.activePanel().CursorNode()
-		if node != nil && node.IsAttr {
-			node = m.parentFileNode()
-		}
+		node := m.activePanel().CursorFile()
 		if node != nil && !node.IsDir {
 			var cmd tea.Cmd
 			m.readTree(func(*model.TreeNode) {
@@ -518,7 +506,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		node := m.activePanel().CursorNode()
-		if node == nil || !node.IsDir || node.IsAttr {
+		if node == nil || !node.IsDir {
 			break
 		}
 		leftPath, rightPath := m.leftArg, m.rightArg
@@ -552,7 +540,7 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	if !leftToRight {
 		blocked, title = model.PresenceLeftOnly, "\u26a0 COPY RIGHT \u2192 LEFT"
 	}
-	if m.copying || node == nil || node.IsAttr || m.presence(node) == blocked {
+	if m.copying || node == nil || m.presence(node) == blocked {
 		return nil
 	}
 	if lines, ok := m.copyConfirmLines(node, leftToRight); ok {
@@ -760,8 +748,8 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	m.scanner = model.NewScanner(m.left, m.right, 4, m.scanParallel, m.deepScan)
 	m.leftPanel.title = m.left.BasePath()
 	m.rightPanel.title = m.right.BasePath()
-	m.leftPanel.SetNodes(nil)
-	m.rightPanel.SetNodes(nil)
+	m.leftPanel.SetRows(nil)
+	m.rightPanel.SetRows(nil)
 	return m.startScan(), ""
 }
 
@@ -1170,22 +1158,16 @@ func (m *Model) findAndJump(re *regexp.Regexp) {
 	}
 	m.refreshTree()
 	p := m.activePanel()
-	for i, n := range p.nodes {
-		if n == target {
-			p.cursor = i
-			p.clampOffset()
-			break
-		}
-	}
+	p.jumpTo(target)
 	m.syncPanels()
 }
 
 func (m *Model) jumpToNextDiff() {
 	p := m.activePanel()
 	var after *model.TreeNode
-	for i := p.cursor; i >= 0 && i < len(p.nodes); i-- {
-		if !p.nodes[i].IsAttr {
-			after = p.nodes[i]
+	for i := p.cursor; i >= 0 && i < len(p.rows); i-- {
+		if r := p.rows[i]; r.Attr == nil {
+			after = r.Node
 			break
 		}
 	}
@@ -1207,24 +1189,8 @@ func (m *Model) jumpToNextDiff() {
 		return
 	}
 	m.refreshTree()
-	for i, n := range p.nodes {
-		if n == target {
-			p.cursor = i
-			p.clampOffset()
-			break
-		}
-	}
+	p.jumpTo(target)
 	m.syncPanels()
-}
-
-func (m *Model) parentFileNode() *model.TreeNode {
-	p := m.activePanel()
-	for i := p.cursor - 1; i >= 0; i-- {
-		if !p.nodes[i].IsAttr {
-			return p.nodes[i]
-		}
-	}
-	return nil
 }
 
 func (m *Model) activePanel() *Panel {
@@ -1418,8 +1384,8 @@ func (m *Model) refreshTree() {
 		}
 		flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
 		m.lastFlatLen = len(flat)
-		m.leftPanel.SetNodes(flat)
-		m.rightPanel.SetNodes(flat)
+		m.leftPanel.SetRows(flat)
+		m.rightPanel.SetRows(flat)
 	})
 }
 
@@ -1468,21 +1434,12 @@ func swapTreeData(node *model.TreeNode) {
 	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
 	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
 	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
-	node.AttrLeftVal, node.AttrRightVal = node.AttrRightVal, node.AttrLeftVal
-	node.AttrLeftRaw, node.AttrRightRaw = node.AttrRightRaw, node.AttrLeftRaw
-	node.AttrWinner = -node.AttrWinner
 
 	switch node.Compare.Presence {
 	case model.PresenceLeftOnly:
 		node.Compare.Presence = model.PresenceRightOnly
 	case model.PresenceRightOnly:
 		node.Compare.Presence = model.PresenceLeftOnly
-	}
-	switch node.AttrPresence {
-	case model.PresenceLeftOnly:
-		node.AttrPresence = model.PresenceRightOnly
-	case model.PresenceRightOnly:
-		node.AttrPresence = model.PresenceLeftOnly
 	}
 
 	for _, child := range node.Children {

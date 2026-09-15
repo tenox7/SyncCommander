@@ -104,18 +104,31 @@ type TreeNode struct {
 	// Guides is a bitmask of the vertical tree-guide columns to the left of
 	// this row: bit i is set when the ancestor at depth i has more siblings
 	// below it. Valid bits are [0, Depth); depths past 64 render unguided.
-	Guides       uint64
-	IsLast       bool
-	IsAttr       bool
-	AttrLabel    string
-	AttrLeftVal  string
-	AttrRightVal string
-	AttrLeftRaw  string
-	AttrRightRaw string
-	AttrStatus   AttrStatus
-	AttrInactive bool
-	AttrWinner   int
-	AttrPresence Presence
+	Guides uint64
+	IsLast bool
+}
+
+// Row is one visible line: a tree node, or one attribute line under an
+// expanded file. Attribute rows are built per frame and never live in the
+// tree, so a node pays nothing for them.
+type Row struct {
+	Node *TreeNode // the node, or the file an attribute row belongs to
+	Attr *AttrRow  // nil for a node row
+}
+
+// AttrRow is one compared attribute of an expanded file.
+type AttrRow struct {
+	Label    string
+	LeftVal  string
+	RightVal string
+	LeftRaw  string
+	RightRaw string
+	Status   AttrStatus
+	Inactive bool
+	Winner   int // -1 when the left value is newer or larger, 1 for the right, 0 neither
+	Guides   uint64
+	IsLast   bool
+	Depth    int
 }
 
 // SubtreeChecksumScanned reports whether every PresenceBoth file in n's
@@ -323,7 +336,7 @@ func pruneSubtreeToSide(children []*TreeNode, keepLeft bool, opts CompareOpts) [
 // Compare.Checksum reflects whatever survived: AttrUnknown when either side
 // is missing a cached sum and both sides are present.
 func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
-	if n.IsDir || n.IsAttr {
+	if n.IsDir {
 		return
 	}
 	leftPath := ""
@@ -466,11 +479,11 @@ func PropagateStatus(root *TreeNode, opts *CompareOpts) TreeStats {
 // not refresh rollups — see PropagateStatus. hint sizes the result up front;
 // pass the previous result's length. Writes Guides/IsLast under the same
 // UI-goroutine ownership rule as PropagateStatus.
-func FlattenTree(root *TreeNode, opts *CompareOpts, hint int) []*TreeNode {
-	flat := make([]*TreeNode, 0, hint+1)
+func FlattenTree(root *TreeNode, opts *CompareOpts, hint int) []Row {
+	flat := make([]Row, 0, hint+1)
 	root.IsLast = true
 	root.Guides = 0
-	flat = append(flat, root)
+	flat = append(flat, Row{Node: root})
 	if !root.Expanded {
 		return flat
 	}
@@ -644,9 +657,9 @@ func NodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	return combineStatus(attrs[:n])
 }
 
-func flattenNode(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*TreeNode) {
+func flattenNode(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]Row) {
 	node.Guides = guides
-	*flat = append(*flat, node)
+	*flat = append(*flat, Row{Node: node})
 	if !node.Expanded {
 		return
 	}
@@ -661,7 +674,7 @@ func flattenNode(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*Tree
 	flattenFileAttrs(node, guides, opts, flat)
 }
 
-func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]*TreeNode) {
+func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]Row) {
 	kg := childGuides(guides, node.Depth, node.IsLast)
 
 	type attr struct {
@@ -770,22 +783,11 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0})
 
 	for i, a := range attrs {
-		row := &TreeNode{
-			IsAttr:       true,
-			AttrLabel:    a.label,
-			AttrLeftVal:  a.leftVal,
-			AttrRightVal: a.rightVal,
-			AttrLeftRaw:  a.leftRaw,
-			AttrRightRaw: a.rightRaw,
-			AttrStatus:   a.status,
-			AttrInactive: a.inactive,
-			AttrWinner:   a.winner,
-			AttrPresence: node.Compare.Presence,
-			Guides:       kg,
-			IsLast:       i == len(attrs)-1,
-			Depth:        node.Depth + 1,
-		}
-		*flat = append(*flat, row)
+		*flat = append(*flat, Row{Node: node, Attr: &AttrRow{
+			Label: a.label, LeftVal: a.leftVal, RightVal: a.rightVal, LeftRaw: a.leftRaw, RightRaw: a.rightRaw,
+			Status: a.status, Inactive: a.inactive, Winner: a.winner,
+			Guides: kg, IsLast: i == len(attrs)-1, Depth: node.Depth + 1,
+		}})
 	}
 }
 
@@ -801,7 +803,7 @@ func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool) []*Tr
 // would skip the subtree and mirror would under-count deletes; callers must
 // list it first.
 func UnlistedDir(node *TreeNode) *TreeNode {
-	if node == nil || node.IsAttr || !node.IsDir {
+	if node == nil || !node.IsDir {
 		return nil
 	}
 	if !node.Listed || node.ListErr {
@@ -816,9 +818,6 @@ func UnlistedDir(node *TreeNode) *TreeNode {
 }
 
 func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, result *[]*TreeNode) {
-	if node.IsAttr {
-		return
-	}
 	src, dst := node.Left, node.Right
 	if !leftToRight {
 		src, dst = node.Right, node.Left
@@ -877,9 +876,6 @@ func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 func findTwinPairs(children []*TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
 	byName := make(map[string][]*TreeNode)
 	for _, c := range children {
-		if c.IsAttr {
-			continue
-		}
 		byName[c.Name] = append(byName[c.Name], c)
 	}
 	for _, group := range byName {
@@ -913,9 +909,6 @@ func findTwinPairs(children []*TreeNode, leftToRight bool, seen map[*TreeNode]bo
 }
 
 func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
-	if node.IsAttr {
-		return
-	}
 	findTwinPairs(node.Children, leftToRight, seen, result)
 	for _, child := range node.Children {
 		if child.IsDir {
@@ -981,7 +974,7 @@ func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 // removing the just-copied file at the same path).
 func hasTwinWithSrc(parent, child *TreeNode, leftToRight bool) bool {
 	for _, sibling := range parent.Children {
-		if sibling == child || sibling.IsAttr {
+		if sibling == child {
 			continue
 		}
 		if sibling.Name != child.Name || sibling.IsDir == child.IsDir {
@@ -1032,9 +1025,6 @@ func FindNextDiff(root, after *TreeNode, opts *CompareOpts) *TreeNode {
 	started := after == nil
 	var visit func(n *TreeNode) *TreeNode
 	visit = func(n *TreeNode) *TreeNode {
-		if n.IsAttr {
-			return nil
-		}
 		if started && isDiffLeaf(n, opts) {
 			return n
 		}
@@ -1066,9 +1056,6 @@ func FindByName(root, after *TreeNode, re *regexp.Regexp) *TreeNode {
 	started := after == nil
 	var visit func(n *TreeNode) *TreeNode
 	visit = func(n *TreeNode) *TreeNode {
-		if n.IsAttr {
-			return nil
-		}
 		if started && n != root && re.MatchString(n.Name) {
 			return n
 		}
@@ -1088,9 +1075,6 @@ func FindByName(root, after *TreeNode, re *regexp.Regexp) *TreeNode {
 }
 
 func isDiffLeaf(n *TreeNode, opts *CompareOpts) bool {
-	if n.IsAttr {
-		return false
-	}
 	if n.Compare.Presence != PresenceBoth {
 		return true
 	}

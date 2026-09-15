@@ -656,7 +656,7 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, opts 
 		}
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return childJobs(parent.Children, job.depth+1, func(n *TreeNode) bool { return !n.IsAttr })
+		return childJobs(parent.Children, job.depth+1, nil)
 	})
 	// Re-check rather than trust the walk: the caller is about to enumerate
 	// this subtree for a destructive operation, and a dir still unlisted here
@@ -780,7 +780,7 @@ func renamedEntry(e *FileEntry, name, rel string) *FileEntry {
 // the caller re-scans it.
 func mergeRenamedCollision(parent, node *TreeNode, opts CompareOpts) bool {
 	for i, sib := range parent.Children {
-		if sib == node || sib.IsAttr || sib.Name != node.Name || sib.IsDir != node.IsDir {
+		if sib == node || sib.Name != node.Name || sib.IsDir != node.IsDir {
 			continue
 		}
 		merged := false
@@ -1186,9 +1186,6 @@ func groupFilesByTopLevel(root *TreeNode, onlyPending bool) []checksumGroup {
 	var groups []checksumGroup
 	var rootFiles []*TreeNode
 	for _, child := range root.Children {
-		if child.IsAttr {
-			continue
-		}
 		if !child.IsDir {
 			if child.Compare.Presence == PresenceBoth && needsChecksum(child, onlyPending) {
 				rootFiles = append(rootFiles, child)
