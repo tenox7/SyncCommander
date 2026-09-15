@@ -15,7 +15,7 @@ type CompareOpts struct {
 	ModTime     bool
 	ATime       bool
 	CTime       bool
-	BTime       bool
+	BirthTime   bool
 	Mode        bool
 	Checksum    bool
 	SubSecond   bool
@@ -635,7 +635,7 @@ func NodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 	for _, a := range [...]struct {
 		on bool
 		s  AttrStatus
-	}{{opts.Size, c.Size}, {opts.ModTime, c.ModTime}, {opts.ATime, c.ATime}, {opts.CTime, c.CTime}, {opts.BTime, c.BirthTime}, {opts.Mode, c.Mode}, {opts.Checksum, c.Checksum}} {
+	}{{opts.Size, c.Size}, {opts.ModTime, c.ModTime}, {opts.ATime, c.ATime}, {opts.CTime, c.CTime}, {opts.BirthTime, c.BirthTime}, {opts.Mode, c.Mode}, {opts.Checksum, c.Checksum}} {
 		if a.on {
 			attrs[n] = a.s
 			n++
@@ -755,7 +755,7 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	addTime("mtime", func(e *FileEntry) time.Time { return e.ModTime }, node.Compare.ModTime, opts != nil && opts.ModTime)
 	addTime("atime", func(e *FileEntry) time.Time { return e.ATime }, node.Compare.ATime, opts != nil && opts.ATime)
 	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime }, node.Compare.CTime, opts != nil && opts.CTime)
-	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime, opts != nil && opts.BTime)
+	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime, opts != nil && opts.BirthTime)
 	lv, rv := val(func(e *FileEntry) string { return e.Mode.String() })
 	lpraw, rpraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("0%o", e.Mode.Perm()) })
 	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0})

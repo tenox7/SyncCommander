@@ -330,7 +330,7 @@ func fileOtherAttrsDiffer(n *model.TreeNode, opts *model.CompareOpts) bool {
 	if opts.CTime && n.Compare.CTime == model.AttrDifferent {
 		return true
 	}
-	if opts.BTime && n.Compare.BirthTime == model.AttrDifferent {
+	if opts.BirthTime && n.Compare.BirthTime == model.AttrDifferent {
 		return true
 	}
 	if opts.Mode && n.Compare.Mode == model.AttrDifferent {

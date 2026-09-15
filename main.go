@@ -117,7 +117,7 @@ func main() {
 		ModTime:     *modtime,
 		ATime:       *atime,
 		CTime:       *ctime,
-		BTime:       *btime,
+		BirthTime:   *btime,
 		Mode:        *mode,
 		Checksum:    *cksum,
 		SubSecond:   *subsec,

@@ -9,14 +9,14 @@ import (
 // result as "at capacity → fall back to the serialized primary conn". These
 // tests pin that contract, which sftp/scp (non-nil primary) never exercise.
 
-func TestSSHPoolNilPrimaryFallback(t *testing.T) {
+func TestConnPoolNilPrimaryFallback(t *testing.T) {
 	var dialed int64
 	type fakeConn struct{ id int64 }
 	dial := func() (*fakeConn, error) {
 		return &fakeConn{id: atomic.AddInt64(&dialed, 1)}, nil
 	}
 	var closed int64
-	p := newSSHPool[*fakeConn](nil, 2, dial, func(*fakeConn) { atomic.AddInt64(&closed, 1) })
+	p := newConnPool[*fakeConn](nil, 2, dial, func(*fakeConn) { atomic.AddInt64(&closed, 1) })
 
 	c1, r1 := p.acquire()
 	c2, _ := p.acquire()
@@ -39,9 +39,9 @@ func TestSSHPoolNilPrimaryFallback(t *testing.T) {
 	}
 }
 
-func TestSSHPoolZeroExtrasAlwaysNil(t *testing.T) {
+func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
 	dial := func() (*int, error) { v := 0; return &v, nil }
-	p := newSSHPool[*int](nil, 0, dial, func(*int) {})
+	p := newConnPool[*int](nil, 0, dial, func(*int) {})
 	for i := 0; i < 3; i++ {
 		c, r := p.acquire()
 		if c != nil {

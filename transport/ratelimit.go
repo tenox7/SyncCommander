@@ -145,8 +145,8 @@ func ParseRate(in string) (int64, error) {
 	return int64(v * float64(mult)), nil
 }
 
-// FormatRate renders a bytes-per-second limit compactly for display.
-func FormatRate(bps int64) string {
+// FormatLimit renders a bytes-per-second limit compactly for display.
+func FormatLimit(bps int64) string {
 	if bps <= 0 {
 		return "off"
 	}

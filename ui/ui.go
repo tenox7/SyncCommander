@@ -171,7 +171,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		{Label: "Modify time", Value: &m.cmpOpts.ModTime},
 		{Label: "Access time", Value: &m.cmpOpts.ATime},
 		{Label: "Change time", Value: &m.cmpOpts.CTime},
-		{Label: "Birth time", Value: &m.cmpOpts.BTime},
+		{Label: "Birth time", Value: &m.cmpOpts.BirthTime},
 		{Label: "Permissions", Value: &m.cmpOpts.Mode},
 		{Label: "Checksum", Value: &m.cmpOpts.Checksum},
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},

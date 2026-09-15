@@ -34,7 +34,7 @@ type FTPBackend struct {
 	host    string
 	port    string
 	tlsCfg  *tls.Config
-	pool    *sshPool[*ftpConn]
+	pool    *connPool[*ftpConn]
 	mu      sync.Mutex
 	dirs    sync.Map // directories known to exist, so uploads skip the MKD dance
 }
@@ -163,7 +163,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 		Log.Add("ftp", "<<<", "extra connection dialed")
 		return &ftpConn{conn: c, rawConn: raw, lastUsed: time.Now()}, nil
 	}
-	b.pool = newSSHPool[*ftpConn](nil, parallel-1, dial, func(c *ftpConn) { c.close() })
+	b.pool = newConnPool[*ftpConn](nil, parallel-1, dial, func(c *ftpConn) { c.close() })
 	return b, nil
 }
 

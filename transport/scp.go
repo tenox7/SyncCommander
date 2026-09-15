@@ -16,7 +16,7 @@ import (
 // from cat. It is the fallback when the server has no SFTP subsystem.
 type SCPBackend struct {
 	sshShell
-	pool *sshPool[*ssh.Client]
+	pool *connPool[*ssh.Client]
 }
 
 // newSCPBackend builds an SCPBackend over an already-dialed sshConn. rawURL
@@ -34,7 +34,7 @@ func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) *S
 		Log.Add("scp", "<<<", "extra connection dialed")
 		return c.client, nil
 	}
-	b.pool = newSSHPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
+	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	return b
 }
 

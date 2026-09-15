@@ -47,8 +47,8 @@ func TestParseRate(t *testing.T) {
 func TestFormatRate(t *testing.T) {
 	cases := map[int64]string{0: "off", 900: "900", 512 << 10: "512K", 1 << 20: "1M", 3 << 19: "1.5M", 2 << 30: "2G"}
 	for in, want := range cases {
-		if got := FormatRate(in); got != want {
-			t.Errorf("FormatRate(%d) = %q, want %q", in, got, want)
+		if got := FormatLimit(in); got != want {
+			t.Errorf("FormatLimit(%d) = %q, want %q", in, got, want)
 		}
 	}
 }

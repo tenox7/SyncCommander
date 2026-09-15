@@ -157,7 +157,7 @@ func (d *SettingsDialog) View(width, height int) string {
 		var state string
 		switch {
 		case opt.GetRate != nil:
-			state = styleOptInt.Render(fmt.Sprintf("[%4s]", transport.FormatRate(opt.GetRate())))
+			state = styleOptInt.Render(fmt.Sprintf("[%4s]", transport.FormatLimit(opt.GetRate())))
 		case opt.IntValue != nil:
 			state = styleOptInt.Render(fmt.Sprintf("[%4d]", *opt.IntValue))
 		case *opt.Value:

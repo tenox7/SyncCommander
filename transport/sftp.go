@@ -47,7 +47,7 @@ func (c *sftpConn) close() {
 type SFTPBackend struct {
 	sshShell
 	sftp *sftp.Client
-	pool *sshPool[*sftpConn]
+	pool *connPool[*sftpConn]
 }
 
 func NewSFTPBackend(rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
@@ -86,7 +86,7 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 		Log.Add("sftp", "<<<", "extra connection dialed")
 		return &sftpConn{sftp: sc, ssh: c.client}, nil
 	}
-	b.pool = newSSHPool(&sftpConn{sftp: client, ssh: conn.client}, parallel-1, dial, func(c *sftpConn) { c.close() })
+	b.pool = newConnPool(&sftpConn{sftp: client, ssh: conn.client}, parallel-1, dial, func(c *sftpConn) { c.close() })
 	return b, nil
 }
 
