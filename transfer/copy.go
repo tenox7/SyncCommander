@@ -108,24 +108,18 @@ func Copy(ctx context.Context, req Request) Result {
 	if batched {
 		changedDirs = []string{req.RelPath}
 	}
-	if req.LeftToRight {
-		res.Changed.Right, res.Changed.RightDirs = c.dstChanged, changedDirs
-	} else {
-		res.Changed.Left, res.Changed.LeftDirs = c.dstChanged, changedDirs
-	}
+	_, dst := model.CopySides(req.LeftToRight)
+	res.Changed.Paths[dst], res.Changed.Dirs[dst] = c.dstChanged, changedDirs
 	return res
 }
 
 // enumerate snapshots everything the transfer needs from the live tree in one
 // locked pass; the transfer never touches a node again.
 func (req Request) enumerate() (collisions []entry, files []item, totalBytes int64) {
+	src, dst := model.CopySides(req.LeftToRight)
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
-			dstEntry := c.Right
-			if !req.LeftToRight {
-				dstEntry = c.Left
-			}
-			if dstEntry != nil {
+			if dstEntry := c.Sides[dst].Entry; dstEntry != nil {
 				collisions = append(collisions, entry{relPath: c.RelPath, isDir: dstEntry.IsDir})
 			}
 		}
@@ -135,10 +129,7 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 		}
 		files = make([]item, 0, len(nodes))
 		for _, f := range nodes {
-			it := item{relPath: f.RelPath, src: f.Left, dst: f.Right}
-			if !req.LeftToRight {
-				it.src, it.dst = f.Right, f.Left
-			}
+			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry}
 			if it.src != nil {
 				totalBytes += it.src.Size
 			}

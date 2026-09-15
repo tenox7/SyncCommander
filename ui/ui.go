@@ -132,9 +132,8 @@ type Model struct {
 
 func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {
 	copyParallel, scanParallel = max(copyParallel, 1), max(scanParallel, 1)
-	lp := NewPanel(left.BasePath())
-	lp.isLeft = true
-	rp := NewPanel(right.BasePath())
+	lp := NewPanel(left.BasePath(), model.SideLeft)
+	rp := NewPanel(right.BasePath(), model.SideRight)
 	m := &Model{
 		leftPanel:      lp,
 		rightPanel:     rp,
@@ -512,14 +511,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		leftPath, rightPath := m.leftArg, m.rightArg
 		descend := false
 		m.readTree(func(*model.TreeNode) {
-			if node.Left == nil && node.Right == nil {
+			l, r := node.Entries()
+			if l == nil && r == nil {
 				return
 			}
 			descend = true
-			if node.Left != nil {
+			if l != nil {
 				leftPath = childArg(leftPath, node.RelPath)
 			}
-			if node.Right != nil {
+			if r != nil {
 				rightPath = childArg(rightPath, node.RelPath)
 			}
 		})
@@ -589,7 +589,8 @@ func (m *Model) loadDiffContent(node *model.TreeNode) tea.Cmd {
 	m.diffGen++
 	gen := m.diffGen
 	left, right, relPath := m.left, m.right, node.RelPath
-	hasLeft, hasRight := node.Left != nil, node.Right != nil
+	leftEntry, rightEntry := node.Entries()
+	hasLeft, hasRight := leftEntry != nil, rightEntry != nil
 	return func() tea.Msg {
 		var leftData, rightData []byte
 		var err error
@@ -1092,29 +1093,21 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 		ctx := context.Background()
 		var l, r *model.FileEntry
 		var relPath string
-		scanner.ReadTree(func(*model.TreeNode) { l, r, relPath = node.Left, node.Right, node.RelPath })
+		scanner.ReadTree(func(*model.TreeNode) { l, r = node.Entries(); relPath = node.RelPath })
 		if l == nil || r == nil {
 			return touchDoneMsg{}
 		}
 		newer, older := l, r
-		olderBackend := right
-		touchedLeft := false
+		olderBackend, touched := right, model.SideRight
 		if r.ModTime.After(l.ModTime) {
 			newer, older = r, l
-			olderBackend = left
-			touchedLeft = true
+			olderBackend, touched = left, model.SideLeft
 		}
 		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime); err == nil {
 			// Touch only changes metadata; the file body is unchanged. Roll the
 			// cached CRC fingerprint forward to the new mtime so the preserving
 			// merge below treats CRC as still valid.
-			scanner.MutateTree(func(*model.TreeNode) {
-				if touchedLeft {
-					node.LeftCksumModTime = newer.ModTime
-					return
-				}
-				node.RightCksumModTime = newer.ModTime
-			})
+			scanner.MutateTree(func(*model.TreeNode) { node.Sides[touched].ChecksumModTime = newer.ModTime })
 		}
 		parentDir := model.DirOf(relPath)
 		le, re, err := scanner.ListBothDir(ctx, parentDir)
@@ -1399,8 +1392,7 @@ func (m *Model) refreshTreeNow() {
 
 func (m *Model) swapSides() {
 	m.leftPanel, m.rightPanel = m.rightPanel, m.leftPanel
-	m.leftPanel.isLeft = true
-	m.rightPanel.isLeft = false
+	m.leftPanel.side, m.rightPanel.side = model.SideLeft, model.SideRight
 	m.leftPanel.active = m.activeLeft
 	m.rightPanel.active = !m.activeLeft
 
@@ -1421,19 +1413,11 @@ func (m *Model) swapSides() {
 	}
 }
 
+// swapTreeData mirrors every per-side field. The swap key is refused while
+// busy, so no checksum is in flight to carry across.
 func swapTreeData(node *model.TreeNode) {
-	node.Left, node.Right = node.Right, node.Left
-	node.LeftChecksum, node.RightChecksum = node.RightChecksum, node.LeftChecksum
-	node.LeftCksumSize, node.RightCksumSize = node.RightCksumSize, node.LeftCksumSize
-	node.LeftCksumModTime, node.RightCksumModTime = node.RightCksumModTime, node.LeftCksumModTime
-	node.LeftChecksumDone, node.RightChecksumDone = node.RightChecksumDone, node.LeftChecksumDone
-	node.LeftChecksumErr, node.RightChecksumErr = node.RightChecksumErr, node.LeftChecksumErr
-	node.ChecksumPendingLeft, node.ChecksumPendingRight = node.ChecksumPendingRight, node.ChecksumPendingLeft
-	node.ChecksumActiveLeft, node.ChecksumActiveRight = node.ChecksumActiveRight, node.ChecksumActiveLeft
-	node.ChecksumInFlightLeft, node.ChecksumInFlightRight = node.ChecksumInFlightRight, node.ChecksumInFlightLeft
-	node.LeftTotalSize, node.RightTotalSize = node.RightTotalSize, node.LeftTotalSize
-	node.LeftTotalFiles, node.RightTotalFiles = node.RightTotalFiles, node.LeftTotalFiles
-	node.LeftTotalDirs, node.RightTotalDirs = node.RightTotalDirs, node.LeftTotalDirs
+	node.Sides[0], node.Sides[1] = node.Sides[1], node.Sides[0]
+	node.Totals[0], node.Totals[1] = node.Totals[1], node.Totals[0]
 
 	switch node.Compare.Presence {
 	case model.PresenceLeftOnly:

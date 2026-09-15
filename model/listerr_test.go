@@ -153,23 +153,23 @@ func TestEnsureSubtreeListedReportsFailure(t *testing.T) {
 // A batch transfer rewrites every file in the subtree, not just the diff set,
 // so cached checksums under that subtree must be dropped wholesale.
 func TestChangedPathsDirsCoverSubtree(t *testing.T) {
-	c := &ChangedPaths{RightDirs: []string{"d/sub"}}
-	if !c.hasRight("d/sub/a.txt") {
+	c := &ChangedPaths{Dirs: [2][]string{SideRight: {"d/sub"}}}
+	if !c.has(SideRight, "d/sub/a.txt") {
 		t.Error("file under a changed dir not reported as changed")
 	}
-	if !c.hasRight("d/sub") {
+	if !c.has(SideRight, "d/sub") {
 		t.Error("the changed dir itself not reported as changed")
 	}
-	if c.hasRight("d/other.txt") {
+	if c.has(SideRight, "d/other.txt") {
 		t.Error("file outside the changed dir reported as changed")
 	}
-	if c.hasLeft("d/sub/a.txt") {
+	if c.has(SideLeft, "d/sub/a.txt") {
 		t.Error("right-side change leaked to the left side")
 	}
 	if !c.touchesSubtree("d") {
 		t.Error("ancestor of a changed dir not reported as touched")
 	}
-	if !(&ChangedPaths{LeftDirs: []string{""}}).hasLeft("anything") {
+	if !(&ChangedPaths{Dirs: [2][]string{SideLeft: {""}}}).has(SideLeft, "anything") {
 		t.Error("root-scoped batch must cover the whole tree")
 	}
 }

@@ -119,6 +119,14 @@ func (s *Scanner) backends() (left, right Backend) {
 	return s.left, s.right
 }
 
+func (s *Scanner) backend(side Side) Backend {
+	left, right := s.backends()
+	if side == SideLeft {
+		return left
+	}
+	return right
+}
+
 // Rev counts tree mutations. The UI compares it against the revision it last
 // rendered to decide whether the O(tree) rollup walk has to run again; on a
 // million-node tree that walk is far too expensive to repeat per frame.
@@ -322,8 +330,9 @@ func childJobs(children []*TreeNode, depth int, filter func(*TreeNode) bool) []d
 // listJob builds the job listing n on whichever sides hold a directory; false
 // when neither does.
 func listJob(n *TreeNode, depth int) (dirJob, bool) {
-	listLeft := n.Left != nil && n.Left.IsDir && n.Compare.Presence != PresenceRightOnly
-	listRight := n.Right != nil && n.Right.IsDir && n.Compare.Presence != PresenceLeftOnly
+	l, r := n.Entries()
+	listLeft := l != nil && l.IsDir && n.Compare.Presence != PresenceRightOnly
+	listRight := r != nil && r.IsDir && n.Compare.Presence != PresenceLeftOnly
 	if n.RelPath == "" {
 		listLeft, listRight = true, true
 	}
@@ -430,8 +439,8 @@ func (s *Scanner) refreshEntries(ctx context.Context, node *TreeNode, opts Compa
 		return err
 	}
 	s.lockTree()
-	node.Left = findEntry(leftEntries, node.Name)
-	node.Right = findEntry(rightEntries, node.Name)
+	node.Sides[SideLeft].Entry = findEntry(leftEntries, node.Name)
+	node.Sides[SideRight].Entry = findEntry(rightEntries, node.Name)
 	compareNode(node, opts)
 	revalidateChecksum(node, changed)
 	s.unlockTree()
@@ -462,7 +471,7 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, opts CompareOp
 	s.setProgress(p)
 
 	needCk := node.Compare.Presence == PresenceBoth && node.Compare.Checksum == AttrUnknown
-	if needCk && !opts.Checksum && (node.LeftChecksum != "") == (node.RightChecksum != "") {
+	if needCk && !opts.Checksum && !node.oneSideSummed() {
 		needCk = false
 	}
 	if needCk {
@@ -679,9 +688,9 @@ func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNod
 	if s.tree == nil {
 		return nil
 	}
+	_, dst := CopySides(leftToRight)
 	for path := relPath; path != ""; path = DirOf(path) {
-		n := findNode(s.tree, path)
-		if n != nil && ((leftToRight && n.Right != nil) || (!leftToRight && n.Left != nil)) {
+		if n := findNode(s.tree, path); n != nil && n.Sides[dst].Entry != nil {
 			return n
 		}
 	}
@@ -748,8 +757,9 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, opt
 	s.lockTree()
 	defer s.unlockTree()
 	node.Name, node.RelPath = newName, newRel
-	node.Left = renamedEntry(node.Left, newName, newRel)
-	node.Right = renamedEntry(node.Right, newName, newRel)
+	for s := range node.Sides {
+		node.Sides[s].Entry = renamedEntry(node.Sides[s].Entry, newName, newRel)
+	}
 	updateDescendantPaths(node.Children, oldRel, newRel)
 	parent := findNode(s.tree, DirOf(newRel))
 	if parent == nil {
@@ -784,14 +794,11 @@ func mergeRenamedCollision(parent, node *TreeNode, opts CompareOpts) bool {
 			continue
 		}
 		merged := false
-		if node.Left == nil && sib.Left != nil {
-			node.Left = sib.Left
-			node.LeftChecksum, node.LeftCksumSize, node.LeftCksumModTime = sib.LeftChecksum, sib.LeftCksumSize, sib.LeftCksumModTime
-			merged = true
-		}
-		if node.Right == nil && sib.Right != nil {
-			node.Right = sib.Right
-			node.RightChecksum, node.RightCksumSize, node.RightCksumModTime = sib.RightChecksum, sib.RightCksumSize, sib.RightCksumModTime
+		for s := range node.Sides {
+			if node.Sides[s].Entry != nil || sib.Sides[s].Entry == nil {
+				continue
+			}
+			node.Sides[s] = sib.Sides[s]
 			merged = true
 		}
 		if !merged {
@@ -823,8 +830,9 @@ func (s *Scanner) SwapSides() {
 func updateDescendantPaths(children []*TreeNode, oldPrefix, newPrefix string) {
 	for _, child := range children {
 		child.RelPath = newPrefix + child.RelPath[len(oldPrefix):]
-		child.Left = renamedEntry(child.Left, child.Name, child.RelPath)
-		child.Right = renamedEntry(child.Right, child.Name, child.RelPath)
+		for s := range child.Sides {
+			child.Sides[s].Entry = renamedEntry(child.Sides[s].Entry, child.Name, child.RelPath)
+		}
 		updateDescendantPaths(child.Children, oldPrefix, newPrefix)
 	}
 }
@@ -853,8 +861,8 @@ func (s *Scanner) checksumNode(ctx context.Context, node *TreeNode) {
 	s.resetChecksumPhase([]checksumGroup{{files: []*TreeNode{node}}})
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, true) }()
-	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, false) }()
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideLeft) }()
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideRight) }()
 	wg.Wait()
 }
 
@@ -866,22 +874,19 @@ func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 	defer s.unlockTree()
 	for _, g := range groups {
 		for _, f := range g.files {
-			f.LeftChecksum, f.RightChecksum = "", ""
-			f.LeftCksumSize, f.RightCksumSize = 0, 0
-			f.LeftCksumModTime, f.RightCksumModTime = time.Time{}, time.Time{}
-			f.LeftChecksumDone, f.RightChecksumDone = false, false
-			f.LeftChecksumErr, f.RightChecksumErr = false, false
+			for s := range f.Sides {
+				f.Sides[s] = SideState{Entry: f.Sides[s].Entry}
+			}
 			f.ChecksumCountedDone = false
 			f.Compare.Checksum = AttrScanning
 		}
 		if g.dir == nil || len(g.files) == 0 {
 			continue
 		}
-		if g.dir.Left != nil && g.dir.Left.IsDir {
-			g.dir.ChecksumPendingLeft = true
-		}
-		if g.dir.Right != nil && g.dir.Right.IsDir {
-			g.dir.ChecksumPendingRight = true
+		for s := range g.dir.Sides {
+			if e := g.dir.Sides[s].Entry; e != nil && e.IsDir {
+				g.dir.Sides[s].ChecksumPending = true
+			}
 		}
 	}
 }
@@ -894,18 +899,13 @@ func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, onPairDone func()) {
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, true, onPairDone) }()
-	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, false, onPairDone) }()
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideLeft, onPairDone) }()
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideRight, onPairDone) }()
 	wg.Wait()
 }
 
-func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, isLeft bool, onPairDone func()) {
-	left, right := s.backends()
-	backend := right
-	if isLeft {
-		backend = left
-	}
-	prefetcher, _ := backend.(ChecksumPrefetcher)
+func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, onPairDone func()) {
+	prefetcher, _ := s.backend(side).(ChecksumPrefetcher)
 	sem := make(chan struct{}, s.concurrency)
 
 	setDir := func(dir *TreeNode, active, pending bool) {
@@ -913,11 +913,8 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			return
 		}
 		s.lockTree()
-		if isLeft {
-			dir.ChecksumActiveLeft, dir.ChecksumPendingLeft = active, pending
-		} else {
-			dir.ChecksumActiveRight, dir.ChecksumPendingRight = active, pending
-		}
+		st := &dir.Sides[side]
+		st.ChecksumActive, st.ChecksumPending = active, pending
 		s.unlockTree()
 	}
 
@@ -930,11 +927,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		}
 		setDir(g.dir, true, true)
 		if prefetcher != nil && g.dir != nil {
-			sideEntry := g.dir.Right
-			if isLeft {
-				sideEntry = g.dir.Left
-			}
-			if sideEntry != nil && sideEntry.IsDir {
+			if e := g.dir.Sides[side].Entry; e != nil && e.IsDir {
 				_ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, true)
 			}
 		}
@@ -949,7 +942,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			go func(n *TreeNode) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				if s.checksumSideFile(ctx, n, isLeft) && onPairDone != nil {
+				if s.checksumSideFile(ctx, n, side) && onPairDone != nil {
 					onPairDone()
 				}
 			}(f)
@@ -959,57 +952,44 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 	}
 }
 
-func markChecksumInFlight(node *TreeNode, isLeft bool, delta int32) {
+func markChecksumInFlight(node *TreeNode, side Side, delta int32) {
 	for p := node.Parent; p != nil; p = p.Parent {
-		if isLeft {
-			atomic.AddInt32(&p.ChecksumInFlightLeft, delta)
-		} else {
-			atomic.AddInt32(&p.ChecksumInFlightRight, delta)
-		}
+		p.ChecksumInFlight[side].Add(delta)
 	}
 }
 
 // checksumSideFile runs one side's Checksum for node and stores the result.
 // Returns true if this call completed the pair (both sides done); the caller
 // uses that to increment the file-count progress exactly once per pair.
-func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, isLeft bool) bool {
-	left, right := s.backends()
-	entry, backend := node.Right, right
-	if isLeft {
-		entry, backend = node.Left, left
-	}
+func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Side) bool {
+	entry := node.Sides[side].Entry
 	var sum string
 	var err error
 	if entry != nil {
-		markChecksumInFlight(node, isLeft, 1)
-		sum, err = backend.Checksum(ctx, node.RelPath)
-		markChecksumInFlight(node, isLeft, -1)
+		markChecksumInFlight(node, side, 1)
+		sum, err = s.backend(side).Checksum(ctx, node.RelPath)
+		markChecksumInFlight(node, side, -1)
 	}
 
 	s.lockTree()
 	defer s.unlockTree()
-	if isLeft {
-		node.LeftChecksumDone = true
-		if entry != nil && err != nil {
-			node.LeftChecksumErr = true
-		} else if entry != nil {
-			node.LeftChecksum, node.LeftCksumSize, node.LeftCksumModTime = sum, entry.Size, entry.ModTime
-		}
-	} else {
-		node.RightChecksumDone = true
-		if entry != nil && err != nil {
-			node.RightChecksumErr = true
-		} else if entry != nil {
-			node.RightChecksum, node.RightCksumSize, node.RightCksumModTime = sum, entry.Size, entry.ModTime
-		}
+	st := &node.Sides[side]
+	st.ChecksumDone = true
+	switch {
+	case entry == nil:
+	case err != nil:
+		st.ChecksumErr = true
+	default:
+		st.Checksum, st.ChecksumSize, st.ChecksumModTime = sum, entry.Size, entry.ModTime
 	}
-	if !node.LeftChecksumDone || !node.RightChecksumDone {
+	l, r := &node.Sides[SideLeft], &node.Sides[SideRight]
+	if !l.ChecksumDone || !r.ChecksumDone {
 		return false
 	}
 	switch {
-	case node.LeftChecksumErr || node.RightChecksumErr:
+	case l.ChecksumErr || r.ChecksumErr:
 		node.Compare.Checksum = AttrUnknown
-	case node.Left == nil || node.Right == nil:
+	case l.Entry == nil || r.Entry == nil:
 		node.Compare.Checksum = AttrNA
 	default:
 		node.Compare.Checksum = checksumStatus(node)
@@ -1224,7 +1204,7 @@ func filterPartialCRCGroups(groups []checksumGroup) []checksumGroup {
 	for _, g := range groups {
 		var keep []*TreeNode
 		for _, f := range g.files {
-			if (f.LeftChecksum != "") != (f.RightChecksum != "") {
+			if f.oneSideSummed() {
 				keep = append(keep, f)
 			}
 		}

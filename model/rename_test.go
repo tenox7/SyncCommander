@@ -44,8 +44,8 @@ func TestRenameRightMergesWithLeft(t *testing.T) {
 		t.Fatalf("want 1 merged PresenceBoth child, got %d children both=%d leftOnly=%d rightOnly=%d", len(root.Children), both, leftOnly, rightOnly)
 	}
 	n := root.Children[0]
-	if n.Left == nil || n.Right == nil {
-		t.Errorf("merged node missing a side: left=%v right=%v", n.Left != nil, n.Right != nil)
+	if l, r := n.Entries(); l == nil || r == nil {
+		t.Errorf("merged node missing a side: left=%v right=%v", l != nil, r != nil)
 	}
 	if n.Compare.Size != AttrDifferent {
 		t.Errorf("want size AttrDifferent (1 vs 2), got %v", n.Compare.Size)

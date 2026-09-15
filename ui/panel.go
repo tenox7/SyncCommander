@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"strings"
-	"sync/atomic"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -19,14 +18,14 @@ type Panel struct {
 	width   int
 	height  int
 	active  bool
-	isLeft  bool
+	side    model.Side
 	wrap    bool
 	cmpOpts *model.CompareOpts
 	spinner string
 }
 
-func NewPanel(title string) *Panel {
-	return &Panel{title: title}
+func NewPanel(title string, side model.Side) *Panel {
+	return &Panel{title: title, side: side}
 }
 
 // SetRows replaces the visible rows, keeping the cursor on the same row when
@@ -155,16 +154,13 @@ func (p *Panel) View() string {
 
 // isHidden reports whether node has nothing on this panel's side.
 func (p *Panel) isHidden(node *model.TreeNode) bool {
-	if p.isLeft {
-		return node.Compare.Presence == model.PresenceRightOnly
-	}
-	return node.Compare.Presence == model.PresenceLeftOnly
+	return node.Compare.Presence == p.side.Other().Only()
 }
 
 func (p *Panel) renderRow(r model.Row) string {
 	if r.Attr != nil {
 		prefix := ""
-		if !p.isLeft {
+		if p.side == model.SideRight {
 			prefix = " "
 		}
 		if p.isHidden(r.Node) {
@@ -177,10 +173,7 @@ func (p *Panel) renderRow(r model.Row) string {
 		return p.eqPrefix(node) + renderGuidesOnly(node.Guides, node.Depth, node.IsLast)
 	}
 
-	entry := node.Left
-	if !p.isLeft {
-		entry = node.Right
-	}
+	entry := node.Sides[p.side].Entry
 	sideIsDir := entry != nil && entry.IsDir
 
 	name := node.Name
@@ -204,13 +197,9 @@ func (p *Panel) renderRow(r model.Row) string {
 	} else {
 		var pendingCksum, activeCksum bool
 		if sideIsDir {
-			if p.isLeft {
-				pendingCksum = node.ChecksumPendingLeft
-				activeCksum = node.ChecksumActiveLeft || atomic.LoadInt32(&node.ChecksumInFlightLeft) > 0
-			} else {
-				pendingCksum = node.ChecksumPendingRight
-				activeCksum = node.ChecksumActiveRight || atomic.LoadInt32(&node.ChecksumInFlightRight) > 0
-			}
+			st := &node.Sides[p.side]
+			pendingCksum = st.ChecksumPending
+			activeCksum = st.ChecksumActive || node.ChecksumInFlight[p.side].Load() > 0
 		}
 		switch {
 		case sideIsDir && node.ListErr:
@@ -242,13 +231,14 @@ func (p *Panel) renderRow(r model.Row) string {
 // eqPrefix is the right panel's leading glyph summarising how the row
 // compares: ≡/≢ once checksums are known, =/≠ before that.
 func (p *Panel) eqPrefix(node *model.TreeNode) string {
-	if p.isLeft {
+	if p.side == model.SideLeft {
 		return ""
 	}
-	if node.Depth == 0 || node.Right == nil {
+	r := node.Sides[model.SideRight].Entry
+	if node.Depth == 0 || r == nil {
 		return " "
 	}
-	if !node.Right.IsDir {
+	if !r.IsDir {
 		if node.Compare.Presence != model.PresenceBoth {
 			return " "
 		}
@@ -327,13 +317,13 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 	default:
 		st = activeStyle.Render("=")
 	}
-	if a.LeftVal == "" && a.RightVal == "" {
+	if a.Val == [2]string{} {
 		return fmt.Sprintf("%s %s %s", chrome, label, st)
 	}
 
-	val, raw, win := a.LeftVal, a.LeftRaw, a.Winner
-	if !p.isLeft {
-		val, raw, win = a.RightVal, a.RightRaw, -win
+	val, raw, win := a.Val[p.side], a.Raw[p.side], a.Winner
+	if p.side == model.SideRight {
+		win = -win
 	}
 	if a.Status == model.AttrDifferent && win != 0 {
 		if win < 0 {
@@ -349,24 +339,18 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 }
 
 func (p *Panel) inlineInfo(node *model.TreeNode) string {
-	entry := node.Left
-	if !p.isLeft {
-		entry = node.Right
-	}
+	entry := node.Sides[p.side].Entry
 	if entry == nil {
 		return ""
 	}
 	if !entry.IsDir {
 		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
 	}
-	dirs, files, size := node.LeftTotalDirs, node.LeftTotalFiles, node.LeftTotalSize
-	if !p.isLeft {
-		dirs, files, size = node.RightTotalDirs, node.RightTotalFiles, node.RightTotalSize
-	}
-	if dirs == 0 && files == 0 {
+	t := node.Totals[p.side]
+	if t.Dirs == 0 && t.Files == 0 {
 		return ""
 	}
-	return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", dirs, files, model.FormatSize(size)))
+	return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", t.Dirs, t.Files, model.FormatSize(t.Size)))
 }
 
 func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {

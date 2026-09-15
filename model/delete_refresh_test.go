@@ -11,25 +11,21 @@ func TestRefreshDirAfterRightDeletePrunesSubtree(t *testing.T) {
 
 	dir := &TreeNode{
 		RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true, Depth: 1, Parent: root,
-		Left:   &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
-		Right:  &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true},
+		Sides:  sides(&FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true}, &FileEntry{RelPath: "cbc1 pcb", Name: "cbc1 pcb", IsDir: true}),
 		Listed: true, Expanded: true,
 	}
 	sub := &TreeNode{
 		RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true, Depth: 2, Parent: dir,
-		Left:   &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
-		Right:  &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true},
+		Sides:  sides(&FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true}, &FileEntry{RelPath: "cbc1 pcb/gerbers", Name: "gerbers", IsDir: true}),
 		Listed: true,
 	}
 	sub.Children = []*TreeNode{{
 		RelPath: "cbc1 pcb/gerbers/g.gbr", Name: "g.gbr", Depth: 3, Parent: sub,
-		Left:  &FileEntry{RelPath: "cbc1 pcb/gerbers/g.gbr", Name: "g.gbr", Size: 10},
-		Right: &FileEntry{RelPath: "cbc1 pcb/gerbers/g.gbr", Name: "g.gbr", Size: 10},
+		Sides: sides(&FileEntry{RelPath: "cbc1 pcb/gerbers/g.gbr", Name: "g.gbr", Size: 10}, &FileEntry{RelPath: "cbc1 pcb/gerbers/g.gbr", Name: "g.gbr", Size: 10}),
 	}}
 	file := &TreeNode{
 		RelPath: "cbc1 pcb/readme.md", Name: "readme.md", Depth: 2, Parent: dir,
-		Left:  &FileEntry{RelPath: "cbc1 pcb/readme.md", Name: "readme.md", Size: 5},
-		Right: &FileEntry{RelPath: "cbc1 pcb/readme.md", Name: "readme.md", Size: 5},
+		Sides: sides(&FileEntry{RelPath: "cbc1 pcb/readme.md", Name: "readme.md", Size: 5}, &FileEntry{RelPath: "cbc1 pcb/readme.md", Name: "readme.md", Size: 5}),
 	}
 	dir.Children = []*TreeNode{sub, file}
 	root.Children = []*TreeNode{dir}
@@ -49,7 +45,7 @@ func TestRefreshDirAfterRightDeletePrunesSubtree(t *testing.T) {
 	var check func(n *TreeNode)
 	check = func(n *TreeNode) {
 		for _, c := range n.Children {
-			if c.Right != nil {
+			if c.Sides[SideRight].Entry != nil {
 				t.Errorf("%s still has a Right entry after right-side delete", c.RelPath)
 			}
 			if c.Compare.Presence != PresenceLeftOnly {
@@ -70,16 +66,14 @@ func TestRefreshDirPruneDropsGoneSideOnlyDescendant(t *testing.T) {
 	root := NewRootNode()
 	dir := &TreeNode{
 		RelPath: "d", Name: "d", IsDir: true, Depth: 1, Parent: root,
-		Left:   &FileEntry{RelPath: "d", Name: "d", IsDir: true},
-		Right:  &FileEntry{RelPath: "d", Name: "d", IsDir: true},
+		Sides:  sides(&FileEntry{RelPath: "d", Name: "d", IsDir: true}, &FileEntry{RelPath: "d", Name: "d", IsDir: true}),
 		Listed: true,
 	}
 	dir.Children = []*TreeNode{
 		{RelPath: "d/both.txt", Name: "both.txt", Depth: 2, Parent: dir,
-			Left:  &FileEntry{RelPath: "d/both.txt", Name: "both.txt"},
-			Right: &FileEntry{RelPath: "d/both.txt", Name: "both.txt"}},
+			Sides: sides(&FileEntry{RelPath: "d/both.txt", Name: "both.txt"}, &FileEntry{RelPath: "d/both.txt", Name: "both.txt"})},
 		{RelPath: "d/rightonly.txt", Name: "rightonly.txt", Depth: 2, Parent: dir,
-			Right: &FileEntry{RelPath: "d/rightonly.txt", Name: "rightonly.txt"}},
+			Sides: sides(nil, &FileEntry{RelPath: "d/rightonly.txt", Name: "rightonly.txt"})},
 	}
 	root.Children = []*TreeNode{dir}
 
@@ -94,4 +88,8 @@ func TestRefreshDirPruneDropsGoneSideOnlyDescendant(t *testing.T) {
 		}
 		t.Fatalf("want only [both.txt] left, got %v", names)
 	}
+}
+
+func sides(l, r *FileEntry) [2]SideState {
+	return [2]SideState{{Entry: l}, {Entry: r}}
 }

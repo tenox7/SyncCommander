@@ -47,9 +47,9 @@ func TestRenameHalfFailureRefreshesParent(t *testing.T) {
 	var leftOnly, rightOnly bool
 	for _, c := range parent.Children {
 		switch {
-		case c.Name == oldName+".renamed" && c.Left != nil && c.Right == nil:
+		case c.Name == oldName+".renamed" && c.Sides[model.SideLeft].Entry != nil && c.Sides[model.SideRight].Entry == nil:
 			leftOnly = true
-		case c.Name == oldName && c.Left == nil && c.Right != nil:
+		case c.Name == oldName && c.Sides[model.SideLeft].Entry == nil && c.Sides[model.SideRight].Entry != nil:
 			rightOnly = true
 		}
 	}

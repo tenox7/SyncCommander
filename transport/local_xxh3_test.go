@@ -59,8 +59,8 @@ func TestLocalXXH3NegotiatedAndCompared(t *testing.T) {
 	if same == nil || same.Compare.Checksum != model.AttrEqual {
 		t.Fatalf("same: checksum status = %v, want AttrEqual", same)
 	}
-	if want := fmt.Sprintf("%016x", xxh3.Hash([]byte("identical"))); same.LeftChecksum != want {
-		t.Fatalf("same: LeftChecksum = %q, want %q", same.LeftChecksum, want)
+	if want := fmt.Sprintf("%016x", xxh3.Hash([]byte("identical"))); same.Sides[model.SideLeft].Checksum != want {
+		t.Fatalf("same: left checksum = %q, want %q", same.Sides[model.SideLeft].Checksum, want)
 	}
 
 	diff := byName["diff"]
