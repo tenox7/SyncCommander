@@ -70,7 +70,7 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 	if err != nil {
 		return nil, fmt.Errorf("sftp: %v", err)
 	}
-	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp"}, sftp: client}
+	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, sftp: client}
 	b.base = expandHome(conn.basePath, client.Getwd)
 	b.display = sshDisplayURL(conn, b.base)
 	dial := func() (*sftpConn, error) {
@@ -97,6 +97,17 @@ func (b *SFTPBackend) Close() error {
 }
 
 func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
+	return b.listCache.serve(ctx, relDir, b.readDir)
+}
+
+// PreloadRecursive lists the whole scope with one find over the shell. On an
+// SFTP-only server that fails and List goes back to per-dir ReadDir.
+func (b *SFTPBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	b.listCache.start(ctx, scope, b.findRecursive)
+	return nil
+}
+
+func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := b.abs(relDir)
 	Log.Add("sftp", DirOut, "READDIR "+dir)
 	entries, err := b.sftp.ReadDir(dir)
@@ -134,6 +145,7 @@ func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, 
 		atime = mtime
 	}
 	err := b.sftp.Chtimes(b.abs(relPath), atime, mtime)
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("sftp", DirErr, "CHTIMES "+relPath+": "+err.Error())
 	}
@@ -175,6 +187,7 @@ func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, off
 func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	Log.Add("sftp", DirOut, "STOR "+relPath)
 	err := b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0, src, mode)
+	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 	}
@@ -192,6 +205,7 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 	}
 	defer rd.Close()
 	err = b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE, offset, rd, mode)
+	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 	}
@@ -225,7 +239,9 @@ func (b *SFTPBackend) openAt(relPath string, offset int64) (io.ReadCloser, error
 func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
 	fullPath := b.abs(relPath)
 	Log.Add("sftp", DirOut, "MKDIR "+relPath)
-	if err := b.sftp.MkdirAll(fullPath); err != nil {
+	err := b.sftp.MkdirAll(fullPath)
+	b.listCache.invalidateAncestors(relPath)
+	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 		return err
 	}
@@ -237,6 +253,7 @@ func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode)
 
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
 	err := b.sftp.Rename(b.abs(oldRelPath), b.abs(newRelPath))
+	b.listCache.forgetRenamed(oldRelPath, newRelPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())
 	}
@@ -245,6 +262,7 @@ func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) e
 
 func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
 	err := b.sftp.Remove(b.abs(relPath))
+	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("sftp", DirErr, "REMOVE "+relPath+": "+err.Error())
 	}
@@ -256,6 +274,7 @@ func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
 		return fmt.Errorf("sftp: refusing to remove the base directory")
 	}
 	err := b.removeAll(b.abs(relPath))
+	b.listCache.forgetRemoved(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}

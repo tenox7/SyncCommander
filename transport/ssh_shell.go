@@ -321,9 +321,7 @@ func (s *sshShell) Mkdir(ctx context.Context, relPath string, mode os.FileMode) 
 func (s *sshShell) Rename(ctx context.Context, oldRel, newRel string) error {
 	src, dst := shellQuote(s.abs(oldRel)), shellQuote(s.abs(newRel))
 	_, err := s.run(ctx, fmt.Sprintf("if [ -d %s ]; then echo destination is a directory >&2; exit 1; fi; mv %s %s", dst, src, dst))
-	s.listCache.invalidateTree(oldRel)
-	s.listCache.invalidate(parentDir(oldRel))
-	s.listCache.invalidate(parentDir(newRel))
+	s.listCache.forgetRenamed(oldRel, newRel)
 	return err
 }
 
@@ -338,8 +336,7 @@ func (s *sshShell) RemoveAll(ctx context.Context, relPath string) error {
 		return fmt.Errorf("%s: refusing to remove the base directory", s.proto)
 	}
 	_, err := s.run(ctx, "rm -rf "+shellQuote(s.abs(relPath)))
-	s.listCache.invalidateTree(relPath)
-	s.listCache.invalidate(parentDir(relPath))
+	s.listCache.forgetRemoved(relPath)
 	return err
 }
 

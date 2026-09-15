@@ -12,6 +12,7 @@ var (
 	_ model.SeekableOpener     = (*LocalBackend)(nil)
 	_ model.LocalFS            = (*LocalBackend)(nil)
 	_ model.Backend            = (*SFTPBackend)(nil)
+	_ model.RecursivePreloader = (*SFTPBackend)(nil)
 	_ model.ChecksumProber     = (*SFTPBackend)(nil)
 	_ model.Resumer            = (*SFTPBackend)(nil)
 	_ model.SeekableOpener     = (*SFTPBackend)(nil)

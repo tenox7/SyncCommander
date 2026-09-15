@@ -149,6 +149,19 @@ func (c *listCache) invalidateAncestors(relPath string) {
 	}
 }
 
+// forgetRenamed drops the moved subtree and both parents' listings.
+func (c *listCache) forgetRenamed(oldRel, newRel string) {
+	c.invalidateTree(oldRel)
+	c.invalidate(parentDir(oldRel))
+	c.invalidate(parentDir(newRel))
+}
+
+// forgetRemoved drops the removed subtree and its parent's listing.
+func (c *listCache) forgetRemoved(relPath string) {
+	c.invalidateTree(relPath)
+	c.invalidate(parentDir(relPath))
+}
+
 func (c *listCache) invalidateTree(prefix string) {
 	if c == nil {
 		return
