@@ -7,12 +7,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var namedKeys = map[string]tea.KeyType{
+	"left": tea.KeyLeft, "backspace": tea.KeyBackspace, "up": tea.KeyUp, "down": tea.KeyDown, "enter": tea.KeyEnter,
+	"esc": tea.KeyEsc, "tab": tea.KeyTab, "pgup": tea.KeyPgUp, "pgdown": tea.KeyPgDown, "ctrl+c": tea.KeyCtrlC,
+}
+
 func key(s string) tea.KeyMsg {
-	switch s {
-	case "left":
-		return tea.KeyMsg{Type: tea.KeyLeft}
-	case "backspace":
-		return tea.KeyMsg{Type: tea.KeyBackspace}
+	if t, ok := namedKeys[s]; ok {
+		return tea.KeyMsg{Type: t}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
