@@ -21,6 +21,7 @@ type LogDialog struct {
 	lastSeenErrs  int
 	lastSeenFatal int
 	closedAt      time.Time
+	spinner       string
 }
 
 func NewLogDialog() *LogDialog {
@@ -108,7 +109,7 @@ func (d *LogDialog) Home() {
 
 func (d *LogDialog) End() { d.follow = true }
 
-func (d *LogDialog) View(width, height int, spinner string) string {
+func (d *LogDialog) View(width, height int) string {
 	if !d.visible {
 		return ""
 	}
@@ -134,7 +135,7 @@ func (d *LogDialog) View(width, height int, spinner string) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", spinner, followMark, total, filterTag)))
+	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", d.spinner, followMark, total, filterTag)))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")

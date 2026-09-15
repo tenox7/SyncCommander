@@ -294,55 +294,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cancelOps()
 		return m, tea.Quit
 	}
-	if m.diffView.IsOpen() {
-		return m.handleDiffViewKey(msg)
-	}
-	if m.logView.IsOpen() {
-		switch msg.String() {
-		case "esc", "q", "~", "`":
-			m.logView.Close()
-		case "up", "k":
-			m.logView.ScrollUp()
-		case "down", "j":
-			m.logView.ScrollDown()
-		case "pgup":
-			m.logView.PageUp()
-		case "pgdown":
-			m.logView.PageDown()
-		case "home":
-			m.logView.Home()
-		case "end":
-			m.logView.End()
-		case "e":
-			m.logView.ToggleErrFilter()
-		}
-		return m, nil
-	}
-	if m.info.IsOpen() {
-		switch msg.String() {
-		case "esc", "q", "i":
-			m.info.Close()
-		}
-		return m, nil
-	}
-	if m.help.IsOpen() {
-		switch msg.String() {
-		case "esc", "q", "?":
-			m.help.Close()
-		}
-		return m, nil
-	}
-	if m.confirm.IsOpen() {
-		return m.handleConfirmKey(msg)
-	}
-	if m.input.IsOpen() {
-		return m.handleInputKey(msg)
-	}
-	if m.openDlg.IsOpen() {
-		return m.handleOpenDlgKey(msg)
-	}
-	if m.settings.IsOpen() {
-		return m.handleSettingsKey(msg)
+	if d := m.openModal(); d != nil {
+		return m, m.handleModalKey(d, msg)
 	}
 	if m.copying {
 		switch msg.String() {
@@ -611,7 +564,7 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	return tea.Batch(m.copyNode(node, leftToRight, false), m.ensureTick())
 }
 
-func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleDiffViewKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc", "q":
 		m.closeDiff()
@@ -632,7 +585,7 @@ func (m *Model) handleDiffViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		m.diffView.PrevDiff()
 	}
-	return m, nil
+	return nil
 }
 
 // diffMaxBytes caps what the diff view pulls into memory per side.
@@ -719,7 +672,7 @@ func (m *Model) adjustCopyParallel(delta int) {
 	transport.Log.Add("copy", ">>>", fmt.Sprintf("parallel=%d", next))
 }
 
-func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleSettingsKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc", "s", "q":
 		m.settings.Close()
@@ -734,19 +687,19 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ", "enter":
 		m.settings.Toggle()
 	}
-	return m, nil
+	return nil
 }
 
-func (m *Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleInputKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.input.Close()
 	case "enter":
-		return m, m.input.Confirm()
+		return m.input.Confirm()
 	default:
 		m.input.HandleKey(msg)
 	}
-	return m, nil
+	return nil
 }
 
 // reopenOrExplain reopens both sides or, when one cannot be opened, shows the
@@ -812,7 +765,7 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	return m.startScan(), ""
 }
 
-func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.openDlg.Close()
@@ -820,22 +773,22 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		leftPath, rightPath := m.openDlg.Values()
 		if leftPath == "" || rightPath == "" {
 			m.openDlg.SetError("both paths are required")
-			return m, nil
+			return nil
 		}
 		cmd, errMsg := m.reopenBackends(leftPath, rightPath)
 		if errMsg != "" {
 			m.openDlg.SetError(errMsg)
-			return m, nil
+			return nil
 		}
 		m.openDlg.Close()
-		return m, cmd
+		return cmd
 	default:
 		m.openDlg.HandleKey(msg)
 	}
-	return m, nil
+	return nil
 }
 
-func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	if m.confirm.choiceMode && m.pendingDelete != nil {
 		var side model.Presence
 		found := true
@@ -849,7 +802,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			m.confirm.Close()
 			m.pendingDelete = nil
-			return m, nil
+			return nil
 		default:
 			found = false
 		}
@@ -858,9 +811,9 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, tea.Batch(m.deleteNode(node, side), m.ensureTick())
+			return tea.Batch(m.deleteNode(node, side), m.ensureTick())
 		}
-		return m, nil
+		return nil
 	}
 
 	switch msg.String() {
@@ -870,20 +823,20 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			node := m.pendingDelete
 			m.pendingDelete = nil
 			m.deleting = true
-			return m, tea.Batch(m.deleteNode(node, m.presence(node)), m.ensureTick())
+			return tea.Batch(m.deleteNode(node, m.presence(node)), m.ensureTick())
 		}
 		if m.pendingCopy != nil {
 			pc := m.pendingCopy
 			m.pendingCopy = nil
 			m.copying = true
-			return m, tea.Batch(m.copyNode(pc.node, pc.leftToRight, true), m.ensureTick())
+			return tea.Batch(m.copyNode(pc.node, pc.leftToRight, true), m.ensureTick())
 		}
 	case "esc", "n", "N", "q":
 		m.confirm.Close()
 		m.pendingDelete = nil
 		m.pendingCopy = nil
 	}
-	return m, nil
+	return nil
 }
 
 // presence reads one node's compare presence under the read lock; the scanner
@@ -1619,6 +1572,11 @@ func (m *Model) View() string {
 		operation = spinner + " checksumming..."
 	}
 
+	if d := m.openModal(); d != nil {
+		m.logView.spinner = spinner
+		return d.View(m.width, m.height)
+	}
+
 	stats := m.cachedStats
 	leftPrefix := ""
 	rightPrefix := ""
@@ -1724,30 +1682,69 @@ func (m *Model) View() string {
 		screen = overlayCentered(screen, popup, m.width, m.height)
 	}
 
-	if m.diffView.IsOpen() {
-		return m.diffView.View(m.width, m.height)
-	}
-	if m.logView.IsOpen() {
-		return m.logView.View(m.width, m.height, spinner)
-	}
-	if m.info.IsOpen() {
-		return m.info.View(m.width, m.height)
-	}
-	if m.help.IsOpen() {
-		return m.help.View(m.width, m.height)
-	}
-	if m.confirm.IsOpen() {
-		return m.confirm.View(m.width, m.height)
-	}
-	if m.settings.IsOpen() {
-		return m.settings.View(m.width, m.height)
-	}
-	if m.openDlg.IsOpen() {
-		return m.openDlg.View(m.width, m.height)
-	}
-	if m.input.IsOpen() {
-		return m.input.View(m.width, m.height)
-	}
-
 	return screen
+}
+
+// modal is a dialog that owns the screen and the keyboard while open.
+type modal interface {
+	IsOpen() bool
+	View(width, height int) string
+}
+
+// openModal returns the open dialog, if any, in one fixed priority order
+// shared by key routing and rendering.
+func (m *Model) openModal() modal {
+	for _, d := range []modal{m.diffView, m.logView, m.info, m.help, m.confirm, m.input, m.openDlg, m.settings} {
+		if d.IsOpen() {
+			return d
+		}
+	}
+	return nil
+}
+
+func (m *Model) handleModalKey(d modal, msg tea.KeyMsg) tea.Cmd {
+	switch d := d.(type) {
+	case *DiffView:
+		return m.handleDiffViewKey(msg)
+	case *LogDialog:
+		handleLogKey(d, msg)
+	case *InfoDialog:
+		if k := msg.String(); k == "esc" || k == "q" || k == "i" {
+			d.Close()
+		}
+	case *HelpDialog:
+		if k := msg.String(); k == "esc" || k == "q" || k == "?" {
+			d.Close()
+		}
+	case *ConfirmDialog:
+		return m.handleConfirmKey(msg)
+	case *InputDialog:
+		return m.handleInputKey(msg)
+	case *OpenDialog:
+		return m.handleOpenDlgKey(msg)
+	case *SettingsDialog:
+		return m.handleSettingsKey(msg)
+	}
+	return nil
+}
+
+func handleLogKey(d *LogDialog, msg tea.KeyMsg) {
+	switch msg.String() {
+	case "esc", "q", "~", "`":
+		d.Close()
+	case "up", "k":
+		d.ScrollUp()
+	case "down", "j":
+		d.ScrollDown()
+	case "pgup":
+		d.PageUp()
+	case "pgdown":
+		d.PageDown()
+	case "home":
+		d.Home()
+	case "end":
+		d.End()
+	case "e":
+		d.ToggleErrFilter()
+	}
 }
