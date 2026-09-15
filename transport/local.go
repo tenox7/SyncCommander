@@ -92,7 +92,9 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 		}
 		n, err := f.Read(buf)
 		if n > 0 {
-			TakeIn(n)
+			if err := TakeIn(ctx, n); err != nil {
+				return "", err
+			}
 			h.Write(buf[:n])
 		}
 		if err == io.EOF {
@@ -118,8 +120,8 @@ func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime,
 	return setTimes(b.LocalPath(relPath), mtime, atime, btime)
 }
 
-func (b *LocalBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	return b.write(relPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode, 0, src)
+func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+	return b.write(ctx, relPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode, 0, src)
 }
 
 func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
@@ -128,12 +130,12 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model
 		return err
 	}
 	defer rd.Close()
-	return b.write(relPath, os.O_CREATE|os.O_WRONLY, mode, offset, rd)
+	return b.write(ctx, relPath, os.O_CREATE|os.O_WRONLY, mode, offset, rd)
 }
 
 // write streams src into relPath from offset, cutting the file there first.
 // Close is checked: network filesystems report write errors there.
-func (b *LocalBackend) write(relPath string, flags int, mode os.FileMode, offset int64, src io.Reader) error {
+func (b *LocalBackend) write(ctx context.Context, relPath string, flags int, mode os.FileMode, offset int64, src io.Reader) error {
 	p := b.LocalPath(relPath)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
@@ -151,7 +153,7 @@ func (b *LocalBackend) write(relPath string, flags int, mode os.FileMode, offset
 		}
 	}
 	if err == nil {
-		_, err = io.Copy(LimitWriter(f), src)
+		_, err = io.Copy(LimitWriter(ctx, f), src)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -159,11 +161,11 @@ func (b *LocalBackend) write(relPath string, flags int, mode os.FileMode, offset
 	return err
 }
 
-func (b *LocalBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	return b.OpenAt(nil, relPath, 0)
+func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
+	return b.OpenAt(ctx, relPath, 0)
 }
 
-func (b *LocalBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	f, err := os.Open(b.LocalPath(relPath))
 	if err != nil {
 		return nil, err
@@ -174,7 +176,7 @@ func (b *LocalBackend) OpenAt(_ context.Context, relPath string, offset int64) (
 			return nil, err
 		}
 	}
-	return LimitReadCloser(f), nil
+	return LimitReadCloser(ctx, f), nil
 }
 
 func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {

@@ -310,7 +310,7 @@ func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 		mtime = time.Now()
 	}
 	info := &rcObjectInfo{fs: b.f, remote: relPath, size: size, modTime: mtime}
-	o, err := put(ctx, LimitOutReader(src), info)
+	o, err := put(ctx, LimitOutReader(ctx, src), info)
 	if err != nil {
 		return err
 	}
@@ -440,7 +440,7 @@ func (b *RcloneBackend) Open(ctx context.Context, relPath string) (io.ReadCloser
 	if err != nil {
 		return nil, err
 	}
-	return LimitReadCloser(rc), nil
+	return LimitReadCloser(ctx, rc), nil
 }
 
 func (b *RcloneBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
@@ -453,13 +453,13 @@ func (b *RcloneBackend) OpenAt(ctx context.Context, relPath string, offset int64
 		if err != nil {
 			return nil, err
 		}
-		return LimitReadCloser(rc), nil
+		return LimitReadCloser(ctx, rc), nil
 	}
 	rc, err := o.Open(ctx, &fs.RangeOption{Start: offset, End: -1})
 	if err != nil {
 		return nil, err
 	}
-	return LimitReadCloser(rc), nil
+	return LimitReadCloser(ctx, rc), nil
 }
 
 // rclone has no resume-into-a-partial-file primitive: OpenWriterAt opens with

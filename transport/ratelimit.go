@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -67,20 +68,21 @@ func (l *Limiter) chunk() int {
 	}
 }
 
-// take charges n bytes and sleeps for as long as the bucket is overdrawn.
-// Concurrent callers stagger naturally: each drives the pool further negative
-// and so waits proportionally longer. A sleep clamped by bwMaxSleep leaves the
-// remaining debt in the bucket for the next caller to pay, so the average rate
-// holds either way.
-func (l *Limiter) take(n int) {
+// take charges n bytes and sleeps for as long as the bucket is overdrawn, or
+// until ctx is done, which it then reports. Concurrent callers stagger
+// naturally: each drives the pool further negative and so waits
+// proportionally longer. A sleep clamped by bwMaxSleep leaves the remaining
+// debt in the bucket for the next caller to pay, so the average rate holds
+// either way.
+func (l *Limiter) take(ctx context.Context, n int) error {
 	if n <= 0 || l.rate.Load() <= 0 {
-		return
+		return nil
 	}
 	l.mu.Lock()
 	r := l.rate.Load()
 	if r <= 0 {
 		l.mu.Unlock()
-		return
+		return nil
 	}
 	now := time.Now()
 	switch {
@@ -98,13 +100,13 @@ func (l *Limiter) take(n int) {
 	l.mu.Unlock()
 
 	if deficit >= 0 {
-		return
+		return nil
 	}
 	d := time.Duration(-deficit / float64(r) * float64(time.Second))
 	if d > bwMaxSleep {
 		d = bwMaxSleep
 	}
-	time.Sleep(d)
+	return sleepCtx(ctx, d)
 }
 
 func SetBandwidthIn(bytesPerSec int64)  { bwIn.SetRate(bytesPerSec) }
@@ -165,8 +167,9 @@ func FormatLimit(bps int64) string {
 }
 
 type limitedReader struct {
-	r io.Reader
-	l *Limiter
+	ctx context.Context
+	r   io.Reader
+	l   *Limiter
 }
 
 func (lr limitedReader) Read(p []byte) (int, error) {
@@ -174,7 +177,9 @@ func (lr limitedReader) Read(p []byte) (int, error) {
 		p = p[:c]
 	}
 	n, err := lr.r.Read(p)
-	lr.l.take(n)
+	if terr := lr.l.take(lr.ctx, n); err == nil {
+		err = terr
+	}
 	return n, err
 }
 
@@ -186,53 +191,59 @@ type limitedReadCloser struct {
 func (lr limitedReadCloser) Close() error { return lr.c.Close() }
 
 type limitedWriter struct {
-	w io.Writer
-	l *Limiter
+	ctx context.Context
+	w   io.Writer
+	l   *Limiter
 }
 
 func (lw limitedWriter) Write(p []byte) (int, error) {
-	c := lw.l.chunk()
-	if c <= 0 || len(p) <= c {
-		n, err := lw.w.Write(p)
-		lw.l.take(n)
-		return n, err
-	}
 	total := 0
 	for len(p) > 0 {
+		c := lw.l.chunk()
 		if c <= 0 || c > len(p) {
 			c = len(p)
 		}
 		n, err := lw.w.Write(p[:c])
 		total += n
-		lw.l.take(n)
+		if terr := lw.l.take(lw.ctx, n); err == nil {
+			err = terr
+		}
 		if err != nil {
 			return total, err
 		}
 		p = p[n:]
-		c = lw.l.chunk()
 	}
 	return total, nil
 }
 
-// LimitReader throttles a source stream against the inbound budget.
-func LimitReader(r io.Reader) io.Reader { return limitedReader{r: r, l: &bwIn} }
+// LimitReader throttles a source stream against the inbound budget; a sleep
+// ends early once ctx is done.
+func LimitReader(ctx context.Context, r io.Reader) io.Reader {
+	return limitedReader{ctx: ctx, r: r, l: &bwIn}
+}
 
 // LimitOutReader throttles a stream that is about to leave sc (an upload read
 // by a client library) against the outbound budget.
-func LimitOutReader(r io.Reader) io.Reader { return limitedReader{r: r, l: &bwOut} }
+func LimitOutReader(ctx context.Context, r io.Reader) io.Reader {
+	return limitedReader{ctx: ctx, r: r, l: &bwOut}
+}
 
 // LimitReadCloser is LimitReader for a stream the caller must close.
-func LimitReadCloser(rc io.ReadCloser) io.ReadCloser {
-	return limitedReadCloser{limitedReader: limitedReader{r: rc, l: &bwIn}, c: rc}
+func LimitReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
+	return limitedReadCloser{limitedReader: limitedReader{ctx: ctx, r: rc, l: &bwIn}, c: rc}
 }
 
 // LimitWriter throttles a destination stream against the outbound budget.
-func LimitWriter(w io.Writer) io.Writer { return limitedWriter{w: w, l: &bwOut} }
+func LimitWriter(ctx context.Context, w io.Writer) io.Writer {
+	return limitedWriter{ctx: ctx, w: w, l: &bwOut}
+}
 
 // TakeIn charges the inbound budget for bytes a backend read outside of a
 // wrapped stream (e.g. a hash loop reading straight into its own buffer).
-func TakeIn(n int) { bwIn.take(n) }
+func TakeIn(ctx context.Context, n int) error { return bwIn.take(ctx, n) }
 
+// limitedConn throttles a socket. A net.Conn carries no per-call context, so
+// its sleeps run to the clamp even after the operation using it is cancelled.
 type limitedConn struct{ net.Conn }
 
 func (c limitedConn) Read(p []byte) (int, error) {
@@ -240,12 +251,12 @@ func (c limitedConn) Read(p []byte) (int, error) {
 		p = p[:n]
 	}
 	n, err := c.Conn.Read(p)
-	bwIn.take(n)
+	bwIn.take(context.Background(), n)
 	return n, err
 }
 
 func (c limitedConn) Write(p []byte) (int, error) {
-	return limitedWriter{w: c.Conn, l: &bwOut}.Write(p)
+	return limitedWriter{ctx: context.Background(), w: c.Conn, l: &bwOut}.Write(p)
 }
 
 // LimitConn throttles both directions of a socket. Every backend that dials

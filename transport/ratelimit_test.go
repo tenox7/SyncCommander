@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync"
 	"testing"
@@ -60,9 +61,24 @@ func TestLimiterUnlimited(t *testing.T) {
 		t.Fatalf("chunk with no rate = %d, want 0", c)
 	}
 	start := time.Now()
-	l.take(1 << 30)
+	l.take(context.Background(), 1<<30)
 	if d := time.Since(start); d > 50*time.Millisecond {
 		t.Fatalf("unlimited take slept %v", d)
+	}
+}
+
+// A sleep must end as soon as the operation's context is done.
+func TestTakeReturnsOnCancel(t *testing.T) {
+	var l Limiter
+	l.SetRate(1 << 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := l.take(ctx, 1<<20); err != context.Canceled {
+		t.Fatalf("take after cancel = %v, want context.Canceled", err)
+	}
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Fatalf("take slept %v after cancel", d)
 	}
 }
 
@@ -74,7 +90,7 @@ func TestLimitReaderThrottles(t *testing.T) {
 
 	src := bytes.Repeat([]byte("x"), 512<<10) // 2x the rate => ~1s after burst
 	start := time.Now()
-	got, err := io.ReadAll(LimitReader(bytes.NewReader(src)))
+	got, err := io.ReadAll(LimitReader(context.Background(), bytes.NewReader(src)))
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +113,7 @@ func TestLimitWriterThrottles(t *testing.T) {
 	src := bytes.Repeat([]byte("y"), 512<<10)
 	var dst bytes.Buffer
 	start := time.Now()
-	n, err := LimitWriter(&dst).Write(src)
+	n, err := LimitWriter(context.Background(), &dst).Write(src)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +138,7 @@ func TestLimiterSharedAcrossStreams(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			io.Copy(io.Discard, LimitReader(bytes.NewReader(make([]byte, 256<<10))))
+			io.Copy(io.Discard, LimitReader(context.Background(), bytes.NewReader(make([]byte, 256<<10))))
 		}()
 	}
 	wg.Wait()
@@ -137,7 +153,7 @@ func TestLimiterRateChangeTakesEffect(t *testing.T) {
 	SetBandwidthIn(32 << 10)
 	defer SetBandwidthIn(0)
 
-	r := LimitReader(bytes.NewReader(make([]byte, 4<<20)))
+	r := LimitReader(context.Background(), bytes.NewReader(make([]byte, 4<<20)))
 	buf := make([]byte, 1<<20)
 	if _, err := io.ReadFull(r, buf[:4<<10]); err != nil {
 		t.Fatal(err)

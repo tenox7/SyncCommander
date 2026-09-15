@@ -458,7 +458,7 @@ func (b *FakeBackend) Checksum(ctx context.Context, relPath string) (string, err
 	default:
 		h = sha256.New()
 	}
-	rd, err := b.openEntry(relPath, e, 0)
+	rd, err := b.openEntry(ctx, relPath, e, 0)
 	if err != nil {
 		return "", err
 	}
@@ -484,10 +484,10 @@ func (b *FakeBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 	if !ok {
 		return nil, fmt.Errorf("fake: %s: %w", relPath, fs.ErrNotExist)
 	}
-	return b.openEntry(relPath, e, offset)
+	return b.openEntry(ctx, relPath, e, offset)
 }
 
-func (b *FakeBackend) openEntry(relPath string, e model.FileEntry, offset int64) (io.ReadCloser, error) {
+func (b *FakeBackend) openEntry(ctx context.Context, relPath string, e model.FileEntry, offset int64) (io.ReadCloser, error) {
 	if e.IsDir {
 		return nil, fmt.Errorf("fake: %s is a directory", relPath)
 	}
@@ -498,12 +498,12 @@ func (b *FakeBackend) openEntry(relPath string, e model.FileEntry, offset int64)
 		if offset > int64(len(data)) {
 			offset = int64(len(data))
 		}
-		return LimitReadCloser(io.NopCloser(bytes.NewReader(data[offset:]))), nil
+		return LimitReadCloser(ctx, io.NopCloser(bytes.NewReader(data[offset:]))), nil
 	}
 	if offset > e.Size {
 		offset = e.Size
 	}
-	return LimitReadCloser(&fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size, have: -1}), nil
+	return LimitReadCloser(ctx, &fakeReader{seed: b.hash(relPath, fakeSaltData), off: offset, size: e.Size, have: -1}), nil
 }
 
 // fakeReader streams deterministic bytes for a synthetic file without ever
@@ -574,14 +574,14 @@ func (b *FakeBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	var size int64
 	var buf []byte
 	if b.noData {
-		n, err := io.Copy(LimitWriter(io.Discard), src)
+		n, err := io.Copy(LimitWriter(ctx, io.Discard), src)
 		if err != nil {
 			return err
 		}
 		size = n
 	} else {
 		var sink bytes.Buffer
-		if _, err := io.Copy(LimitWriter(&sink), src); err != nil {
+		if _, err := io.Copy(LimitWriter(ctx, &sink), src); err != nil {
 			return err
 		}
 		buf, size = sink.Bytes(), int64(sink.Len())
