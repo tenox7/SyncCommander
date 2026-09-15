@@ -184,7 +184,8 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if errors.Is(err, ErrUnsupported) {
+		var consumed *consumedError
+		if errors.Is(err, ErrUnsupported) || errors.As(err, &consumed) {
 			return err
 		}
 		if isPermanentError(err) {

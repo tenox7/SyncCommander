@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -226,37 +225,25 @@ func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, 
 // CopyFrom retries only while src is still untouched: typically a dead
 // connection that markBrokenIf has just dropped, so the next attempt redials.
 // Once bytes have been consumed the reader cannot be rewound and a second
-// attempt would write a truncated file; the caller re-opens src and retries
-// at a higher level instead.
+// attempt would write a truncated file, so the failure is made permanent and
+// the caller re-opens src and retries at a higher level instead.
 func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	counted := &countingReader{r: src}
-	max := MaxRetries()
-	var err error
-	for attempt := 0; attempt <= max; attempt++ {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	return b.do(ctx, "copy "+relPath, func(in model.Backend) error {
+		err := in.CopyFrom(ctx, relPath, counted, mode)
+		if err != nil && counted.n.Load() > 0 {
+			return &consumedError{err}
 		}
-		var inner model.Backend
-		if inner, err = b.ensureConnected(ctx); err == nil {
-			err = b.markBrokenIf(inner.CopyFrom(ctx, relPath, counted, mode))
-		}
-		if err == nil {
-			if attempt > 0 {
-				Log.Add(b.proto, "REC", fmt.Sprintf("copy %s: recovered after %d %s", relPath, attempt, pluralRetries(attempt)))
-			}
-			return nil
-		}
-		if counted.n.Load() > 0 || ctx.Err() != nil || isPermanentError(err) || attempt == max {
-			return err
-		}
-		d := backoffDelay(attempt)
-		Log.Add(b.proto, "RETRY", fmt.Sprintf("copy %s: %v (attempt %d/%d in %v)", relPath, err, attempt+2, max+1, d))
-		if serr := sleepCtx(ctx, d); serr != nil {
-			return serr
-		}
-	}
-	return err
+		return err
+	})
 }
+
+// consumedError marks a copy that failed after reading from its source; Retry
+// treats it as permanent without logging it, the copy layer reports it.
+type consumedError struct{ err error }
+
+func (e *consumedError) Error() string { return e.err.Error() }
+func (e *consumedError) Unwrap() error { return e.err }
 
 // countingReader records whether anything was read, so CopyFrom can tell an
 // untouched source stream from a partially consumed one.

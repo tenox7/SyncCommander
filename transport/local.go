@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/mmcloughlin/md4"
@@ -22,7 +23,7 @@ import (
 
 type LocalBackend struct {
 	base      string
-	cksumAlgo string
+	cksumAlgo atomic.Value // string; set by negotiation while checksum workers may already run
 }
 
 func NewLocalBackend(base string) *LocalBackend {
@@ -72,7 +73,7 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 	defer f.Close()
 
 	var h hash.Hash
-	switch b.cksumAlgo {
+	switch b.cksumAlgo.Load() {
 	case "xxh3":
 		h = xxh3.New()
 	case "sha1":
@@ -108,7 +109,7 @@ func (b *LocalBackend) ProbeChecksums() []string {
 	return []string{"xxh3", "sha256", "sha1", "md5", "md4"}
 }
 
-func (b *LocalBackend) SetChecksumAlgo(algo string) { b.cksumAlgo = algo }
+func (b *LocalBackend) SetChecksumAlgo(algo string) { b.cksumAlgo.Store(algo) }
 
 func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime, btime time.Time) error {
 	if atime.IsZero() {

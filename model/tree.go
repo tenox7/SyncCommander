@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -168,6 +169,10 @@ type ChangedPaths struct {
 	Right     map[string]bool
 	LeftDirs  []string
 	RightDirs []string
+
+	once sync.Once
+	dirs map[string]bool // every directory holding a changed path, built on first use
+	all  bool            // a whole-tree rewrite: everything is touched
 }
 
 func underAny(dirs []string, relPath string) bool {
@@ -187,26 +192,36 @@ func (c *ChangedPaths) hasRight(relPath string) bool {
 	return c != nil && (c.Right[relPath] || underAny(c.RightDirs, relPath))
 }
 
+// touchesSubtree reports whether any changed path lies at or under dir. The
+// directories holding changes are indexed once, so a rescan asks O(1) per
+// directory instead of scanning every changed path each time.
 func (c *ChangedPaths) touchesSubtree(dir string) bool {
 	if c == nil || dir == "" {
 		return false
 	}
-	prefix := dir + "/"
-	for _, dirs := range [][]string{c.LeftDirs, c.RightDirs} {
-		for _, d := range dirs {
-			if d == "" || d == dir || strings.HasPrefix(d, prefix) || strings.HasPrefix(dir, d+"/") {
-				return true
-			}
+	c.once.Do(c.index)
+	return c.all || c.dirs[dir] || underAny(c.LeftDirs, dir) || underAny(c.RightDirs, dir)
+}
+
+func (c *ChangedPaths) index() {
+	c.dirs = make(map[string]bool)
+	mark := func(p string) {
+		for d := p; d != ""; d = DirOf(d) {
+			c.dirs[d] = true
 		}
 	}
-	for _, set := range []map[string]bool{c.Left, c.Right} {
-		for p := range set {
-			if p == dir || strings.HasPrefix(p, prefix) {
-				return true
-			}
-		}
+	for p := range c.Left {
+		mark(p)
 	}
-	return false
+	for p := range c.Right {
+		mark(p)
+	}
+	for _, d := range slices.Concat(c.LeftDirs, c.RightDirs) {
+		if d == "" {
+			c.all = true
+		}
+		mark(d)
+	}
 }
 
 // MergeChildren merges fresh entries into parent's children, reusing existing
