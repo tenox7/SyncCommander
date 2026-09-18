@@ -56,11 +56,6 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 	if base != "" {
 		display += "/" + base
 	}
-	// gorsync's daemon exchange takes the username only from the environment;
-	// the password goes through a per-call --password-file.
-	if user != "" {
-		os.Setenv("RSYNC_USERNAME", user)
-	}
 	return &RsyncBackend{
 		host:      net.JoinHostPort(host, port),
 		user:      user,
@@ -157,25 +152,14 @@ func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
 }
 
 // runDaemon dials the daemon and runs client's dry run against remotePath,
-// returning the file list. The password travels in a 0600 file via
-// --password-file so no process-wide state is involved.
+// returning the file list. The handshake is sc's own (see daemonHandshake),
+// so the credentials never touch process-wide state.
 func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string) (*rsyncclient.Result, error) {
-	tmpDir, err := os.MkdirTemp("", "rsync-daemon-*")
+	dst, err := os.MkdirTemp("", "rsync-daemon-*")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-	if b.pass != "" {
-		pw := filepath.Join(tmpDir, "pw")
-		if err := os.WriteFile(pw, []byte(b.pass), 0600); err != nil {
-			return nil, err
-		}
-		flags = append(flags, "--password-file="+pw)
-	}
-	dst := filepath.Join(tmpDir, "dst")
-	if err := os.Mkdir(dst, 0700); err != nil {
-		return nil, err
-	}
+	defer os.RemoveAll(dst)
 	client, err := newRsyncClient(flags, rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
 	if err != nil {
 		return nil, err
@@ -185,8 +169,13 @@ func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []stri
 		return nil, err
 	}
 	defer conn.Close()
+	defer context.AfterFunc(ctx, func() { conn.Close() })()
 	Log.Add("rsync", DirOut, label+" "+remotePath)
-	result, err := client.RunDaemon(ctx, conn, remotePath, []string{dst + "/"})
+	result := &rsyncclient.Result{}
+	done, err := b.daemonHandshake(ctx, conn, client, remotePath)
+	if err == nil && !done {
+		result, err = client.Run(ctx, conn, []string{dst + "/"})
+	}
 	if err != nil {
 		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
 	}
@@ -228,8 +217,11 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 	return b.listCache.serve(ctx, relDir, b.liveList)
 }
 
+// liveList is a non-recursive dry run; -d makes the daemon send the
+// directory's children, without it the sender skips a directory argument and
+// hangs up after an empty list.
 func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	result, err := b.runDaemon(ctx, "LIST", []string{"-n"}, b.modulePath(relDir, true))
+	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d"}, b.modulePath(relDir, true))
 	if err != nil {
 		return nil, err
 	}

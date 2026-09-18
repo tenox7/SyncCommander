@@ -46,7 +46,7 @@ func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 }
 
 func TestDeletePopupClampsProgress(t *testing.T) {
-	s := ansi.Strip(RenderDeletePopup("gone.txt", "right", 7, 5, 90*time.Second, popupWidth(60)))
+	s := ansi.Strip(RenderDeletePopup("gone.txt", "right", 7, 0, 5, 90*time.Second, popupWidth(60)))
 	wantAll(t, "delete popup", s, "DELETE right  5/5 items", "gone.txt", "100%", "Elapsed: 1:30")
 	if w := maxLineWidth(s); w > 60 {
 		t.Fatalf("delete popup is %d wide on a 60-column screen", w)

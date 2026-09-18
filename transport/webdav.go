@@ -41,6 +41,7 @@ type wdMultistatus struct {
 
 type wdResponse struct {
 	Href     string       `xml:"href"`
+	Status   string       `xml:"status"` // per-member outcome of a DELETE or MOVE
 	Propstat []wdPropstat `xml:"propstat"`
 }
 
@@ -539,29 +540,88 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 }
 
 func (b *WebDAVBackend) Remove(ctx context.Context, relPath string) error {
-	return b.delete(ctx, relPath)
+	return b.delete(ctx, relPath, false)
 }
 
 func (b *WebDAVBackend) RemoveAll(ctx context.Context, relPath string) error {
-	return b.delete(ctx, relPath)
+	return b.delete(ctx, relPath, true)
 }
 
-func (b *WebDAVBackend) delete(ctx context.Context, relPath string) error {
-	resp, err := b.do(ctx, "DELETE", b.urlFor(relPath, false), nil, nil)
+// delete is one DELETE. A collection goes with its whole subtree (RFC 4918
+// §9.6.1), and a 207 answer means some member survived, so it counts as a
+// failure despite its 2xx class. A recursive delete is checked afterwards: a
+// server that only unlinked the collection entry, or quietly refused, would
+// otherwise report success while the tree still holds the data.
+func (b *WebDAVBackend) delete(ctx context.Context, relPath string, recursive bool) error {
+	if isBaseRel(relPath) {
+		return fmt.Errorf("webdav: refusing to remove the base collection")
+	}
+	var hdrs map[string]string
+	if recursive {
+		hdrs = map[string]string{"Depth": "infinity"}
+	}
+	resp, err := b.do(ctx, "DELETE", b.urlFor(relPath, false), nil, hdrs)
 	if err != nil {
 		return err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
-		err := fmt.Errorf("DELETE %s: %s", relPath, resp.Status)
-		Log.Add("webdav", DirErr, err.Error())
-		return err
+	switch {
+	case resp.StatusCode == http.StatusMultiStatus:
+		err = fmt.Errorf("DELETE %s: %s", relPath, multistatusFailures(resp.Body))
+	case resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound:
+		err = fmt.Errorf("DELETE %s: %s", relPath, resp.Status)
+	case recursive:
+		err = b.gone(ctx, relPath)
 	}
 	b.dirs.Clear()
 	b.sums.invalidate(relPath)
 	b.listCache.invalidateTree(relPath)
 	b.listCache.invalidateAncestors(relPath)
-	return nil
+	if err != nil {
+		Log.Add("webdav", DirErr, err.Error())
+	}
+	return err
+}
+
+// multistatusFailures summarises the members a 207 reply could not delete.
+func multistatusFailures(body io.Reader) string {
+	var ms wdMultistatus
+	if err := xml.NewDecoder(body).Decode(&ms); err != nil {
+		return "207 Multi-Status"
+	}
+	var failed []string
+	for _, r := range ms.Response {
+		if r.Status == "" || !statusOK(r.Status) {
+			failed = append(failed, strings.TrimSpace(r.Href+" "+r.Status))
+		}
+	}
+	if len(failed) == 0 {
+		return "207 Multi-Status"
+	}
+	s := fmt.Sprintf("%d member(s) not deleted: %s", len(failed), failed[0])
+	if len(failed) > 1 {
+		s += ", ..."
+	}
+	return s
+}
+
+// gone confirms relPath no longer answers a PROPFIND after a DELETE.
+func (b *WebDAVBackend) gone(ctx context.Context, relPath string) error {
+	resp, err := b.do(ctx, "PROPFIND", b.urlFor(relPath, false), strings.NewReader(wdPropfindBody), map[string]string{
+		"Depth":        "0",
+		"Content-Type": "application/xml",
+	})
+	if err != nil {
+		return err
+	}
+	drainClose(resp.Body)
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusGone:
+		return nil
+	case http.StatusMultiStatus, http.StatusOK:
+		return fmt.Errorf("DELETE %s: still exists afterwards", relPath)
+	}
+	return fmt.Errorf("DELETE %s: verify: %s", relPath, resp.Status)
 }
 
 func (b *WebDAVBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {

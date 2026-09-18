@@ -305,3 +305,42 @@ func TestWebDAVDepthInfinityFallback(t *testing.T) {
 		t.Fatal("expected fallback Depth:1 listing, got none")
 	}
 }
+
+// A collection delete against a real server removes the whole subtree and
+// the post-check sees it gone; the base collection is refused.
+func TestWebDAVDelete(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{"dir/sub/deep.txt", "dir/top.txt", "keep.txt"} {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	port, _ := startRcloneWebDAV(t, root)
+	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := b.RemoveAll(ctx, "dir"); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "dir")); !os.IsNotExist(err) {
+		t.Fatalf("dir still on disk: %v", err)
+	}
+	if err := b.Remove(ctx, "keep.txt"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "keep.txt")); !os.IsNotExist(err) {
+		t.Fatalf("keep.txt still on disk: %v", err)
+	}
+	if err := b.RemoveAll(ctx, ""); err == nil {
+		t.Fatal("RemoveAll of the base collection succeeded")
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatal("base directory was removed")
+	}
+}

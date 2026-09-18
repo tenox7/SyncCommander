@@ -76,7 +76,10 @@ func Copy(ctx context.Context, req Request) Result {
 	listed := !isDir || req.Scanner.EnsureSubtreeListed(ctx, req.Node, req.Opts)
 	p.Listing.Store(false)
 	if !listed {
-		transport.Log.Add("copy", transport.DirErr, "aborted "+req.RelPath+": subtree could not be fully listed")
+		// Counted as a failure so the popup and status bar show it, not just
+		// the log.
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirFail, "aborted "+req.RelPath+": subtree could not be fully listed")
 		return Result{}
 	}
 
@@ -100,7 +103,7 @@ func Copy(ctx context.Context, req Request) Result {
 		res.RescanRoot = req.Scanner.FindNearestDestNode(model.DirOf(req.RelPath), req.LeftToRight)
 	}
 	if failed := p.Failed.Load(); failed > 0 {
-		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
+		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
 	}
 	// Batch rewrites every file in the subtree, not just the diff set, so the
 	// whole subtree's cached checksums go rather than the diff paths alone.

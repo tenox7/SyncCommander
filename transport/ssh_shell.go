@@ -71,8 +71,12 @@ func (s *sshShell) run(ctx context.Context, cmd string) (string, error) {
 	return out.String(), nil
 }
 
+// home asks the login shell for $HOME during setup, where no caller context
+// exists; the deadline keeps a stuck server from hanging the connect.
 func (s *sshShell) home() (string, error) {
-	out, err := s.run(context.Background(), "echo $HOME")
+	ctx, cancel := context.WithTimeout(context.Background(), sshKeepaliveTimeout)
+	defer cancel()
+	out, err := s.run(ctx, "echo $HOME")
 	return strings.TrimSpace(out), err
 }
 

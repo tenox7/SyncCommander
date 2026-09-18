@@ -14,11 +14,17 @@ import (
 
 func startRsyncDaemon(t *testing.T) (port int, moduleDir string) {
 	t.Helper()
-	root := t.TempDir()
-	moduleDir = filepath.Join(root, "module")
-	if err := os.MkdirAll(moduleDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	port, root := startRsyncDaemonConf(t, func(root string) string {
+		return "[testmod]\n  path = " + filepath.Join(root, "module") + "\n  read only = no\n"
+	})
+	return port, filepath.Join(root, "module")
+}
+
+// startRsyncDaemonConf runs an rsync daemon whose module section modules
+// builds from the temp root; every "path =" it names is created.
+func startRsyncDaemonConf(t *testing.T, modules func(root string) string) (port int, root string) {
+	t.Helper()
+	root = t.TempDir()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -26,9 +32,16 @@ func startRsyncDaemon(t *testing.T) (port int, moduleDir string) {
 	port = l.Addr().(*net.TCPAddr).Port
 	l.Close()
 
+	sections := modules(root)
+	for _, line := range strings.Split(sections, "\n") {
+		if _, p, ok := strings.Cut(line, "path = "); ok {
+			if err := os.MkdirAll(strings.TrimSpace(p), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	conf := filepath.Join(root, "rsyncd.conf")
-	cfg := fmt.Sprintf("use chroot = no\nport = %d\n[testmod]\n  path = %s\n  read only = no\n",
-		port, moduleDir)
+	cfg := fmt.Sprintf("use chroot = no\nport = %d\n%s", port, sections)
 	if err := os.WriteFile(conf, []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -38,14 +51,21 @@ func startRsyncDaemon(t *testing.T) (port int, moduleDir string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+		if t.Failed() {
+			log, _ := os.ReadFile(filepath.Join(root, "d.log"))
+			t.Logf("rsyncd log:\n%s", log)
+		}
+	})
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		c, derr := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if derr == nil {
 			c.Close()
-			return port, moduleDir
+			return port, root
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -171,5 +191,66 @@ func TestRsyncDeepUploadIntoEmptyModule(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(moduleDir, "top.txt")); string(got) != "root" {
 		t.Fatalf("CopyFrom root: want root, got %q", got)
+	}
+}
+
+// Two daemon panels with different users in one process: each must
+// authenticate as its own user. gorsync's RunDaemon read the username from a
+// process-wide environment variable, so listing module A after opening B
+// authenticated as B's user and failed.
+func TestRsyncDaemonPerBackendAuth(t *testing.T) {
+	port, root := startRsyncDaemonConf(t, func(root string) string {
+		secrets := filepath.Join(root, "secrets")
+		if err := os.WriteFile(secrets, []byte("alice:pa\nbob:pb\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return "[moda]\n  path = " + filepath.Join(root, "moda") + "\n  read only = no\n  auth users = alice\n  secrets file = " + secrets + "\n" +
+			"[modb]\n  path = " + filepath.Join(root, "modb") + "\n  read only = no\n  auth users = bob\n  secrets file = " + secrets + "\n"
+	})
+	ctx := context.Background()
+	for mod, name := range map[string]string{"moda": "a.txt", "modb": "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, mod, name), []byte(name), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open := func(user, pass, mod string) *RsyncBackend {
+		b, err := NewRsyncBackend(fmt.Sprintf("rsync://%s:%s@127.0.0.1:%d/%s", user, pass, port, mod))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	a, b := open("alice", "pa", "moda"), open("bob", "pb", "modb")
+	names := func(be *RsyncBackend) string {
+		entries, err := be.List(ctx, "")
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := names(b); got != "b.txt" {
+		t.Fatalf("modb as bob lists %q", got)
+	}
+	if got := names(a); got != "a.txt" {
+		t.Fatalf("moda as alice after opening bob's panel lists %q", got)
+	}
+	if _, err := a.fetchMD4(ctx, "", true); err != nil {
+		t.Fatalf("MD4 dry run as alice: %v", err)
+	}
+	if err := a.CopyFrom(ctx, "up.txt", strings.NewReader("up"), 0644); err != nil {
+		t.Fatalf("CopyFrom as alice: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "moda", "up.txt")); err != nil {
+		t.Fatal("upload as alice did not land")
+	}
+	if got := names(open("alice", "wrong", "moda")); !strings.Contains(got, "auth failed") {
+		t.Fatalf("wrong password lists %q, want an auth failure", got)
+	}
+	if got := names(open("bob", "pb", "moda")); !strings.Contains(got, "auth failed") {
+		t.Fatalf("bob on alice's module lists %q, want an auth failure", got)
 	}
 }

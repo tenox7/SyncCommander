@@ -6,12 +6,14 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -32,9 +34,14 @@ func NewLocalBackend(base string) *LocalBackend {
 
 func (b *LocalBackend) BasePath() string { return b.base }
 
-// LocalPath maps a slash-separated relPath onto the host filesystem.
+// LocalPath maps a slash-separated relPath onto the host filesystem. The path
+// is cleaned as if absolute first, so ".." segments can never climb above
+// base.
 func (b *LocalBackend) LocalPath(relPath string) string {
-	return filepath.Join(b.base, filepath.FromSlash(relPath))
+	if filepath.Separator != '/' {
+		relPath = strings.ReplaceAll(relPath, string(filepath.Separator), "/")
+	}
+	return filepath.Join(b.base, filepath.FromSlash(path.Clean("/"+relPath)))
 }
 
 func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -191,10 +198,16 @@ func (b *LocalBackend) Rename(_ context.Context, oldRelPath, newRelPath string) 
 }
 
 func (b *LocalBackend) Remove(_ context.Context, relPath string) error {
+	if isBaseRel(relPath) {
+		return errors.New("local: refusing to remove the base directory")
+	}
 	return os.Remove(b.LocalPath(relPath))
 }
 
 func (b *LocalBackend) RemoveAll(_ context.Context, relPath string) error {
+	if isBaseRel(relPath) {
+		return errors.New("local: refusing to remove the base directory")
+	}
 	full := b.LocalPath(relPath)
 	if err := os.RemoveAll(full); err != nil {
 		return err

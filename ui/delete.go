@@ -17,6 +17,7 @@ type deleteDoneMsg struct{}
 type DeleteProgress struct {
 	Total  atomic.Int64
 	Done   atomic.Int64
+	Failed atomic.Int64 // sides whose delete failed
 	File   atomic.Value
 	Side   atomic.Value
 	Start  atomic.Int64
@@ -26,6 +27,7 @@ type DeleteProgress struct {
 func (p *DeleteProgress) reset(total int64, file, side string, cancel context.CancelFunc) {
 	p.Cancel.Store(&cancel)
 	p.Done.Store(0)
+	p.Failed.Store(0)
 	p.Total.Store(total)
 	p.File.Store(file)
 	p.Side.Store(side)
@@ -137,7 +139,8 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 				break
 			}
 			if err := removeOne(ctx, s.backend, relPath, isDir); err != nil {
-				transport.Log.Add("delete", transport.DirErr, s.name+" "+relPath+": "+err.Error())
+				progress.Failed.Add(1)
+				transport.Log.Add("delete", transport.DirFail, s.name+" "+relPath+": "+err.Error())
 			} else {
 				transport.Log.Add("delete", transport.DirIn, s.name+" "+relPath)
 			}

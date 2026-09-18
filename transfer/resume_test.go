@@ -20,6 +20,7 @@ type resumeStub struct {
 	body       string
 	dstSize    int64
 	sum        string
+	algos      []string // ProbeChecksums answer; xxh3 when nil
 	appends    int
 	appendFrom int64
 }
@@ -31,8 +32,13 @@ func (s *resumeStub) List(_ context.Context, _ string) ([]model.FileEntry, error
 }
 
 func (s *resumeStub) Checksum(context.Context, string) (string, error) { return s.sum, nil }
-func (s *resumeStub) ProbeChecksums() []string                         { return []string{"xxh3"} }
-func (s *resumeStub) SetChecksumAlgo(string)                           {}
+func (s *resumeStub) ProbeChecksums() []string {
+	if s.algos != nil {
+		return s.algos
+	}
+	return []string{"xxh3"}
+}
+func (s *resumeStub) SetChecksumAlgo(string) {}
 func (s *resumeStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }
@@ -165,5 +171,46 @@ func TestResumeMismatchIsTreatedLikeUnsupported(t *testing.T) {
 	wrapped := errors.Join(errResumeMismatch, errors.New("ctx"))
 	if !errors.Is(wrapped, errResumeMismatch) {
 		t.Error("wrapped mismatch no longer matches errResumeMismatch")
+	}
+}
+
+// Without a shared checksum algorithm the resumed prefix is read back from
+// both sides: a same-size destination whose prefix differs must be rejected,
+// not accepted on size alone.
+func TestResumeVerifyWithoutSharedChecksumComparesPrefix(t *testing.T) {
+	pair := func(prefix string) (*resumeStub, *resumeStub, *model.Scanner) {
+		src, dst := newResumePair(10, "", "")
+		src.algos, dst.algos = []string{"sha1"}, []string{"md5"}
+		dst.body = prefix
+		return src, dst, model.NewScanner(src, dst, 1, 1, true)
+	}
+	src, dst, scanner := pair("XXXXXXXXXX")
+	verify := resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
+	var bytes, base atomic.Int64
+	err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify)
+	if !errors.Is(err, errResumeMismatch) {
+		t.Fatalf("resumeAttempt = %v, want errResumeMismatch for a corrupt prefix", err)
+	}
+	if bytes.Load() != 0 || base.Load() != 0 {
+		t.Errorf("progress not rolled back: bytes=%d base=%d", bytes.Load(), base.Load())
+	}
+
+	src, dst, scanner = pair(srcBody[:10])
+	verify = resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
+	if err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify); err != nil {
+		t.Fatalf("resumeAttempt = %v, want nil for a matching prefix", err)
+	}
+}
+
+// A shared algorithm that yields no sum falls back to the same read-back.
+func TestResumeVerifyChecksumUnavailableComparesPrefix(t *testing.T) {
+	src, dst := newResumePair(10, "", "")
+	dst.body = "XXXXXXXXXX"
+	scanner := model.NewScanner(src, dst, 1, 1, true)
+	verify := resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
+	var bytes, base atomic.Int64
+	err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify)
+	if !errors.Is(err, errResumeMismatch) {
+		t.Fatalf("resumeAttempt = %v, want errResumeMismatch", err)
 	}
 }

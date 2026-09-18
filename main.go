@@ -47,7 +47,7 @@ func main() {
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	verifyResume := flag.Bool("verify-resume", true, "checksum-verify a resumed (appended) copy; on mismatch recopy the file in full")
-	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
+	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address, unauthenticated: keep it on localhost (e.g. localhost:6060)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")

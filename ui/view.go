@@ -113,7 +113,7 @@ func (m *Model) deletePopup() string {
 	p := m.deleteProgress
 	file, _ := p.File.Load().(string)
 	side, _ := p.Side.Load().(string)
-	return RenderDeletePopup(file, side, p.Done.Load(), p.Total.Load(), elapsedSince(p.Start.Load()), popupWidth(m.width))
+	return RenderDeletePopup(file, side, p.Done.Load(), p.Failed.Load(), p.Total.Load(), elapsedSince(p.Start.Load()), popupWidth(m.width))
 }
 
 // elapsedSince is the time since a UnixNano start, zero when nothing started.

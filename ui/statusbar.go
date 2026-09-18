@@ -26,7 +26,7 @@ var styleDeletePopup = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
-func RenderDeletePopup(file, side string, done, total int64, elapsed time.Duration, width int) string {
+func RenderDeletePopup(file, side string, done, failed, total int64, elapsed time.Duration, width int) string {
 	inner := max(width-4, 20)
 	done = min(max(done, 0), max(total, 0))
 	pct := 0
@@ -35,8 +35,12 @@ func RenderDeletePopup(file, side string, done, total int64, elapsed time.Durati
 	}
 	barIndent := "  ✗ "
 	barWidth := max(inner-lipgloss.Width(barIndent)-5, 5)
+	header := fmt.Sprintf("DELETE %s  %d/%d items", side, done, total)
+	if failed > 0 {
+		header += fmt.Sprintf("  %d FAILED", failed)
+	}
 	rows := []string{
-		fmt.Sprintf("DELETE %s  %d/%d items", side, done, total),
+		header,
 		truncateName(file, inner),
 		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(done, total, barWidth), pct),
 		"Elapsed: " + formatHMS(int64(elapsed.Seconds())),

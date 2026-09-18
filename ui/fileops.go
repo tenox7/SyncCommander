@@ -56,13 +56,10 @@ func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 		case model.PresenceRightOnly:
 			err = right.Rename(ctx, oldRel, newRel)
 		default:
-			err = left.Rename(ctx, oldRel, newRel)
-			if rerr := right.Rename(ctx, oldRel, newRel); err == nil {
-				err = rerr
-			}
+			err = renameBoth(ctx, left, right, oldRel, newRel)
 		}
 		if err != nil {
-			transport.Log.Add("rename", transport.DirErr, oldRel+" -> "+newRel+": "+err.Error())
+			transport.Log.Add("rename", transport.DirFail, oldRel+" -> "+newRel+": "+err.Error())
 			refreshParent(scanner, oldRel, opts)
 			return renameDoneMsg{err: err}
 		}
@@ -71,6 +68,23 @@ func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 		}
 		return renameDoneMsg{}
 	}
+}
+
+// renameBoth renames on both sides, undoing the left rename when the right
+// one fails so the sides stay in step. A failed undo is logged and the parent
+// refresh shows the split.
+func renameBoth(ctx context.Context, left, right model.Backend, oldRel, newRel string) error {
+	if err := left.Rename(ctx, oldRel, newRel); err != nil {
+		return err
+	}
+	err := right.Rename(ctx, oldRel, newRel)
+	if err == nil {
+		return nil
+	}
+	if uerr := left.Rename(ctx, newRel, oldRel); uerr != nil {
+		transport.Log.Add("rename", transport.DirErr, "undo left "+newRel+" -> "+oldRel+": "+uerr.Error())
+	}
+	return err
 }
 
 func (m *Model) finishRename(msg renameDoneMsg) tea.Cmd {

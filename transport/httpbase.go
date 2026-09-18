@@ -182,7 +182,7 @@ func (h *httpBase) newReq(ctx context.Context, method, rawurl string, body io.Re
 }
 
 func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
-	Log.Add(h.proto, DirOut, req.Method+" "+req.URL.String())
+	Log.Add(h.proto, DirOut, req.Method+" "+req.URL.Redacted())
 	resp, err := h.client.Do(req)
 	if err != nil {
 		Log.Add(h.proto, DirErr, err.Error())

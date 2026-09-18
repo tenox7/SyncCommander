@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -42,7 +43,7 @@ func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath stri
 // offset portion is also tracked in BaseBytes so it does not inflate the
 // transfer-rate calculation. On failure the progress credited along the way
 // is rolled back.
-func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, bytes, baseBytes *atomic.Int64, verify func(context.Context) error) bool {
+func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, srcEntry, dstEntry *model.FileEntry, bytes, baseBytes *atomic.Int64, verify func(context.Context, int64) error) bool {
 	if dstEntry == nil || dstEntry.IsDir || dstEntry.Size <= 0 || dstEntry.Size >= srcEntry.Size {
 		return false
 	}
@@ -68,33 +69,78 @@ var errResumeMismatch = errors.New("resumed file does not match source")
 // resumeVerifier returns the post-append check for a resumed copy, or nil when
 // verification is off. Resume trusts whatever prefix already sits at the
 // destination (same size, different bytes produces a wrong file that otherwise
-// reports success), so compare both sides once the append lands.
-func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend, relPath string, size int64) func(context.Context) error {
+// reports success), so compare both sides once the append lands: by checksum
+// when the sides share an algorithm, else by reading the prefix back from
+// both. offset is where the append started.
+func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend, relPath string, size int64) func(ctx context.Context, offset int64) error {
 	if !enabled {
 		return nil
 	}
-	return func(ctx context.Context) error {
+	return func(ctx context.Context, offset int64) error {
 		if got := peekDstSize(ctx, dst, relPath); got != size {
 			return fmt.Errorf("%w: %s (%d bytes at destination, source has %d)", errResumeMismatch, relPath, got, size)
 		}
-		// Without a shared algorithm the two sides would hash differently and
-		// every comparison would read as a mismatch; the size check above is
-		// all the verification available.
-		if !scanner.NegotiateChecksum() {
-			transport.Log.Add("copy", transport.DirErr, "verify "+relPath+": no checksum algorithm shared by both sides, resumed content unverified")
-			return nil
+		why := "no checksum algorithm shared by both sides"
+		if scanner.NegotiateChecksum() {
+			srcSum, serr := src.Checksum(ctx, relPath)
+			dstSum, derr := dst.Checksum(ctx, relPath)
+			if serr == nil && derr == nil && srcSum != "" && dstSum != "" {
+				if srcSum != dstSum {
+					return fmt.Errorf("%w: %s (src %s, dst %s)", errResumeMismatch, relPath, srcSum, dstSum)
+				}
+				return nil
+			}
+			why = "checksum unavailable"
 		}
-		srcSum, serr := src.Checksum(ctx, relPath)
-		dstSum, derr := dst.Checksum(ctx, relPath)
-		if serr != nil || derr != nil || srcSum == "" || dstSum == "" {
-			transport.Log.Add("copy", transport.DirErr, "verify "+relPath+": checksum unavailable, resumed content unverified")
-			return nil
-		}
-		if srcSum != dstSum {
-			return fmt.Errorf("%w: %s (src %s, dst %s)", errResumeMismatch, relPath, srcSum, dstSum)
-		}
-		return nil
+		transport.Log.Add("copy", transport.DirOut, "verify "+relPath+": "+why+", comparing the resumed prefix byte for byte")
+		return comparePrefix(ctx, src, dst, relPath, offset)
 	}
+}
+
+// comparePrefix reads the first n bytes of relPath from both sides and reports
+// errResumeMismatch when they differ. Only the prefix needs checking: the
+// tail was just streamed from src. Fresh counters keep the read-back out of
+// the copy's progress.
+func comparePrefix(ctx context.Context, src, dst model.Backend, relPath string, n int64) error {
+	ctx = transport.ContextWithProgress(ctx, new(atomic.Int64))
+	ctx = transport.ContextWithBaseProgress(ctx, new(atomic.Int64))
+	sr, err := src.Open(ctx, relPath)
+	if err != nil {
+		return err
+	}
+	defer sr.Close()
+	dr, err := dst.Open(ctx, relPath)
+	if err != nil {
+		return err
+	}
+	defer dr.Close()
+	same, err := sameBytes(sr, dr, n)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return fmt.Errorf("%w: %s (resumed prefix differs)", errResumeMismatch, relPath)
+	}
+	return nil
+}
+
+// sameBytes compares the next n bytes of a and b; a short read is an error.
+func sameBytes(a, b io.Reader, n int64) (bool, error) {
+	ba, bb := make([]byte, 256*1024), make([]byte, 256*1024)
+	for n > 0 {
+		want := min(n, int64(len(ba)))
+		if _, err := io.ReadFull(a, ba[:want]); err != nil {
+			return false, err
+		}
+		if _, err := io.ReadFull(b, bb[:want]); err != nil {
+			return false, err
+		}
+		if !bytes.Equal(ba[:want], bb[:want]) {
+			return false, nil
+		}
+		n -= want
+	}
+	return true, nil
 }
 
 // peekDstSize returns the current size of relPath on dst, or 0 if it cannot
@@ -118,7 +164,7 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 // against the finished file. Returns transport.ErrUnsupported if dst cannot
 // append, errResumeMismatch if the result does not match the source; on any
 // error the progress credited during the attempt is rolled back.
-func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context) error) error {
+func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context, int64) error) error {
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
 		return transport.ErrUnsupported
@@ -139,7 +185,7 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 	if verify == nil {
 		return nil
 	}
-	if err := verify(ctx); err != nil {
+	if err := verify(ctx, offset); err != nil {
 		transport.Log.Add("copy", transport.DirErr, err.Error()+", recopying in full")
 		rollback()
 		return err

@@ -18,3 +18,19 @@ func TestRemoteURLEscapesPathSegments(t *testing.T) {
 		t.Errorf("modulePath = %q", got)
 	}
 }
+
+func TestDaemonProtocolGreeting(t *testing.T) {
+	for in, want := range map[string]int{
+		"@RSYNCD: 27": 27,
+		"@RSYNCD: 31.0 sha512 sha256 sha1 md5 md4": 31,
+	} {
+		if got, err := daemonProtocol(in); err != nil || got != want {
+			t.Errorf("daemonProtocol(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "hello", "@RSYNCD: x"} {
+		if _, err := daemonProtocol(in); err == nil {
+			t.Errorf("daemonProtocol(%q) accepted", in)
+		}
+	}
+}
