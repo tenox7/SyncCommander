@@ -235,7 +235,8 @@ func TestCancelKeyStopsTransfersAndBlocksTreeKeys(t *testing.T) {
 		t.Fatal("x did not cancel the copy")
 	}
 	m.copying = false
-	m.deleteProgress.Cancel.Store(&cancelFn{f: func() { deleteCancelled = true }})
+	delCancel := context.CancelFunc(func() { deleteCancelled = true })
+	m.deleteProgress.Cancel.Store(&delCancel)
 	m.deleting = true
 	press(m, "X")
 	if !deleteCancelled {

@@ -427,3 +427,27 @@ func (p *Panel) jumpTo(node *model.TreeNode) {
 		}
 	}
 }
+
+// Collapse folds the cursor directory or, from inside one, jumps to the
+// enclosing directory and folds that. Runs under mutateTree.
+func (p *Panel) Collapse() bool {
+	row, ok := p.CursorRow()
+	if !ok {
+		return false
+	}
+	if row.Attr == nil && row.Node.Expanded {
+		row.Node.Expanded = false
+		return true
+	}
+	for i := p.cursor - 1; i >= 0; i-- {
+		n := p.rows[i].Node
+		if p.rows[i].Attr != nil || !n.IsDir || n.Depth >= row.Node.Depth {
+			continue
+		}
+		p.cursor = i
+		n.Expanded = false
+		p.clampOffset()
+		return true
+	}
+	return false
+}
