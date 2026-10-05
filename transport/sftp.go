@@ -20,13 +20,16 @@ import (
 // and writes are synchronous (each Write blocks for STATUS), so per-stream
 // throughput collapses to roughly maxPacket/RTT. UseConcurrentWrites lets
 // File.ReadFrom (which io.Copy invokes) pipeline up to
-// maxConcurrentRequests packets at once, and MaxPacketChecked(256KB) cuts
-// the per-block overhead in half again.
+// maxConcurrentRequests packets at once. The packet size stays at the 32KB
+// default: MaxPacketChecked rejects anything larger and fails the connect,
+// and MaxPacketUnchecked silently truncates downloads, because the
+// concurrent reader treats a short READ reply as EOF while pkg/sftp servers
+// (rclone, sftpgo) clamp replies to 32KB. 64 in-flight 32KB packets already
+// fill the 2MB SSH channel window, so a bigger packet buys no throughput.
 func sftpFastOpts() []sftp.ClientOption {
 	return []sftp.ClientOption{
 		sftp.UseConcurrentWrites(true),
 		sftp.UseConcurrentReads(true),
-		sftp.MaxPacketChecked(256 << 10),
 	}
 }
 
@@ -251,8 +254,14 @@ func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode)
 	return nil
 }
 
+// Rename prefers posix-rename@openssh.com, which replaces an existing target
+// the way mv does; plain SSH_FXP_RENAME is refused by OpenSSH in that case.
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	err := b.sftp.Rename(b.abs(oldRelPath), b.abs(newRelPath))
+	rename := b.sftp.Rename
+	if _, ok := b.sftp.HasExtension("posix-rename@openssh.com"); ok {
+		rename = b.sftp.PosixRename
+	}
+	err := rename(b.abs(oldRelPath), b.abs(newRelPath))
 	b.listCache.forgetRenamed(oldRelPath, newRelPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())

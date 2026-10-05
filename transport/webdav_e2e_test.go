@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -303,6 +304,100 @@ func TestWebDAVDepthInfinityFallback(t *testing.T) {
 	}
 	if depth1Hits == 0 {
 		t.Fatal("expected fallback Depth:1 listing, got none")
+	}
+}
+
+// TestWebDAVIncrementalRelease verifies that a directory is served from the
+// cache as soon as the Depth:infinity stream has left its subtree, while the
+// rest of the response is still in flight.
+func TestWebDAVIncrementalRelease(t *testing.T) {
+	resp := func(href string, dir bool) string {
+		rt := "<d:resourcetype/>"
+		if dir {
+			rt = "<d:resourcetype><d:collection/></d:resourcetype>"
+		}
+		return fmt.Sprintf(`<d:response><d:href>%s</d:href><d:propstat>`+
+			`<d:status>HTTP/1.1 200 OK</d:status><d:prop>`+
+			`<d:getcontentlength>3</d:getcontentlength>%s</d:prop></d:propstat></d:response>`, href, rt)
+	}
+	const open, closing = `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">`, `</d:multistatus>`
+
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	defer released()
+	var depth1 atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PROPFIND" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		switch r.Header.Get("Depth") {
+		case "0":
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(open + resp("/", true) + closing))
+		case "infinity":
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(open + resp("/a/", true) + resp("/a/1", false) + resp("/b/", true)))
+			w.(http.Flusher).Flush()
+			<-release
+			w.Write([]byte(resp("/b/1", false) + closing))
+		default:
+			depth1.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	b, err := NewWebDAVBackend("webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 8)
+	if err != nil {
+		t.Fatalf("NewWebDAVBackend: %v", err)
+	}
+	ctx := context.Background()
+	if err := b.PreloadRecursive(ctx, ""); err != nil {
+		t.Fatalf("PreloadRecursive: %v", err)
+	}
+
+	type listResult struct {
+		entries []model.FileEntry
+		err     error
+	}
+	list := func(dir string) <-chan listResult {
+		ch := make(chan listResult, 1)
+		go func() {
+			e, err := b.List(ctx, dir)
+			ch <- listResult{e, err}
+		}()
+		return ch
+	}
+	wait := func(ch <-chan listResult, want []string) {
+		t.Helper()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("List: %v", r.err)
+			}
+			if got := listSignature(r.entries); !eqStrings(got, want) {
+				t.Fatalf("listing = %v, want %v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("List did not return while the stream was still open")
+		}
+	}
+
+	wait(list("a"), []string{"1|false"})
+	pending := list("b")
+	select {
+	case r := <-pending:
+		t.Fatalf("List(b) = %v before its subtree finished streaming", listSignature(r.entries))
+	case <-time.After(50 * time.Millisecond):
+	}
+	released()
+	wait(pending, []string{"1|false"})
+	waitDone(t, b.listCache)
+	wait(list(""), []string{"a|true", "b|true"})
+	if n := depth1.Load(); n != 0 {
+		t.Fatalf("%d live Depth:1 listings, want none", n)
 	}
 }
 

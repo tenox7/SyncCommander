@@ -231,7 +231,7 @@ func (b *ResticBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	return nil
 }
 
-func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	scope = strings.Trim(scope, "/")
 	types := resticTypes
 	if scope != "" {
@@ -256,6 +256,7 @@ func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit
 		// Emit even when empty so the type dir registers a cache hit (with no
 		// children) rather than falling through to a live list later.
 		emit(t, entries)
+		complete(t)
 	}
 	return nil
 }

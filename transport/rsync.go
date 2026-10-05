@@ -237,7 +237,7 @@ func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error
 	return nil
 }
 
-func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), _ func(string)) error {
 	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, b.modulePath(scope, true))
 	if err != nil {
 		return err

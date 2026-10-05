@@ -10,26 +10,37 @@ import (
 )
 
 // listCache holds per-directory entries fed by one recursive listing running
-// in the background. List serves hits from it and, while the preload is in
-// flight, waits for it to finish rather than issuing a live per-dir call.
-// preloadCtx is the scan context the wait follows, so a per-call stall
-// timeout on List does not abandon a slow but healthy preload.
+// in the background. List serves a directory once it is complete: marked so
+// by the emitter mid-run, or implicitly when the whole run has finished.
+// Until then an in-flight preload is awaited rather than bypassed with a
+// live per-dir call. preloadCtx is the scan context the wait follows, so a
+// per-call stall timeout on List does not abandon a slow but healthy preload.
 type listCache struct {
 	mu         sync.Mutex
 	cond       *sync.Cond
 	entries    map[string][]model.FileEntry
+	complete   map[string]bool
 	active     bool
 	done       bool
 	preloadCtx context.Context
 }
 
 func newListCache() *listCache {
-	c := &listCache{entries: make(map[string][]model.FileEntry)}
+	c := &listCache{}
 	c.cond = sync.NewCond(&c.mu)
+	c.reset()
 	return c
 }
 
-type recursiveLister func(ctx context.Context, scope string, emit func(parent string, entries []model.FileEntry)) error
+func (c *listCache) reset() {
+	c.entries = make(map[string][]model.FileEntry)
+	c.complete = make(map[string]bool)
+}
+
+// recursiveLister streams a subtree: emit appends a batch of children to
+// parent, complete declares that every child of dir has been emitted.
+// Emitters whose order cannot prove that never call complete.
+type recursiveLister func(ctx context.Context, scope string, emit func(parent string, entries []model.FileEntry), complete func(dir string)) error
 
 // start runs one recursive listing in the background, feeding the cache
 // through emit. A preload already in flight is left alone. When run fails
@@ -41,16 +52,16 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 		c.mu.Unlock()
 		return
 	}
-	c.entries = make(map[string][]model.FileEntry)
+	c.reset()
 	c.active, c.done = true, false
 	c.preloadCtx = ctx
 	c.mu.Unlock()
 
 	go func() {
-		err := run(ctx, scope, c.emit)
+		err := run(ctx, scope, c.emit, c.markComplete)
 		c.mu.Lock()
 		if err != nil {
-			c.entries = make(map[string][]model.FileEntry)
+			c.reset()
 		}
 		c.done = true
 		c.cond.Broadcast()
@@ -73,26 +84,38 @@ func (c *listCache) serve(ctx context.Context, relDir string, live func(context.
 	return live(ctx, relDir)
 }
 
-// emit appends entries for parent without waking awaiters: recursive
-// listings revisit a parent several times, so any single emit may be a
-// partial view. Only the end of the run broadcasts.
+// emit appends entries for parent without waking awaiters: a parent may
+// arrive in several batches, so a single emit can be a partial view.
 func (c *listCache) emit(parent string, entries []model.FileEntry) {
 	c.mu.Lock()
 	c.entries[parent] = append(c.entries[parent], entries...)
 	c.mu.Unlock()
 }
 
+// markComplete releases awaiters of dir and registers it even when nothing
+// was emitted, so an empty dir is a hit rather than a live call.
+func (c *listCache) markComplete(dir string) {
+	c.mu.Lock()
+	c.complete[dir] = true
+	if _, ok := c.entries[dir]; !ok {
+		c.entries[dir] = nil
+	}
+	c.cond.Broadcast()
+	c.mu.Unlock()
+}
+
+func (c *listCache) ready(relDir string) bool { return c.done || c.complete[relDir] }
+
 func (c *listCache) lookup(relDir string) (entries []model.FileEntry, hit, active, done bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entries, hit = c.entries[relDir]
-	return entries, hit, c.active, c.done
+	return entries, hit && c.ready(relDir), c.active, c.done
 }
 
-// await blocks until the preload finishes or its context ends, then returns
-// whatever the cache holds for relDir. It deliberately ignores the caller's
-// per-call context, whose stall timeout is unsuited to one long recursive
-// listing.
+// await blocks until relDir is complete, the preload finishes or its context
+// ends. It deliberately ignores the caller's per-call context, whose stall
+// timeout is unsuited to one long recursive listing.
 func (c *listCache) await(relDir string) ([]model.FileEntry, bool) {
 	c.mu.Lock()
 	pctx := c.preloadCtx
@@ -113,22 +136,27 @@ func (c *listCache) await(relDir string) ([]model.FileEntry, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for !c.done && (pctx == nil || pctx.Err() == nil) {
+	for !c.ready(relDir) && (pctx == nil || pctx.Err() == nil) {
 		c.cond.Wait()
 	}
 	entries, ok := c.entries[relDir]
-	return entries, ok
+	return entries, ok && c.ready(relDir)
 }
 
 // The invalidators are nil-safe: backends without a preload leave the cache
 // nil and still call them after every write.
+
+func (c *listCache) drop(dir string) {
+	delete(c.entries, dir)
+	delete(c.complete, dir)
+}
 
 func (c *listCache) invalidate(relDir string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	delete(c.entries, relDir)
+	c.drop(relDir)
 	c.mu.Unlock()
 }
 
@@ -142,7 +170,7 @@ func (c *listCache) invalidateAncestors(relPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for p := parentDir(relPath); ; p = parentDir(p) {
-		delete(c.entries, p)
+		c.drop(p)
 		if p == "" {
 			return
 		}
@@ -170,7 +198,7 @@ func (c *listCache) invalidateTree(prefix string) {
 	defer c.mu.Unlock()
 	for k := range c.entries {
 		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			delete(c.entries, k)
+			c.drop(k)
 		}
 	}
 }
@@ -184,17 +212,23 @@ func parentDir(relPath string) string {
 }
 
 // emitGrouper batches consecutive entries sharing a parent and emits each
-// batch on parent change. finish flushes the last batch and registers every
-// directory seen, so an empty leaf is a cache hit rather than a live list.
+// batch on parent change. With complete set it also tracks the open
+// directories of a depth-first stream: the first entry outside a subtree
+// proves that subtree fully streamed, so the dir is flushed and completed
+// then. Without complete, finish registers every directory seen, so an
+// empty leaf is a cache hit rather than a live list.
 type emitGrouper struct {
-	emit    func(string, []model.FileEntry)
-	current string
-	have    bool
-	batch   []model.FileEntry
-	dirs    []string
+	emit     func(string, []model.FileEntry)
+	complete func(string)
+	current  string
+	have     bool
+	batch    []model.FileEntry
+	dirs     []string
+	open     []string
 }
 
 func (g *emitGrouper) add(e model.FileEntry) {
+	g.closeOutside(e.RelPath)
 	parent := parentDir(e.RelPath)
 	if !g.have || parent != g.current {
 		g.flush()
@@ -203,6 +237,23 @@ func (g *emitGrouper) add(e model.FileEntry) {
 	g.batch = append(g.batch, e)
 	if e.IsDir {
 		g.dirs = append(g.dirs, e.RelPath)
+		g.open = append(g.open, e.RelPath)
+	}
+}
+
+// closeOutside completes every open dir that rel is not under; "" closes all.
+func (g *emitGrouper) closeOutside(rel string) {
+	if g.complete == nil {
+		return
+	}
+	for len(g.open) > 0 {
+		d := g.open[len(g.open)-1]
+		if strings.HasPrefix(rel, d+"/") {
+			return
+		}
+		g.flush()
+		g.complete(d)
+		g.open = g.open[:len(g.open)-1]
 	}
 }
 
@@ -216,6 +267,10 @@ func (g *emitGrouper) flush() {
 
 func (g *emitGrouper) finish() {
 	g.flush()
+	if g.complete != nil {
+		g.closeOutside("")
+		return
+	}
 	for _, d := range g.dirs {
 		g.emit(d, nil)
 	}

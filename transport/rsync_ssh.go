@@ -64,7 +64,7 @@ func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) er
 	return nil
 }
 
-func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), _ func(string)) error {
 	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict())
 	if err != nil {
 		return err

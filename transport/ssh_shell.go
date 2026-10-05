@@ -156,9 +156,9 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 
 // findRecursive streams every entry under scope into emit as the listing
 // arrives, grouped by parent.
-func (s *sshShell) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (s *sshShell) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	absPrefix := s.abs(scope)
-	g := &emitGrouper{emit: emit}
+	g := &emitGrouper{emit: emit, complete: complete}
 	w := newRecordWriter(0, func(rec string) {
 		full, e, ok := parseFindRecord(rec)
 		rel := strings.TrimPrefix(strings.TrimPrefix(full, absPrefix), "/")

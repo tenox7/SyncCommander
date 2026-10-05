@@ -487,7 +487,7 @@ func (b *RcloneBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	return nil
 }
 
-func (b *RcloneBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (b *RcloneBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), _ func(string)) error {
 	scope = strings.Trim(scope, "/")
 	Log.Add("rclone", DirOut, "recursive list "+b.f.Name()+":"+path.Join(b.f.Root(), scope))
 	var count int

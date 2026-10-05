@@ -65,6 +65,7 @@ type WebDAVBackend struct {
 	sums       *wdSumCache
 	listCache  *listCache
 	dirs       sync.Map // collections known to exist, so uploads skip the MKCOL walk
+	mkcols     sync.Map // in-flight MKCOLs by dir, so racing uploads send only one
 	noInfinity atomic.Bool
 }
 
@@ -276,7 +277,7 @@ func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	return nil
 }
 
-func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry)) error {
+func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	Log.Add("webdav", DirOut, "RPROPFIND "+b.pathFor(scope))
 	resp, err := b.do(ctx, "PROPFIND", b.urlFor(scope, true), strings.NewReader(wdPropfindBody), map[string]string{
 		"Depth":        "infinity",
@@ -300,7 +301,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	// Multistatus ordering is not guaranteed grouped by parent; the grouper
 	// appends, so interleaving only costs extra flushes.
 	self := strings.Trim(scope, "/")
-	g := &emitGrouper{emit: emit}
+	g := &emitGrouper{emit: emit, complete: complete}
 	dec := xml.NewDecoder(resp.Body)
 	n := 0
 	for {
@@ -446,11 +447,11 @@ func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, 
 
 // CopyFrom PUTs the body with its length, so servers that insist on
 // Content-Length are served and nothing is chunked needlessly. The parent
-// walk is skipped for collections already seen; a MKCOL failure is not fatal
-// here because the PUT's own status is the verdict.
+// walk is skipped for collections already seen; a MKCOL failure is only a
+// warning here because the PUT's own status is the verdict.
 func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
-		Log.Add("webdav", DirErr, "mkcol parents: "+err.Error())
+		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
 	}
 	req, err := b.newReq(ctx, "PUT", b.urlFor(relPath, false), src)
 	if err != nil {
@@ -486,9 +487,17 @@ func (b *WebDAVBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode
 	return nil
 }
 
+// mkcol is one in-flight MKCOL; waiters read err once done is closed.
+type mkcol struct {
+	done chan struct{}
+	err  error
+}
+
 // ensureDir MKCOLs dir and any missing parents, remembering what exists.
-// 405 and 301 mean the collection is already there; 409 is tolerated because
-// some servers answer it for existing collections too.
+// Uploads racing into one new directory share a single MKCOL, because the Go
+// webdav server behind rclone answers concurrent MKCOLs of one path with 423
+// Locked. 405 and 301 mean the collection is already there; 409 is tolerated
+// because some servers answer it for existing collections too.
 func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 	dir = strings.Trim(dir, "/")
 	if dir == "" {
@@ -500,6 +509,23 @@ func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 	if err := b.ensureDir(ctx, parentDir(dir)); err != nil {
 		return err
 	}
+	m := &mkcol{done: make(chan struct{})}
+	if cur, loaded := b.mkcols.LoadOrStore(dir, m); loaded {
+		m = cur.(*mkcol)
+		select {
+		case <-m.done:
+			return m.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	m.err = b.mkcolOnce(ctx, dir)
+	b.mkcols.Delete(dir)
+	close(m.done)
+	return m.err
+}
+
+func (b *WebDAVBackend) mkcolOnce(ctx context.Context, dir string) error {
 	resp, err := b.do(ctx, "MKCOL", b.urlFor(dir, true), nil, nil)
 	if err != nil {
 		return err
@@ -516,7 +542,7 @@ func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 
 func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
 	if err := b.ensureDir(ctx, parentDir(newRelPath)); err != nil {
-		Log.Add("webdav", DirErr, "mkcol parents: "+err.Error())
+		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
 	}
 	resp, err := b.do(ctx, "MOVE", b.urlFor(oldRelPath, false), nil, map[string]string{
 		"Destination": b.urlFor(newRelPath, false),

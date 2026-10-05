@@ -35,6 +35,7 @@ type Dir int
 const (
 	DirOut   Dir = iota // a command or upload sent to the remote
 	DirIn               // a reply or download received
+	DirWarn             // something went wrong, but the operation's own status still decides
 	DirErr              // an operation failed; Retry may still recover it
 	DirRetry            // Retry is about to try again
 	DirRec              // an operation recovered after retries
@@ -43,11 +44,11 @@ const (
 )
 
 func (d Dir) String() string {
-	return [...]string{">>>", "<<<", "ERR", "RETRY", "REC", "FAIL", "FATAL"}[d]
+	return [...]string{">>>", "<<<", "WARN", "ERR", "RETRY", "REC", "FAIL", "FATAL"}[d]
 }
 
 func (l *RemoteLog) Add(proto string, dir Dir, msg string) {
-	if dir == DirErr && (strings.Contains(msg, "context canceled") || msg == "EOF") {
+	if (dir == DirWarn || dir == DirErr) && (strings.Contains(msg, "context canceled") || msg == "EOF") {
 		return
 	}
 	l.mu.Lock()
