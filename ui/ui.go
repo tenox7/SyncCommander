@@ -47,6 +47,7 @@ type Model struct {
 	spinFrame             int
 	copySpinFrame         int
 	lastCopyBytes         int64
+	slotSpins             map[string]slotSpin
 	tickActive            bool
 
 	settings   *SettingsDialog

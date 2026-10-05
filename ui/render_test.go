@@ -37,11 +37,25 @@ func TestStatusBarShowsScanProgress(t *testing.T) {
 
 func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 	d := CopyPopupData{LeftToRight: true, DoneFiles: 1, TotalFiles: 4, BytesCopied: 50, TotalBytes: 200, Parallel: 2,
-		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Elapsed: time.Second}}}
+		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Elapsed: time.Second, Spinner: "⠹"}}}
 	s := ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
-	wantAll(t, "copy popup", s, "COPY  1/4 files", "a.bin", "25%")
+	wantAll(t, "copy popup", s, "COPY  1/4 files", "a.bin", "⠹", "25%", "25 B/s")
+	if strings.Contains(s, "…") {
+		t.Fatalf("copy popup truncates a row that should fit:\n%s", s)
+	}
 	if w := maxLineWidth(s); w > 80 {
 		t.Fatalf("copy popup is %d wide on an 80-column screen", w)
+	}
+}
+
+func TestProgressBarFillsInEighths(t *testing.T) {
+	for _, tc := range []struct {
+		done int64
+		want string
+	}{{0, "░░"}, {1, "▏░"}, {4, "▌░"}, {8, "█░"}, {9, "█▏"}, {16, "██"}, {99, "██"}} {
+		if got := progressBar(tc.done, 16, 2); got != tc.want {
+			t.Errorf("progressBar(%d, 16, 2) = %q, want %q", tc.done, got, tc.want)
+		}
 	}
 }
 

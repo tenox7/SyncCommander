@@ -83,7 +83,8 @@ func (m *Model) copyPopup() string {
 	var slots []CopySlotView
 	if !batched {
 		for _, s := range p.SnapshotSlots() {
-			slots = append(slots, CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, BaseBytes: s.BaseBytes, Elapsed: elapsedSince(s.Start)})
+			slots = append(slots, CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, BaseBytes: s.BaseBytes,
+				Elapsed: elapsedSince(s.Start), Spinner: spinnerFrames[m.slotSpins[s.File].frame]})
 		}
 	}
 	return RenderCopyPopup(CopyPopupData{

@@ -65,20 +65,42 @@ func (m *Model) finishCopy(msg copyDoneMsg) tea.Cmd {
 	return m.queueRescan(msg.rescanRoot, msg.changed)
 }
 
-// tickCopy advances the copy spinner only while bytes move, so a stalled
+// slotSpin is one in-flight row's liveness: the frame only advances on ticks
+// where that file's byte counter moved, so a stalled file shows a frozen glyph.
+type slotSpin struct {
+	bytes int64
+	frame int
+}
+
+// tickCopy advances the copy spinners only while bytes move, so a stalled
 // transfer shows a frozen spinner.
 func (m *Model) tickCopy() {
 	if !m.copying {
 		m.lastCopyBytes = 0
+		m.slotSpins = nil
 		return
 	}
 	m.copyProgress.SyncTotals()
+	m.tickSlotSpins()
 	cur := m.copyProgress.Bytes.Load()
 	if cur == m.lastCopyBytes {
 		return
 	}
 	m.copySpinFrame = (m.copySpinFrame + 1) % len(spinnerFrames)
 	m.lastCopyBytes = cur
+}
+
+func (m *Model) tickSlotSpins() {
+	next := make(map[string]slotSpin, len(m.slotSpins))
+	for _, s := range m.copyProgress.SnapshotSlots() {
+		prev, seen := m.slotSpins[s.File]
+		if !seen || prev.bytes != s.Bytes {
+			prev.frame = (prev.frame + 1) % len(spinnerFrames)
+		}
+		prev.bytes = s.Bytes
+		next[s.File] = prev
+	}
+	m.slotSpins = next
 }
 
 // adjustCopyParallel retunes the running copy's worker count.

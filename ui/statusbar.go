@@ -101,6 +101,7 @@ type CopySlotView struct {
 	Bytes     int64
 	BaseBytes int64
 	Elapsed   time.Duration
+	Spinner   string
 }
 
 func RenderCopyPopup(d CopyPopupData, width int) string {
@@ -123,14 +124,10 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		totalRate = float64(totalRealBytes) / d.TotalElapsed.Seconds()
 	}
 
-	progressMark := d.Spinner
-	if progressMark == "" {
-		progressMark = "·"
-	}
+	progressMark := spinOrDot(d.Spinner)
 
 	barIndent := "  " + arrow + " "
 	pctStrLen := 5
-	rateW := 11
 	totalBarWidth := inner - lipgloss.Width(barIndent) - pctStrLen
 	if totalBarWidth < 5 {
 		totalBarWidth = 5
@@ -187,42 +184,25 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, totalBarWidth), filePct),
 		)
 	} else {
-		nameW := inner - lipgloss.Width(barIndent) - pctStrLen - rateW - 2
-		if nameW < 8 {
-			nameW = 8
-		}
-		barW := 10
 		if len(d.Slots) == 0 && !d.Listing {
 			rows = append(rows, "  (waiting…)")
 		}
 		for _, s := range d.Slots {
 			pct := 0
 			if s.Size > 0 {
-				cap := s.Bytes
-				if cap > s.Size {
-					cap = s.Size
-				}
-				pct = int(cap * 100 / s.Size)
+				pct = int(min(s.Bytes, s.Size) * 100 / s.Size)
 			}
-			realBytes := s.Bytes - s.BaseBytes
-			if realBytes < 0 {
-				realBytes = 0
-			}
+			realBytes := max(s.Bytes-s.BaseBytes, 0)
 			rate := 0.0
 			if s.Elapsed >= 100*time.Millisecond && realBytes > 0 {
 				rate = float64(realBytes) / s.Elapsed.Seconds()
 			}
+			// The rate is right-aligned to its widest form ("1023.9 KB/s") so
+			// the columns hold still while the numbers change.
+			tail := fmt.Sprintf(" %s %s %3d%% %11s", spinOrDot(s.Spinner), progressBar(s.Bytes, s.Size, 10), pct, formatRateOrDash(rate))
+			nameW := max(inner-lipgloss.Width(barIndent)-lipgloss.Width(tail), 8)
 			name := truncateName(s.File, nameW)
-			namePad := nameW - lipgloss.Width(name)
-			if namePad < 0 {
-				namePad = 0
-			}
-			row := fmt.Sprintf("%s%s%s %s %3d%% %s",
-				barIndent,
-				name, strings.Repeat(" ", namePad),
-				progressBar(s.Bytes, s.Size, barW), pct,
-				formatRateOrDash(rate))
-			rows = append(rows, row)
+			rows = append(rows, barIndent+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
 		}
 	}
 
@@ -249,6 +229,14 @@ func truncateName(s string, w int) string {
 		return base
 	}
 	return ansi.Truncate(base, w, "…")
+}
+
+// spinOrDot keeps the spinner column stable before the first tick.
+func spinOrDot(s string) string {
+	if s == "" {
+		return "·"
+	}
+	return s
 }
 
 func formatRateOrDash(rate float64) string {
@@ -304,12 +292,22 @@ var styleBar = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
+var partialBlocks = []rune("▏▎▍▌▋▊▉")
+
+// progressBar fills the leading cell in eighths, so a huge file's bar keeps
+// visibly creeping between whole-cell steps.
 func progressBar(done, total int64, barWidth int) string {
 	if total <= 0 {
 		return strings.Repeat("░", barWidth)
 	}
-	filled := min(max(int(done*int64(barWidth)/total), 0), barWidth)
-	return strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	eighths := min(max(int(done*int64(barWidth*8)/total), 0), barWidth*8)
+	full, part := eighths/8, eighths%8
+	bar := strings.Repeat("█", full)
+	if part > 0 {
+		bar += string(partialBlocks[part-1])
+		full++
+	}
+	return bar + strings.Repeat("░", barWidth-full)
 }
 
 func RenderPanelTopBar(stats *TreeStats, isLeft bool, prefix string, width int) string {
