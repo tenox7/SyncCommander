@@ -215,37 +215,53 @@ func parentDir(relPath string) string {
 // batch on parent change. With complete set it also tracks the open
 // directories of a depth-first stream: the first entry outside a subtree
 // proves that subtree fully streamed, so the dir is flushed and completed
-// then. Without complete, finish registers every directory seen, so an
-// empty leaf is a cache hit rather than a live list.
+// then. A dir opens with its own entry, or, with lateChildren, with its first
+// child: rsync lists a directory's children as one run after the parent's
+// run, so the entry alone proves nothing. Directories never completed by the
+// stream (empty ones, or all of them without complete) are registered at
+// finish, so an empty leaf is a cache hit rather than a live list.
 type emitGrouper struct {
-	emit     func(string, []model.FileEntry)
-	complete func(string)
-	current  string
-	have     bool
-	batch    []model.FileEntry
-	dirs     []string
-	open     []string
+	emit         func(string, []model.FileEntry)
+	complete     func(string)
+	lateChildren bool
+	current      string
+	have         bool
+	batch        []model.FileEntry
+	dirs         map[string]struct{}
+	open         []string
 }
 
 func (g *emitGrouper) add(e model.FileEntry) {
 	g.closeOutside(e.RelPath)
 	parent := parentDir(e.RelPath)
+	if g.lateChildren && parent != "" && (len(g.open) == 0 || g.open[len(g.open)-1] != parent) {
+		g.push(parent)
+	}
 	if !g.have || parent != g.current {
 		g.flush()
 		g.current, g.have = parent, true
 	}
 	g.batch = append(g.batch, e)
-	if e.IsDir {
-		g.dirs = append(g.dirs, e.RelPath)
-		g.open = append(g.open, e.RelPath)
+	if !e.IsDir {
+		return
+	}
+	if g.dirs == nil {
+		g.dirs = make(map[string]struct{})
+	}
+	g.dirs[e.RelPath] = struct{}{}
+	if !g.lateChildren {
+		g.push(e.RelPath)
+	}
+}
+
+func (g *emitGrouper) push(dir string) {
+	if g.complete != nil {
+		g.open = append(g.open, dir)
 	}
 }
 
 // closeOutside completes every open dir that rel is not under; "" closes all.
 func (g *emitGrouper) closeOutside(rel string) {
-	if g.complete == nil {
-		return
-	}
 	for len(g.open) > 0 {
 		d := g.open[len(g.open)-1]
 		if strings.HasPrefix(rel, d+"/") {
@@ -253,6 +269,7 @@ func (g *emitGrouper) closeOutside(rel string) {
 		}
 		g.flush()
 		g.complete(d)
+		delete(g.dirs, d)
 		g.open = g.open[:len(g.open)-1]
 	}
 }
@@ -267,11 +284,12 @@ func (g *emitGrouper) flush() {
 
 func (g *emitGrouper) finish() {
 	g.flush()
-	if g.complete != nil {
-		g.closeOutside("")
-		return
-	}
-	for _, d := range g.dirs {
+	g.closeOutside("")
+	for d := range g.dirs {
+		if g.complete != nil {
+			g.complete(d)
+			continue
+		}
 		g.emit(d, nil)
 	}
 }

@@ -64,8 +64,9 @@ func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) er
 	return nil
 }
 
-func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), _ func(string)) error {
-	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict())
+func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+	add, finish := fileListStream(scope, emit, complete)
+	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict(), rsyncclient.WithFileListCallback(add))
 	if err != nil {
 		return err
 	}
@@ -78,13 +79,13 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 	if err != nil {
 		return err
 	}
-	emitFileList(scope, result.FileList, emit)
+	finish()
 	Log.Add(b.proto, DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }
 
 // runPooled is runRsync on a pooled connection, for data transfers.
-func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
+func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) (*rsyncclient.Result, error) {
 	conn, release := b.pool.acquire()
 	defer release()
 	return b.runRsync(ctx, label, conn, client, remote, local, wrap)
@@ -93,7 +94,7 @@ func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *r
 // runRsync starts the remote rsync server for remote over a fresh session on
 // conn and drives client against it; wrap may decorate the stream to credit
 // progress.
-func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriter) io.ReadWriter) (*rsyncclient.Result, error) {
+func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) (*rsyncclient.Result, error) {
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remote))
 	Log.Add(b.proto, DirOut, label+" "+serverCmd)
 	session, err := conn.NewSession()
@@ -114,7 +115,7 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.
 		Log.Add(b.proto, DirErr, err.Error())
 		return nil, err
 	}
-	var rw io.ReadWriter = &sessionRW{r: stdout, w: stdin}
+	var rw io.ReadWriteCloser = &sessionRW{r: stdout, w: stdin}
 	if wrap != nil {
 		rw = wrap(rw)
 	}
@@ -133,13 +134,16 @@ func (b *RsyncSSHBackend) buildServerCmd(args []string) string {
 	return "rsync " + strings.Join(quoted, " ")
 }
 
+// sessionRW is the rsync wire over one SSH session; Close ends the server's
+// stdin, the session itself is closed by runRsync.
 type sessionRW struct {
 	r io.Reader
-	w io.Writer
+	w io.WriteCloser
 }
 
 func (s *sessionRW) Read(p []byte) (int, error)  { return s.r.Read(p) }
 func (s *sessionRW) Write(p []byte) (int, error) { return s.w.Write(p) }
+func (s *sessionRW) Close() error                { return s.w.Close() }
 
 func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	if b.cksumAlgo == "md4" {
@@ -209,7 +213,7 @@ func (b *RsyncSSHBackend) invalidateAfterTreeSend(relPath string) {
 }
 
 func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	return rsyncOpenViaTemp(ctx, relPath, func(dstDir string) error {
+	return rsyncOpenViaTemp(ctx, relPath, 0, func(dstDir string) error {
 		client, err := newRsyncClient(transferFlags())
 		if err != nil {
 			return err
@@ -253,7 +257,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	if err != nil {
 		return err
 	}
-	var wrap func(io.ReadWriter) io.ReadWriter
+	var wrap func(io.ReadWriteCloser) io.ReadWriteCloser
 	if counter := progressFromContext(ctx); counter != nil {
 		wrap = countingRW(NewCappedAdder(counter, 1<<62))
 	}
@@ -308,7 +312,11 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	if err != nil {
 		return err
 	}
-	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
+	res, err := b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
+	if err == nil && appendVerify(extraFlags) && res.XferErrors > 0 {
+		err = fmt.Errorf("%s: %d transfer error(s)", label, res.XferErrors)
+		Log.Add(b.proto, DirErr, err.Error())
+	}
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	settlePush(ctx, adder, budget, err)
@@ -327,10 +335,12 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 	return b.sendFile(ctx, "SEND "+srcPath+" via", srcPath, relPath, "", nil, adder, fileSize)
 }
 
-// AppendFrom resumes a partial upload with rsync --append: the remote inspects
-// its dst size and only the missing tail is sent. The dst is first sized to
-// offset so a remote that shrank between the size probe and the upload cannot
-// leave a hole. A source without a local path is spooled to a tmpfile.
+// AppendFrom resumes a partial upload with rsync --append-verify: the remote
+// inspects its dst size, only the missing tail is sent, and the remote
+// checks the whole file against the sender's sum so a differing prefix fails
+// the append. The dst is first sized to offset so a remote that shrank
+// between the size probe and the upload cannot leave a hole. A source without
+// a local path is spooled to a tmpfile.
 func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	srcPath := src.LocalPath()
 	if srcPath == "" {
@@ -350,7 +360,7 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src mo
 		adder = NewCappedAdder(counter, tailSize)
 	}
 	label := fmt.Sprintf("APPEND %s @%d/%d via", relPath, offset, src.Size())
-	return b.sendFile(ctx, label, srcPath, relPath, truncateCmd(b.abs(relPath), offset), []string{"--append"}, adder, tailSize)
+	return b.sendFile(ctx, label, srcPath, relPath, truncateCmd(b.abs(relPath), offset), []string{"--append-verify"}, adder, tailSize)
 }
 
 func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {

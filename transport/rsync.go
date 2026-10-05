@@ -108,7 +108,7 @@ func (b *RsyncBackend) remoteURL(relPath string) string {
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
 	var stdout bytes.Buffer
-	if err := b.rsyncRunStdout(ctx, &stdout, args...); err != nil {
+	if err := b.rsyncRunStdout(ctx, &stdout, false, args...); err != nil {
 		return "", err
 	}
 	return stdout.String(), nil
@@ -116,13 +116,18 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 
 // rsyncRunStdout invokes rsync with stdout routed through w. Used by transfer
 // paths that pass --progress to credit byte progress via rsyncProgressWriter.
-func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...string) error {
+// strict fails the run when the daemon reported per-file errors, which rsync
+// itself only turns into exit code 23 after finishing.
+func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, strict bool, args ...string) error {
 	cmd := rsynccmd.Command("rsync", args...)
 	cmd.DialContext = dialLimited
 	var stderr bytes.Buffer
-	cmd.Stdout = w
-	cmd.Stderr = &stderr
-	_, err := cmd.Run(ctx)
+	cmd.Stdout = nopWriteCloser{w}
+	cmd.Stderr = nopWriteCloser{&stderr}
+	res, err := cmd.Run(ctx)
+	if err == nil && strict && res.XferErrors > 0 {
+		err = fmt.Errorf("rsync: %d transfer error(s)", res.XferErrors)
+	}
 	if err == nil {
 		return nil
 	}
@@ -154,13 +159,18 @@ func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
 // runDaemon dials the daemon and runs client's dry run against remotePath,
 // returning the file list. The handshake is sc's own (see daemonHandshake),
 // so the credentials never touch process-wide state.
-func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string) (*rsyncclient.Result, error) {
+func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
 	dst, err := os.MkdirTemp("", "rsync-daemon-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(dst)
-	client, err := newRsyncClient(flags, rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict())
+	return b.runDaemonTo(ctx, label, flags, remotePath, dst+"/", opts...)
+}
+
+// runDaemonTo runs client against remotePath, receiving into local.
+func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []string, remotePath, local string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
+	client, err := newRsyncClient(flags, append([]rsyncclient.Option{rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict()}, opts...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +184,7 @@ func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []stri
 	result := &rsyncclient.Result{}
 	done, err := b.daemonHandshake(ctx, conn, client, remotePath)
 	if err == nil && !done {
-		result, err = client.Run(ctx, conn, []string{dst + "/"})
+		result, err = client.Run(ctx, conn, []string{local})
 	}
 	if err != nil {
 		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
@@ -237,12 +247,13 @@ func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error
 	return nil
 }
 
-func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), _ func(string)) error {
-	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, b.modulePath(scope, true))
+func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+	add, finish := fileListStream(scope, emit, complete)
+	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, b.modulePath(scope, true), rsyncclient.WithFileListCallback(add))
 	if err != nil {
 		return err
 	}
-	emitFileList(scope, result.FileList, emit)
+	finish()
 	Log.Add("rsync", DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }
@@ -310,17 +321,18 @@ func stageUploadPath(tmpDir, relPath string) (stageTop, leaf string, err error) 
 	return filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0]), leaf, nil
 }
 
-// push runs one recursive send of src to dest, crediting adder from the
-// --progress output and settling it against budget afterwards.
-func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder *CappedAdder, budget int64) error {
-	args := b.transferArgs("-r")
+// push runs one send of src to dest with extra flags, crediting adder from
+// the --progress offsets above start and settling it against budget
+// afterwards.
+func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder *CappedAdder, budget, start int64, extra ...string) error {
+	args := b.transferArgs(extra...)
 	var stdout io.Writer = io.Discard
 	if adder != nil {
-		stdout = &rsyncProgressWriter{adder: adder}
+		stdout = &rsyncProgressWriter{adder: adder, last: start}
 		args = append(args, "--progress")
 	}
 	Log.Add("rsync", DirOut, label+" ["+strings.Join(args, " ")+"]")
-	err := b.rsyncRunStdout(ctx, stdout, append(args, src, dest)...)
+	err := b.rsyncRunStdout(ctx, stdout, appendVerify(extra), append(args, src, dest)...)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
 	}
@@ -350,7 +362,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	if counter := progressFromContext(ctx); counter != nil && fileSize > 0 {
 		adder = NewCappedAdder(counter, fileSize)
 	}
-	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest, adder, fileSize)
+	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest, adder, fileSize, 0, "-r")
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	return err
@@ -384,7 +396,43 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err != nil {
 		return err
 	}
-	err = b.push(ctx, "SEND "+relPath, stageTop, b.remoteURL("")+"/", pushAdder, pushBudget)
+	err = b.push(ctx, "SEND "+relPath, stageTop, b.remoteURL("")+"/", pushAdder, pushBudget, 0, "-r")
+	b.listCache.invalidateAncestors(relPath)
+	b.md4.invalidate(relPath)
+	return err
+}
+
+// AppendFrom resumes a partial upload with --append-verify: the daemon
+// reports the size it holds, only the tail is sent, into the parent that the
+// partial proves exists, and the daemon checks the whole file against the
+// sender's sum so a prefix that differs fails the append instead of being
+// kept. A local source already carrying the destination name is sent from
+// its own path, anything else is hardlinked or spooled under that name first.
+// Progress covers the tail only; the engine has credited the prefix.
+func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+	name := path.Base(relPath)
+	srcPath := src.LocalPath()
+	if srcPath == "" || filepath.Base(srcPath) != name {
+		tmpDir, err := os.MkdirTemp("", "rsync-append-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmpDir)
+		staged := filepath.Join(tmpDir, name)
+		if srcPath == "" || os.Link(srcPath, staged) != nil {
+			if err := spoolTo(ctx, src, staged, mode); err != nil {
+				return err
+			}
+		}
+		srcPath = staged
+	}
+	tailSize := src.Size() - offset
+	var adder *CappedAdder
+	if counter := progressFromContext(ctx); counter != nil && tailSize > 0 {
+		adder = NewCappedAdder(counter, tailSize)
+	}
+	label := fmt.Sprintf("APPEND %s @%d/%d", relPath, offset, src.Size())
+	err := b.push(ctx, label, srcPath, b.remoteURL(parentDir(relPath))+"/", adder, tailSize, offset, "--append-verify")
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	return err
@@ -475,7 +523,23 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 }
 
 func (b *RsyncBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	return rsyncOpenViaTemp(ctx, relPath, func(dstDir string) error {
+	return b.openAt(ctx, relPath, 0)
+}
+
+// OpenAt resumes a download: --append against a sparse placeholder of
+// offset bytes makes the daemon send only the tail. The daemon's file sum
+// covers the real prefix, which the placeholder does not hold, so the
+// receive is unverified; the engine checksums the resumed file afterwards.
+func (b *RsyncBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	return b.openAt(ctx, relPath, offset)
+}
+
+func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
+		if offset > 0 {
+			_, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), b.modulePath(relPath, false), dstDir, rsyncclient.WithUnverifiedAppend())
+			return err
+		}
 		args := b.transferArgs(b.remoteURL(relPath), dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath)
 		_, err := b.rsyncRun(ctx, args...)

@@ -1,15 +1,21 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"sc/model"
 )
 
 func startRsyncDaemon(t *testing.T) (port int, moduleDir string) {
@@ -252,5 +258,79 @@ func TestRsyncDaemonPerBackendAuth(t *testing.T) {
 	}
 	if got := names(open("bob", "pb", "moda")); !strings.Contains(got, "auth failed") {
 		t.Fatalf("bob on alice's module lists %q, want an auth failure", got)
+	}
+}
+
+// memRangeOpener is a source with no local path, forcing the spool branch.
+type memRangeOpener []byte
+
+func (m memRangeOpener) Size() int64       { return int64(len(m)) }
+func (m memRangeOpener) LocalPath() string { return "" }
+func (m memRangeOpener) Open(context.Context) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m)), nil
+}
+func (m memRangeOpener) OpenAt(_ context.Context, off int64) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m[off:])), nil
+}
+
+// A partial upload left on the daemon is completed with --append from a local
+// file sent as is, a local file under another name, and a spooled stream; the
+// progress counter must see the tail only.
+func TestRsyncAppendFrom(t *testing.T) {
+	port, moduleDir := startRsyncDaemon(t)
+	b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, 3<<20)
+	rand.Read(body)
+	size := int64(len(body))
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "big.bin"), body, 0644); err != nil {
+		t.Fatal(err)
+	}
+	local := &model.BackendRangeOpener{Backend: NewLocalBackend(srcDir), RelPath: "big.bin", FileSize: size}
+	cases := []struct {
+		name, rel string
+		src       model.RangeOpener
+	}{
+		{"local", "deep/er/big.bin", local},
+		{"renamed", "deep/er/other.bin", local},
+		{"spooled", "spool/big.bin", memRangeOpener(body)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(moduleDir, tc.rel)
+			offset := size/2 + 4099
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dst, body[:offset], 0644); err != nil {
+				t.Fatal(err)
+			}
+			var counter atomic.Int64
+			ctx := ContextWithProgress(ContextWithFileSize(context.Background(), size), &counter)
+			if err := b.AppendFrom(ctx, tc.rel, tc.src, 0644, offset); err != nil {
+				t.Fatalf("AppendFrom: %v", err)
+			}
+			got, err := os.ReadFile(dst)
+			if err != nil || !bytes.Equal(got, body) {
+				t.Fatalf("dst has %d bytes, identical=%v, want %d identical (err %v)", len(got), bytes.Equal(got, body), size, err)
+			}
+			if c := counter.Load(); c != size-offset {
+				t.Fatalf("progress credited %d bytes, want tail %d", c, size-offset)
+			}
+		})
+	}
+}
+
+// Append pushes print absolute offsets that start at the prefix; only growth
+// above start is credited, capped at the tail.
+func TestRsyncProgressWriterStart(t *testing.T) {
+	var counter atomic.Int64
+	w := &rsyncProgressWriter{adder: NewCappedAdder(&counter, 1000), last: 500}
+	w.Write([]byte("big.bin\n     600  40%  1.00MB/s    0:00:01\r     900  90%\r    1500 100%\n"))
+	if got := counter.Load(); got != 1000 {
+		t.Fatalf("credited %d, want 1000", got)
 	}
 }

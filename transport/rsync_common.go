@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,18 +48,30 @@ func md4ListFlags(recursive bool) []string {
 // newRsyncClient builds an in-process rsync client with its console output
 // silenced; the library would otherwise write into the TUI.
 func newRsyncClient(flags []string, opts ...rsyncclient.Option) (*rsyncclient.Client, error) {
-	base := []rsyncclient.Option{rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(io.Discard)}
+	base := []rsyncclient.Option{rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(nopWriteCloser{io.Discard})}
 	return rsyncclient.New(flags, append(base, opts...)...)
 }
 
+// nopWriteCloser lets a plain writer stand in where gorsync wants a closer it
+// never closes.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
 // countingRW wraps a session stream so bytes written credit adder; nil when
 // there is no progress to report.
-func countingRW(adder *CappedAdder) func(io.ReadWriter) io.ReadWriter {
+func countingRW(adder *CappedAdder) func(io.ReadWriteCloser) io.ReadWriteCloser {
 	if adder == nil {
 		return nil
 	}
-	return func(rw io.ReadWriter) io.ReadWriter { return &CountingReadWriter{RW: rw, Adder: adder} }
+	return func(rw io.ReadWriteCloser) io.ReadWriteCloser { return &CountingReadWriter{RW: rw, Adder: adder} }
 }
+
+// appendVerify reports whether flags ask the receiver to verify an appended
+// prefix. rsync keeps a failed verification as a per-file error that the
+// run as a whole survives; sc wants it to fail the append so the engine
+// recopies in full, hence the strict check at the call sites.
+func appendVerify(flags []string) bool { return slices.Contains(flags, "--append-verify") }
 
 // md4Cache holds the MD4 sums an rsync file list delivers in bulk. It has no
 // TTL, so every write that changes a file's body must drop its entry.
@@ -173,20 +186,27 @@ func fileListEntries(relDir string, list []rsyncpkg.FileInfo) []model.FileEntry 
 	return entries
 }
 
-// emitFileList feeds a recursive dry-run file list into the list cache.
-func emitFileList(scope string, list []rsyncpkg.FileInfo, emit func(string, []model.FileEntry)) {
-	g := &emitGrouper{emit: emit}
-	for _, fi := range list {
+// fileListStream feeds a recursive dry run into the list cache entry by
+// entry, as the file list arrives. Stock rsync sends each directory's
+// children as one run and descends afterwards, gorsync's sender walks in
+// pre-order; both keep a subtree contiguous, so a dir is complete once an
+// entry outside it arrives, but only its first child (lateChildren) proves
+// the run has begun. add goes to rsyncclient.WithFileListCallback; finish
+// runs after Run returns.
+func fileListStream(scope string, emit func(string, []model.FileEntry), complete func(string)) (add func(rsyncpkg.FileInfo), finish func()) {
+	g := &emitGrouper{emit: emit, complete: complete, lateChildren: true}
+	add = func(fi rsyncpkg.FileInfo) {
 		if e, ok := fileInfoEntry(scope, fi); ok {
 			g.add(e)
 		}
 	}
-	g.finish()
+	return add, g.finish
 }
 
-// tailProgress credits growth of dir/base to the context's progress counter
-// until the returned stop runs. Without a counter it is a no-op.
-func tailProgress(ctx context.Context, dir, base string) func() {
+// tailProgress credits growth of dir/base beyond skip to the context's
+// progress counter until the returned stop runs. Without a counter it is a
+// no-op.
+func tailProgress(ctx context.Context, dir, base string, skip int64) func() {
 	counter := progressFromContext(ctx)
 	if counter == nil {
 		return func() {}
@@ -195,29 +215,57 @@ func tailProgress(ctx context.Context, dir, base string) func() {
 	if !ok || size <= 0 {
 		size = 1 << 62
 	}
+	size = max(size-skip, 0)
 	var baseAdder *CappedAdder
 	if bp := baseProgressFromContext(ctx); bp != nil {
 		baseAdder = NewCappedAdder(bp, size)
 	}
 	stop := make(chan struct{})
-	go tailDirSize(stop, dir, base, NewCappedAdder(counter, size), baseAdder)
+	go tailDirSize(stop, dir, base, NewCappedAdder(counter, size), baseAdder, skip)
 	return func() { close(stop) }
 }
 
 // rsyncOpenViaTemp receives relPath into a fresh temp dir through recv and
-// returns the file, which removes the dir on Close. With a progress counter
-// the reader is marked pre-counted since the tail already credited the body.
-func rsyncOpenViaTemp(ctx context.Context, relPath string, recv func(dstDir string) error) (io.ReadCloser, error) {
+// returns the file from offset on, removing the dir on Close. A non-zero
+// offset plants a sparse placeholder of that size first, so an --append
+// receive fetches only the tail; a source that turned out shorter is an
+// error, the caller then copies in full. With a progress counter the reader
+// is marked pre-counted since the tail already credited the body.
+func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv func(dstDir string) error) (io.ReadCloser, error) {
 	tmpDir, err := os.MkdirTemp("", "rsync-dl-*")
 	if err != nil {
 		return nil, err
 	}
-	stop := tailProgress(ctx, tmpDir, filepath.Base(relPath))
-	err = recv(tmpDir + "/")
-	stop()
+	target := filepath.Join(tmpDir, filepath.Base(relPath))
+	if offset > 0 {
+		err = os.Truncate(target, offset)
+		if errors.Is(err, os.ErrNotExist) {
+			err = os.WriteFile(target, nil, 0o600)
+			if err == nil {
+				err = os.Truncate(target, offset)
+			}
+		}
+	}
+	if err == nil {
+		stop := tailProgress(ctx, tmpDir, filepath.Base(relPath), offset)
+		err = recv(tmpDir + "/")
+		stop()
+	}
 	var f *os.File
 	if err == nil {
-		f, err = os.Open(filepath.Join(tmpDir, filepath.Base(relPath)))
+		f, err = os.Open(target)
+	}
+	if err == nil && offset > 0 {
+		var fi os.FileInfo
+		if fi, err = f.Stat(); err == nil && fi.Size() < offset {
+			err = fmt.Errorf("%s: source is %d bytes, shorter than offset %d", relPath, fi.Size(), offset)
+		}
+		if err == nil {
+			_, err = f.Seek(offset, io.SeekStart)
+		}
+		if err != nil {
+			f.Close()
+		}
 	}
 	if err != nil {
 		os.RemoveAll(tmpDir)
@@ -250,7 +298,7 @@ func rsyncRecvToLocal(ctx context.Context, proto, relPath, dstPath string, recv 
 	if fi, err := os.Stat(dstPath); err == nil && fi.IsDir() {
 		return fmt.Errorf("%s: refuse to receive into existing directory %s", proto, dstPath)
 	}
-	stop := tailProgress(ctx, parent, filepath.Base(dstPath))
+	stop := tailProgress(ctx, parent, filepath.Base(dstPath), 0)
 	err := recv(parent + "/")
 	stop()
 	if err != nil {

@@ -150,10 +150,12 @@ func (c *CappedAdder) Used() int64 {
 // final basename, gorsync's renameio temp prefix (".<basename><random>"), or
 // gorsync's Windows pattern ("temp-rsync-*"), and pushes incremental size
 // deltas to adder. If the destination already has a partial file at start
-// (rsync --inplace --partial resume), its initial size is credited to both
-// adder and base so it shows up in display totals without inflating the
-// transfer-rate calculation. Stop the goroutine by closing stop.
-func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *CappedAdder) {
+// (rsync --inplace --partial resume), its initial size beyond skip is
+// credited to both adder and base so it shows up in display totals without
+// inflating the transfer-rate calculation; skip covers bytes the caller has
+// already accounted for, such as a sparse placeholder prefix. Stop the
+// goroutine by closing stop.
+func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *CappedAdder, skip int64) {
 	if adder == nil {
 		return
 	}
@@ -162,15 +164,13 @@ func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *Capped
 		filepath.Join(dir, "."+basename+"*"),
 		filepath.Join(dir, "temp-rsync-*"),
 	}
-	var last int64
-	if fi, err := os.Stat(finalPath); err == nil {
-		last = fi.Size()
-	}
-	if last > 0 {
-		adder.Add(last)
+	last := skip
+	if fi, err := os.Stat(finalPath); err == nil && fi.Size() > last {
+		adder.Add(fi.Size() - last)
 		if base != nil {
-			base.Add(last)
+			base.Add(fi.Size() - last)
 		}
+		last = fi.Size()
 	}
 	update := func() {
 		var size int64
@@ -217,14 +217,15 @@ func (c *CountingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// CountingReadWriter wraps an io.ReadWriter and reports bytes written through
-// the writer side via a CappedAdder. Reads are passed through unchanged.
+// CountingReadWriter wraps a stream and reports bytes written through the
+// writer side via a CappedAdder. Reads and Close are passed through unchanged.
 type CountingReadWriter struct {
-	RW    io.ReadWriter
+	RW    io.ReadWriteCloser
 	Adder *CappedAdder
 }
 
 func (c *CountingReadWriter) Read(p []byte) (int, error) { return c.RW.Read(p) }
+func (c *CountingReadWriter) Close() error               { return c.RW.Close() }
 func (c *CountingReadWriter) Write(p []byte) (int, error) {
 	n, err := c.RW.Write(p)
 	if n > 0 {
