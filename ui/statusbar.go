@@ -199,10 +199,11 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			}
 			// The rate is right-aligned to its widest form ("1023.9 KB/s") so
 			// the columns hold still while the numbers change.
-			tail := fmt.Sprintf(" %s %s %3d%% %11s", spinOrDot(s.Spinner), progressBar(s.Bytes, s.Size, 10), pct, formatRateOrDash(rate))
-			nameW := max(inner-lipgloss.Width(barIndent)-lipgloss.Width(tail), 8)
+			head := "  " + spinOrDot(s.Spinner) + " "
+			tail := fmt.Sprintf(" %s %3d%% %11s", progressBar(s.Bytes, s.Size, 10), pct, formatRateOrDash(rate))
+			nameW := max(inner-lipgloss.Width(head)-lipgloss.Width(tail), 8)
 			name := truncateName(s.File, nameW)
-			rows = append(rows, barIndent+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
+			rows = append(rows, head+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
 		}
 	}
 
@@ -292,7 +293,7 @@ var styleBar = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("15")).
 	Padding(0, 1)
 
-var partialBlocks = []rune("▏▎▍▌▋▊▉")
+var partialBlocks = []rune("▁▂▃▄▅▆▇")
 
 // progressBar fills the leading cell in eighths, so a huge file's bar keeps
 // visibly creeping between whole-cell steps.

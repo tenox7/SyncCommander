@@ -52,7 +52,7 @@ func TestProgressBarFillsInEighths(t *testing.T) {
 	for _, tc := range []struct {
 		done int64
 		want string
-	}{{0, "░░"}, {1, "▏░"}, {4, "▌░"}, {8, "█░"}, {9, "█▏"}, {16, "██"}, {99, "██"}} {
+	}{{0, "░░"}, {1, "▁░"}, {4, "▄░"}, {8, "█░"}, {9, "█▁"}, {16, "██"}, {99, "██"}} {
 		if got := progressBar(tc.done, 16, 2); got != tc.want {
 			t.Errorf("progressBar(%d, 16, 2) = %q, want %q", tc.done, got, tc.want)
 		}
