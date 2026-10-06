@@ -93,6 +93,8 @@ type CopyPopupData struct {
 	BaseBytes          int64
 	TotalElapsed       time.Duration
 	Spinner            string
+	Speed              []float64 // bytes/sec history, oldest first
+	SpeedPeak          float64
 }
 
 type CopySlotView struct {
@@ -212,6 +214,7 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes),
 			formatRateOrDash(totalRate), formatETA(d.TotalBytes-d.BytesCopied, totalRate)),
 		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(d.BytesCopied, d.TotalBytes, totalBarWidth), totalPct),
+		speedRow(d.Speed, d.SpeedPeak, inner),
 		"X=cancel",
 	)
 

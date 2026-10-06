@@ -37,9 +37,10 @@ func TestStatusBarShowsScanProgress(t *testing.T) {
 
 func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 	d := CopyPopupData{LeftToRight: true, DoneFiles: 1, TotalFiles: 4, BytesCopied: 50, TotalBytes: 200, Parallel: 2,
-		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Elapsed: time.Second, Spinner: "⠹"}}}
+		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Elapsed: time.Second, Spinner: "⠹"}},
+		Speed: []float64{10, 20, 40}, SpeedPeak: 40}
 	s := ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
-	wantAll(t, "copy popup", s, "COPY  1/4 files", "a.bin", "⠹", "25%", "25 B/s")
+	wantAll(t, "copy popup", s, "COPY  1/4 files", "a.bin", "⠹", "25%", "25 B/s", "⣠⡇", "max 40 B/s")
 	if strings.Contains(s, "…") {
 		t.Fatalf("copy popup truncates a row that should fit:\n%s", s)
 	}

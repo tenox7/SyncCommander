@@ -107,6 +107,8 @@ func (m *Model) copyPopup() string {
 		BaseBytes:          baseBytes,
 		TotalElapsed:       elapsedSince(p.Start.Load()),
 		Spinner:            spinnerFrames[m.copySpinFrame],
+		Speed:              m.speed.samples(),
+		SpeedPeak:          m.speed.peak,
 	}, popupWidth(m.width))
 }
 

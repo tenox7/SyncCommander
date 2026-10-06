@@ -47,7 +47,9 @@ type Model struct {
 	spinFrame             int
 	copySpinFrame         int
 	lastCopyBytes         int64
+	lastCopyTick          time.Time
 	slotSpins             map[string]slotSpin
+	speed                 speedHistory
 	tickActive            bool
 
 	settings   *SettingsDialog

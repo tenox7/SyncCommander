@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -51,6 +52,7 @@ func (m *Model) confirmCopy() tea.Cmd {
 
 func (m *Model) runCopy(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd {
 	m.copying = true
+	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
 	return tea.Batch(m.copyNode(node, leftToRight, mirror), m.ensureTick())
 }
 
@@ -72,17 +74,21 @@ type slotSpin struct {
 	frame int
 }
 
-// tickCopy advances the copy spinners only while bytes move, so a stalled
-// transfer shows a frozen spinner.
+// tickCopy samples the transferred bytes for the speed chart and advances the
+// copy spinners only while bytes move, so a stalled transfer shows a frozen
+// spinner. Resumed prefixes don't count as movement.
 func (m *Model) tickCopy() {
 	if !m.copying {
-		m.lastCopyBytes = 0
-		m.slotSpins = nil
 		return
 	}
 	m.copyProgress.SyncTotals()
 	m.tickSlotSpins()
-	cur := m.copyProgress.Bytes.Load()
+	cur := m.copyProgress.Bytes.Load() - m.copyProgress.BaseBytes.Load()
+	now := time.Now()
+	if !m.lastCopyTick.IsZero() {
+		m.speed.add(max(cur-m.lastCopyBytes, 0), now.Sub(m.lastCopyTick))
+	}
+	m.lastCopyTick = now
 	if cur == m.lastCopyBytes {
 		return
 	}
