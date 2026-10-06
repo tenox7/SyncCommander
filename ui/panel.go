@@ -428,6 +428,19 @@ func (p *Panel) jumpTo(node *model.TreeNode) {
 	}
 }
 
+// onArrow reports whether column x of row i is on the row's guides, its arrow
+// or the marker after it. Runs under readTree.
+func (p *Panel) onArrow(i, x int) bool {
+	r := p.rows[i]
+	if r.Attr != nil || p.isHidden(r.Node) {
+		return false
+	}
+	if p.side == model.SideRight {
+		x-- // eqPrefix
+	}
+	return x <= r.Node.Depth+1
+}
+
 // Collapse folds the cursor directory or, from inside one, jumps to the
 // enclosing directory and folds that. Runs under mutateTree.
 func (p *Panel) Collapse() bool {

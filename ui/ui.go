@@ -43,6 +43,7 @@ type Model struct {
 
 	leftPanel, rightPanel *Panel
 	activeLeft            bool
+	lastSelect            time.Time // last click that only moved the cursor, for double-click
 	width, height         int
 	spinFrame             int
 	copySpinFrame         int
@@ -147,6 +148,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.layoutPanels()

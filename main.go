@@ -47,6 +47,7 @@ func main() {
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	verifyResume := flag.Bool("verify-resume", true, "checksum-verify a resumed (appended) copy; on mismatch recopy the file in full")
+	mouse := flag.Bool("mouse", true, "mouse support (false: leave text selection to the terminal)")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address, unauthenticated: keep it on localhost (e.g. localhost:6060)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
@@ -137,7 +138,11 @@ func main() {
 	defer transport.CloseBackend(left)
 	defer transport.CloseBackend(right)
 	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
-	if _, err := tea.NewProgram(mdl, tea.WithAltScreen()).Run(); err != nil {
+	progOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if *mouse {
+		progOpts = append(progOpts, tea.WithMouseCellMotion())
+	}
+	if _, err := tea.NewProgram(mdl, progOpts...).Run(); err != nil {
 		fail(err)
 	}
 }

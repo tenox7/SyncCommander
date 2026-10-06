@@ -16,6 +16,7 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Remote checksum calculation via variety of protocols.
 - Parallel copies.
 - Batch copies for small files.
+- Mouse: wheel moves the cursor, click selects, double-click or a click on the arrow expands/collapses; `-mouse=false` to disable.
 
 ## Bandwidth limit
 
