@@ -186,7 +186,7 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		return nil
 	}
 	if err := verify(ctx, offset); err != nil {
-		transport.Log.Add("copy", transport.DirErr, err.Error()+", recopying in full")
+		transport.Log.Add("copy", transport.DirWarn, err.Error()+", recopying in full")
 		rollback()
 		return err
 	}

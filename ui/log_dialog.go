@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +24,8 @@ type LogDialog struct {
 	lastSeenFatal int
 	closedAt      time.Time
 	spinner       string
+	status        string
+	statusAt      time.Time
 }
 
 func NewLogDialog() *LogDialog {
@@ -79,6 +83,32 @@ func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 	d.lastSeenErrs = errCount
 	d.visible = true
 	d.follow = true
+}
+
+// Export writes the whole log (every retained line, ignoring the errors-only
+// filter) to a timestamped file in the working directory and reports the
+// result in the dialog's status line.
+func (d *LogDialog) Export() {
+	name := fmt.Sprintf("sc-log-%s.log", time.Now().Format("20060102-150405"))
+	lines := transport.Log.Lines()
+	data := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		data += "\n"
+	}
+	if err := os.WriteFile(name, []byte(data), 0o644); err != nil {
+		d.setStatus("export failed: " + err.Error())
+		return
+	}
+	where := name
+	if abs, err := filepath.Abs(name); err == nil {
+		where = abs
+	}
+	d.setStatus(fmt.Sprintf("saved %d lines to %s", len(lines), where))
+}
+
+func (d *LogDialog) setStatus(s string) {
+	d.status = s
+	d.statusAt = time.Now()
 }
 
 func (d *LogDialog) IsOpen() bool { return d.visible }
@@ -148,7 +178,11 @@ func (d *LogDialog) View(width, height int) string {
 	}
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  Esc=close"))
+	if d.status != "" && time.Since(d.statusAt) < 10*time.Second {
+		sb.WriteString(titleStyle.Render(ansi.Truncate(d.status, contentWidth, "")))
+	} else {
+		sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  s=save  Esc=close"))
+	}
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

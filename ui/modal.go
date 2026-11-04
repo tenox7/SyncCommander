@@ -67,6 +67,8 @@ func handleLogKey(d *LogDialog, msg tea.KeyMsg) {
 		d.End()
 	case "e":
 		d.ToggleErrFilter()
+	case "s":
+		d.Export()
 	}
 }
 
