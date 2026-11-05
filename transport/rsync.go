@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -35,6 +36,7 @@ type RsyncBackend struct {
 	cksumAlgo   string
 	md4         md4Cache
 	listCache   *listCache
+	sentMtime   sync.Map // mtime each upload sent with -t, see SetTimes
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -293,8 +295,23 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 	return got, nil
 }
 
-func (b *RsyncBackend) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
+// SetTimes cannot set times by itself: the daemon protocol carries them only
+// with file data. Every upload sends the mtime with -t, so a SetTimes for the
+// time an upload just sent is already done, to the second as protocol 27
+// sends it.
+func (b *RsyncBackend) SetTimes(_ context.Context, relPath string, mtime, _, _ time.Time) error {
+	if sent, ok := b.sentMtime.LoadAndDelete(relPath); ok && sent.(time.Time).Unix() == mtime.Unix() {
+		return nil
+	}
 	return errors.New("rsync: set times not supported")
+}
+
+// noteSent remembers the mtime an upload of relPath just sent with -t, read
+// from the local file it pushed.
+func (b *RsyncBackend) noteSent(relPath, localPath string) {
+	if fi, err := os.Stat(localPath); err == nil {
+		b.sentMtime.Store(relPath, fi.ModTime())
+	}
 }
 
 // transferArgs are the flags for one data-moving call plus extra.
@@ -363,6 +380,9 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 		adder = NewCappedAdder(counter, fileSize)
 	}
 	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest, adder, fileSize, 0, "-r")
+	if err == nil {
+		b.noteSent(relPath, srcPath)
+	}
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	return err
@@ -397,6 +417,9 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		return err
 	}
 	err = b.push(ctx, "SEND "+relPath, stageTop, b.remoteURL("")+"/", pushAdder, pushBudget, 0, "-r")
+	if err == nil {
+		b.noteSent(relPath, tmpFile)
+	}
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	return err
@@ -433,6 +456,9 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 	}
 	label := fmt.Sprintf("APPEND %s @%d/%d", relPath, offset, src.Size())
 	err := b.push(ctx, label, srcPath, b.remoteURL(parentDir(relPath))+"/", adder, tailSize, offset, "--append-verify")
+	if err == nil {
+		b.noteSent(relPath, srcPath)
+	}
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	return err

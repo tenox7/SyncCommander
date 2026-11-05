@@ -343,6 +343,9 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		err = stampModTime(ctx, tmpFile)
+	}
 	if err != nil {
 		if readAdder != nil {
 			counter.Add(-readAdder.Used())
@@ -367,7 +370,20 @@ func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.Fi
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		err = stampModTime(ctx, path)
+	}
 	return err
+}
+
+// stampModTime gives a staged upload the source's mtime, so -t sends that
+// instead of the moment it was staged.
+func stampModTime(ctx context.Context, file string) error {
+	mtime, ok := modTimeFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	return os.Chtimes(file, mtime, mtime)
 }
 
 // settlePush reconciles the push-phase credit: rolled back on error, topped

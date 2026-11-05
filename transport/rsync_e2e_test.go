@@ -324,6 +324,47 @@ func TestRsyncAppendFrom(t *testing.T) {
 	}
 }
 
+// Uploads send the source mtime with -t, from a staged copy too, so the
+// SetTimes the copy engine makes afterwards is already done. Any other
+// SetTimes still fails: the daemon protocol cannot set times by itself.
+func TestRsyncUploadSendsSourceMtime(t *testing.T) {
+	port, moduleDir := startRsyncDaemon(t)
+	b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	ctx := ContextWithModTime(context.Background(), mtime)
+	local := filepath.Join(t.TempDir(), "local.txt")
+	if err := os.WriteFile(local, []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(local, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SendLocalFile(ctx, local, "up/local.txt", 0644); err != nil {
+		t.Fatalf("SendLocalFile: %v", err)
+	}
+	if err := b.CopyFrom(ctx, "up/streamed.txt", strings.NewReader("streamed"), 0644); err != nil {
+		t.Fatalf("CopyFrom: %v", err)
+	}
+	for _, rel := range []string{"up/local.txt", "up/streamed.txt"} {
+		fi, err := os.Stat(filepath.Join(moduleDir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.ModTime().Equal(mtime) {
+			t.Errorf("%s: remote mtime %v, want the source's %v", rel, fi.ModTime(), mtime)
+		}
+		if err := b.SetTimes(ctx, rel, mtime, time.Time{}, time.Time{}); err != nil {
+			t.Errorf("SetTimes after uploading %s: %v", rel, err)
+		}
+	}
+	if err := b.SetTimes(ctx, "up/local.txt", mtime.Add(time.Hour), time.Time{}, time.Time{}); err == nil {
+		t.Error("SetTimes to a time no upload sent succeeded")
+	}
+}
+
 // Append pushes print absolute offsets that start at the prefix; only growth
 // above start is credited, capped at the tail.
 func TestRsyncProgressWriterStart(t *testing.T) {
