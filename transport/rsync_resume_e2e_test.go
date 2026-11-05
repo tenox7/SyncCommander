@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -115,37 +116,48 @@ func TestRsyncOpenAt(t *testing.T) {
 	}
 }
 
-// --append-verify makes the daemon check the bytes it already holds: a
-// prefix that differs from the source fails the append, so the engine
-// recopies in full instead of keeping a file that merely has the right size.
-func TestRsyncAppendVerifyRejectsCorruptPrefix(t *testing.T) {
-	port, moduleDir := startRsyncDaemon(t)
-	b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := make([]byte, 1<<20)
-	rand.Read(body)
-	size := int64(len(body))
-	srcDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(srcDir, "big.bin"), body, 0644); err != nil {
-		t.Fatal(err)
-	}
-	src := &model.BackendRangeOpener{Backend: NewLocalBackend(srcDir), RelPath: "big.bin", FileSize: size}
-	offset := size/2 + 4099
-	corrupt := slices.Clone(body[:offset])
-	corrupt[offset/2] ^= 0xff
-	dst := filepath.Join(moduleDir, "v", "big.bin")
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dst, corrupt, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.AppendFrom(context.Background(), "v/big.bin", src, 0644, offset); err == nil {
-		t.Fatal("append onto a corrupt prefix reported success")
-	}
-	if got, _ := os.ReadFile(dst); bytes.Equal(got, body) {
-		t.Fatal("daemon file equals the source although the prefix was corrupt")
+// --append-verify makes the daemon check the bytes it already holds. A
+// shorter destination can be an older version rather than a cut-off upload:
+// its prefix fails the check, and rsync's redo pass resends the whole file in
+// the same run, so the daemon ends up with the source and nothing is logged
+// as an error. Checksum mode ("rsync") adds -c to the transfer.
+func TestRsyncAppendVerifyHealsChangedPrefix(t *testing.T) {
+	for _, algo := range []string{"", "rsync"} {
+		t.Run(cmp.Or(algo, "default"), func(t *testing.T) {
+			port, moduleDir := startRsyncDaemon(t)
+			b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.SetChecksumAlgo(algo)
+			body := make([]byte, 1<<20)
+			rand.Read(body)
+			size := int64(len(body))
+			srcDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(srcDir, "big.bin"), body, 0644); err != nil {
+				t.Fatal(err)
+			}
+			src := &model.BackendRangeOpener{Backend: NewLocalBackend(srcDir), RelPath: "big.bin", FileSize: size}
+			offset := size/2 + 4099
+			corrupt := slices.Clone(body[:offset])
+			corrupt[offset/2] ^= 0xff
+			dst := filepath.Join(moduleDir, "v", "big.bin")
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dst, corrupt, 0644); err != nil {
+				t.Fatal(err)
+			}
+			errs := Log.ErrCount()
+			if err := b.AppendFrom(context.Background(), "v/big.bin", src, 0644, offset); err != nil {
+				t.Fatalf("append onto a changed prefix: %v", err)
+			}
+			if got, _ := os.ReadFile(dst); !bytes.Equal(got, body) {
+				t.Fatal("daemon file differs from the source after the redo pass")
+			}
+			if n := Log.ErrCount() - errs; n > 0 {
+				t.Fatalf("%d error(s) logged for a file the redo pass healed", n)
+			}
+		})
 	}
 }

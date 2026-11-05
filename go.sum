@@ -510,8 +510,8 @@ github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUm
 github.com/t3rm1n4l/go-mega v0.0.0-20260717075258-c6acd6a5bd04 h1:s30A8dMuZ55lUOi5xUTh1hlfLqHpVBsRMfpk2iKCayk=
 github.com/t3rm1n4l/go-mega v0.0.0-20260717075258-c6acd6a5bd04/go.mod h1:BF/l2jNyK+2h/BJZ7VLMAz6m/IWjA2F67gTjV1C/+Bo=
 github.com/tailscale/depaware v0.0.0-20210622194025-720c4b409502/go.mod h1:p9lPsd+cx33L3H9nNoecRRxPssFKUwwI50I3pZ0yT+8=
-github.com/tenox7/gorsync v0.0.0-20261105095050-981d813c5772 h1:GoSceM8hjXUmrkXeDDBfk2u02ZKeEB5Ium1JZdtgkmU=
-github.com/tenox7/gorsync v0.0.0-20261105095050-981d813c5772/go.mod h1:7O8VPeK1P7vqJp11yhfI3j8dbCR/As5flK52hLJ7yJ0=
+github.com/tenox7/gorsync v0.0.0-20261105204420-081a67864074 h1:lXcOPrhxHd+fXGuAxcgIIV1bYq98fvHjBf7d3DMKsl0=
+github.com/tenox7/gorsync v0.0.0-20261105204420-081a67864074/go.mod h1:7O8VPeK1P7vqJp11yhfI3j8dbCR/As5flK52hLJ7yJ0=
 github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRUgPQU=
 github.com/tklauser/go-sysconf v0.4.0/go.mod h1:8mTNWyog7H+MpKijp4VmKJAd2bbYQ2zuUwkYRbUArPI=
 github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqob4=
