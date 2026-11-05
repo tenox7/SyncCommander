@@ -3,7 +3,24 @@ package ui
 import (
 	"context"
 	"testing"
+
+	"sc/transport"
 )
+
+// An error logged as a scan ends, such as a refused connection after the last
+// retry, must open the log: the tick loop has already stopped by then.
+func TestScanEndOpensLogOnNewError(t *testing.T) {
+	src := openBackendOrSkip(t, "fake://tiny")
+	m := newTestModel(t, src, src)
+	// One error the dialog has not shown yet, without adding to the shared
+	// log that other tests' models read.
+	m.logView.lastSeenErrs = transport.Log.ErrCount() - 1
+	_ = m.startOp(opScan, func(context.Context) {})
+	m.Update(opDoneMsg{kind: opScan, gen: m.scan.gen})
+	if !m.logView.IsOpen() {
+		t.Fatal("scan ended with a new error but the log stayed closed")
+	}
+}
 
 // A done message from a cancelled predecessor must not clear the flag that
 // keeps the tick loop alive for the current operation.

@@ -55,7 +55,9 @@ func (m *Model) startOp(kind opKind, run func(ctx context.Context)) tea.Cmd {
 }
 
 // finishOp clears the op a done message belongs to and ignores messages from
-// cancelled predecessors. A rescan queued behind the scan starts now.
+// cancelled predecessors. Errors the op logged as it ended open the log here:
+// the tick loop stops with the op, so it never sees them. A rescan queued
+// behind the scan starts now.
 func (m *Model) finishOp(msg opDoneMsg) tea.Cmd {
 	slot := &m.scan
 	if msg.kind == opChecksum {
@@ -67,6 +69,7 @@ func (m *Model) finishOp(msg opDoneMsg) tea.Cmd {
 	(*slot).cancel()
 	*slot = nil
 	m.refreshTreeNow()
+	m.autoOpenLog()
 	if msg.kind == opScan && m.pendingRescan != nil {
 		r := m.pendingRescan
 		m.pendingRescan = nil

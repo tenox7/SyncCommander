@@ -161,6 +161,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.finishRename(msg)
 	case touchDoneMsg:
 		m.refreshTreeNow()
+		m.autoOpenLog()
 	case deleteDoneMsg:
 		m.finishDelete()
 	case copyDoneMsg:
