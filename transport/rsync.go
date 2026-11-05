@@ -537,8 +537,25 @@ func (b *RsyncBackend) OpenAt(ctx context.Context, relPath string, offset int64)
 func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
 		if offset > 0 {
-			_, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), b.modulePath(relPath, false), dstDir, rsyncclient.WithUnverifiedAppend())
-			return err
+			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), b.modulePath(relPath, false), dstDir, rsyncclient.WithUnverifiedAppend())
+			if err != nil {
+				return err
+			}
+			// The placeholder already holds offset bytes, so a source the
+			// daemon could not send leaves it in place and the run ends
+			// without an error: only the per-file error count shows it.
+			if res.XferErrors > 0 {
+				return fmt.Errorf("%s: %d transfer error(s)", relPath, res.XferErrors)
+			}
+			// --append also leaves the placeholder alone when the source is
+			// not longer than it, as rsync does, so a source shorter than
+			// offset shows only in the file list.
+			for _, fi := range res.FileList {
+				if fi.Length < offset {
+					return fmt.Errorf("%s: source is %d bytes, shorter than offset %d", relPath, fi.Length, offset)
+				}
+			}
+			return nil
 		}
 		args := b.transferArgs(b.remoteURL(relPath), dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath)

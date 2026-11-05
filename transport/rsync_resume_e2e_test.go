@@ -99,6 +99,20 @@ func TestRsyncOpenAt(t *testing.T) {
 	if _, err := b.OpenAt(context.Background(), "dl/big.bin", size+10); err == nil {
 		t.Fatal("OpenAt past the end of the source succeeded")
 	}
+	// The daemon reports a source it cannot send as a per-file error only.
+	// The placeholder then stays in place, and an empty tail would leave the
+	// destination truncated and marked complete.
+	if _, err := b.OpenAt(context.Background(), "dl/vanished.bin", 10); err == nil {
+		t.Fatal("OpenAt of a missing source succeeded")
+	}
+	if os.Getuid() > 0 { // root reads mode 000 files; Windows has no uid
+		if err := os.WriteFile(filepath.Join(moduleDir, "dl", "noread.bin"), body, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.OpenAt(context.Background(), "dl/noread.bin", 10); err == nil {
+			t.Fatal("OpenAt of an unreadable source succeeded")
+		}
+	}
 }
 
 // --append-verify makes the daemon check the bytes it already holds: a
