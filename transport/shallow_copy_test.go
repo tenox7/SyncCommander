@@ -47,7 +47,7 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 	}
 	opts := &model.CompareOpts{Size: true, ModTime: true}
 
-	if got := len(model.CollectCopyFiles(node, opts, true)); got != 0 {
+	if got := len(model.CollectCopyFiles(node, opts, true, false)); got != 0 {
 		t.Fatalf("shallow tree yields %d files to copy; test needs an unlisted subtree", got)
 	}
 	if f, d := model.CountMirrorDeletes(node, true); f != 0 || d != 0 {
@@ -58,7 +58,7 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 		t.Fatal("EnsureSubtreeListed reported failure")
 	}
 
-	files := model.CollectCopyFiles(node, opts, true)
+	files := model.CollectCopyFiles(node, opts, true, false)
 	if len(files) != 1 || files[0].RelPath != "a/b/c/deep.txt" {
 		t.Errorf("copy set = %v, want [a/b/c/deep.txt]", relPaths(files))
 	}

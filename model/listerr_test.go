@@ -113,7 +113,7 @@ func TestEnsureSubtreeListedFillsShallowTree(t *testing.T) {
 		t.Fatal("shallow scan left nothing unlisted; test needs a deeper tree")
 	}
 	opts := &CompareOpts{Size: true, ModTime: true}
-	if files := CollectCopyFiles(d, opts, true); len(files) != 0 {
+	if files := CollectCopyFiles(d, opts, true, false); len(files) != 0 {
 		t.Fatalf("unlisted subtree already yields %d files", len(files))
 	}
 

@@ -11,7 +11,8 @@ type ConfirmDialog struct {
 	title      string
 	lines      []string
 	danger     bool
-	choiceMode bool // L=left / R=right / B=both, used for PresenceBoth deletes
+	choiceMode bool   // L=left / R=right / B=both, used for PresenceBoth deletes
+	keys       string // the keys line, when the dialog takes other keys than Y
 }
 
 func NewConfirmDialog() *ConfirmDialog {
@@ -24,13 +25,17 @@ func (d *ConfirmDialog) Open(title string, lines []string, danger bool) {
 	d.lines = lines
 	d.danger = danger
 	d.choiceMode = false
+	d.keys = ""
+}
+
+// OpenKeys is Open with its own keys line; the caller handles those keys.
+func (d *ConfirmDialog) OpenKeys(title string, lines []string, danger bool, keys string) {
+	d.Open(title, lines, danger)
+	d.keys = keys
 }
 
 func (d *ConfirmDialog) OpenChoice(title string, lines []string, danger bool) {
-	d.visible = true
-	d.title = title
-	d.lines = lines
-	d.danger = danger
+	d.Open(title, lines, danger)
 	d.choiceMode = true
 }
 
@@ -62,7 +67,13 @@ func (d *ConfirmDialog) View(width, height int) string {
 		sb.WriteString(line)
 	}
 	sb.WriteString("\n\n")
-	if d.choiceMode {
+	if d.keys != "" {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		if d.danger {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+		}
+		sb.WriteString(style.Render(d.keys))
+	} else if d.choiceMode {
 		accent := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 		if d.danger {
 			accent = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))

@@ -36,6 +36,10 @@ type Request struct {
 	// agreed to replace in the confirm dialog. A conflict the copy finds that
 	// is not in it stays, and copying its path fails.
 	Replace []string
+	// CopyUnknown copies the files on both sides that are not compared yet
+	// (no checksum yet), when the user said so (F10). Without it a folder
+	// copy leaves them out and logs how many.
+	CopyUnknown bool
 }
 
 // Result tells the caller what to rescan afterwards and which destination
@@ -137,13 +141,18 @@ func Copy(ctx context.Context, req Request) Result {
 	}
 
 	c := &copier{req: req, ctx: ctx, p: p, src: req.Src, dst: req.Dst, dstChanged: map[string]bool{}}
-	collisions, files, totalBytes := req.enumerate()
+	collisions, files, totalBytes, leftOut := req.enumerate()
 	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
 	p.TotalBytes.Store(totalBytes)
 	p.Start.Store(time.Now().UnixNano())
+	if leftOut > 0 {
+		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY %s: left out %d files on both sides that are not compared yet", displayPath(req.RelPath), leftOut))
+	}
 
-	batched := isDir && req.Batch && c.batch(files, totalBytes)
+	// One rsync session sends every file in the folder: not when some are to
+	// be left out.
+	batched := isDir && req.Batch && leftOut == 0 && c.batch(files, totalBytes)
 	if !batched {
 		c.runParallel(files)
 	}
@@ -170,8 +179,9 @@ func Copy(ctx context.Context, req Request) Result {
 }
 
 // enumerate snapshots everything the transfer needs from the live tree in one
-// locked pass; the transfer never touches a node again.
-func (req Request) enumerate() (collisions []entry, files []item, totalBytes int64) {
+// locked pass; the transfer never touches a node again. leftOut counts the
+// files not compared yet that a folder copy leaves out (CopyUnknown).
+func (req Request) enumerate() (collisions []entry, files []item, totalBytes int64, leftOut int) {
 	src, dst := model.CopySides(req.LeftToRight)
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
@@ -179,9 +189,18 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 				collisions = append(collisions, entry{relPath: c.RelPath, isDir: dstEntry.IsDir, kind: dstEntry.Kind()})
 			}
 		}
-		nodes := []*model.TreeNode{req.Node}
-		if req.Node.IsDir {
-			nodes = model.CollectCopyFiles(req.Node, &req.Opts, req.LeftToRight)
+		// A file the user copies is copied; a folder copy writes what differs.
+		var nodes []*model.TreeNode
+		if !req.Node.IsDir {
+			nodes = []*model.TreeNode{req.Node}
+		} else {
+			model.WalkCopyFiles(req.Node, &req.Opts, req.LeftToRight, func(n *model.TreeNode, notCompared bool) {
+				if notCompared && !req.CopyUnknown {
+					leftOut++
+					return
+				}
+				nodes = append(nodes, n)
+			})
 		}
 		files = make([]item, 0, len(nodes))
 		parts := partsListed(dst)
@@ -193,7 +212,7 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 			files = append(files, it)
 		}
 	})
-	return collisions, files, totalBytes
+	return collisions, files, totalBytes, leftOut
 }
 
 // partsListed returns whether the scan listed a part file of a node on the

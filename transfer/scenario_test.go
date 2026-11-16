@@ -141,7 +141,7 @@ func TestScenarioCopyTopRow(t *testing.T) {
 
 		var picked []string
 		s.sc.ReadTree(func(r *model.TreeNode) {
-			for _, n := range model.CollectCopyFiles(r, &scenarioOpts, true) {
+			for _, n := range model.CollectCopyFiles(r, &scenarioOpts, true, false) {
 				picked = append(picked, n.RelPath)
 			}
 		})

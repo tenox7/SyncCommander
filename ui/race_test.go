@@ -51,7 +51,7 @@ func TestUIRaceAgainstScanner(t *testing.T) {
 				if root == nil {
 					return
 				}
-				model.CollectCopyFiles(root, opts, true)
+				model.CollectCopyFiles(root, opts, true, false)
 				model.CollectTypeCollisions(root, true)
 			})
 			select {

@@ -851,10 +851,33 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	}
 }
 
-func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool) []*TreeNode {
+// CollectCopyFiles returns what a copy of node writes: the files and empty
+// folders missing on the destination, the files that differ, and those of
+// the other type there. A file on both sides that is not compared yet
+// (NodeStatus unknown: with checksum compare on, a checksum not computed;
+// or no compare option on) goes in only with unknown set: most such files
+// are equal, and copying them silently rewrites them all (F10).
+// CountUnknownCopies counts them, so the user can be asked.
+func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight, unknown bool) []*TreeNode {
 	var result []*TreeNode
-	collectCopyFilesRec(node, opts, leftToRight, &result)
+	WalkCopyFiles(node, opts, leftToRight, func(n *TreeNode, notCompared bool) {
+		if unknown || !notCompared {
+			result = append(result, n)
+		}
+	})
 	return result
+}
+
+// CountUnknownCopies counts the files under node on both sides that a copy
+// writes only when told to copy what is not compared yet.
+func CountUnknownCopies(node *TreeNode, opts *CompareOpts, leftToRight bool) int {
+	n := 0
+	WalkCopyFiles(node, opts, leftToRight, func(_ *TreeNode, notCompared bool) {
+		if notCompared {
+			n++
+		}
+	})
+	return n
 }
 
 // UnlistedDir returns the first directory in node's subtree that was never
@@ -877,23 +900,29 @@ func UnlistedDir(node *TreeNode) *TreeNode {
 	return nil
 }
 
-func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, result *[]*TreeNode) {
+// WalkCopyFiles calls visit for each node a copy of node may write;
+// notCompared marks a file on both sides that is written only when the
+// user says to copy what is not compared yet.
+func WalkCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool, visit func(n *TreeNode, notCompared bool)) {
 	from, to := CopySides(leftToRight)
 	src, dst := node.Sides[from].Entry, node.Sides[to].Entry
 	if !node.dirOn(from) {
 		switch node.Compare.Presence {
 		case PresenceBoth:
 			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
-			if collision || NodeStatus(node, opts) != AttrEqual || node.Compare.Checksum == AttrDifferent {
-				*result = append(*result, node)
+			switch status := NodeStatus(node, opts); {
+			case collision || status == AttrDifferent || node.Compare.Checksum == AttrDifferent:
+				visit(node, false)
+			case status == AttrUnknown:
+				visit(node, true)
 			}
 		case PresenceLeftOnly:
 			if leftToRight {
-				*result = append(*result, node)
+				visit(node, false)
 			}
 		case PresenceRightOnly:
 			if !leftToRight {
-				*result = append(*result, node)
+				visit(node, false)
 			}
 		}
 		return
@@ -902,17 +931,17 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 		switch node.Compare.Presence {
 		case PresenceLeftOnly:
 			if leftToRight {
-				*result = append(*result, node)
+				visit(node, false)
 			}
 		case PresenceRightOnly:
 			if !leftToRight {
-				*result = append(*result, node)
+				visit(node, false)
 			}
 		}
 		return
 	}
 	for _, child := range node.Children {
-		collectCopyFilesRec(child, opts, leftToRight, result)
+		WalkCopyFiles(child, opts, leftToRight, visit)
 	}
 }
 

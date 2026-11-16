@@ -29,9 +29,9 @@ func TestCopyNodeCopiesWholeSubtree(t *testing.T) {
 	if subtree == nil {
 		t.Fatal("fake tree has no top-level directory")
 	}
-	want := int64(len(model.CollectCopyFiles(subtree, m.cmpOpts, true)))
+	want := int64(len(model.CollectCopyFiles(subtree, m.cmpOpts, true, false)))
 
-	msg := m.copyNode(subtree, true, false, nil)()
+	msg := m.copyNode(subtree, true, false, nil, false)()
 	if _, ok := msg.(copyDoneMsg); !ok {
 		t.Fatalf("copy returned %T, want copyDoneMsg", msg)
 	}

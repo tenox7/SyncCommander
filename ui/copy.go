@@ -21,10 +21,13 @@ type pendingCopyInfo struct {
 	node        *model.TreeNode
 	leftToRight bool
 	replace     []string // the type conflicts the dialog showed
+	mirror      bool     // the dialog showed deletes: confirming it deletes them
+	unknown     int      // files on both sides not compared yet, which the dialog asks about
 }
 
 // startCopy copies the cursor node in the given direction, asking first when
-// the copy would destroy anything on the destination.
+// the copy would destroy anything on the destination, or would rewrite files
+// on both sides that are not compared yet (F10).
 func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	node := m.activePanel().CursorNode()
 	blocked := model.PresenceRightOnly
@@ -35,28 +38,47 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	if node == nil || m.presence(node) == blocked {
 		return nil
 	}
-	if lines, replace, ok := m.copyConfirmLines(node, leftToRight); ok {
-		m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight, replace: replace}
+	lines, replace, destructive := m.copyConfirmLines(node, leftToRight)
+	unknown := m.unknownCopies(node, leftToRight)
+	if !destructive && unknown == 0 {
+		return m.runCopy(node, leftToRight, false, nil, false)
+	}
+	m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight, replace: replace, mirror: destructive, unknown: unknown}
+	if unknown == 0 {
 		m.confirm.Open(title, lines, true)
 		return nil
 	}
-	return m.runCopy(node, leftToRight, false, nil)
+	if !destructive {
+		lines = []string{"", m.nodeLabel(node)}
+		if m.unlisted(node) {
+			lines = append(lines, "", "⚠ subtree not fully scanned - actual counts may be higher")
+		}
+	}
+	why := "their checksums are not computed yet."
+	if !m.cmpOpts.Checksum {
+		why = "no compare option is switched on."
+	}
+	lines = append(lines, "", fmt.Sprintf("%d files on both sides are not compared yet:", unknown), why, "Copy them too?")
+	m.confirm.OpenKeys(title, lines, true, "y=copy them too  s=skip them  Esc=cancel")
+	return nil
 }
 
-// confirmCopy runs the copy the user just confirmed, mirror deletes included.
-func (m *Model) confirmCopy() tea.Cmd {
+// confirmCopy runs the copy the user just confirmed: the deletes the dialog
+// showed, and the files not compared yet when copyUnknown.
+func (m *Model) confirmCopy(copyUnknown bool) tea.Cmd {
 	pc := m.pendingCopy
 	m.pendingCopy = nil
 	m.confirm.Close()
-	return m.runCopy(pc.node, pc.leftToRight, true, pc.replace)
+	return m.runCopy(pc.node, pc.leftToRight, pc.mirror, pc.replace, copyUnknown)
 }
 
 // runCopy starts the copy. replace names the type conflicts the user agreed
-// to replace; the copy leaves every other one alone.
-func (m *Model) runCopy(node *model.TreeNode, leftToRight, mirror bool, replace []string) tea.Cmd {
+// to replace; the copy leaves every other one alone. copyUnknown copies the
+// files on both sides that are not compared yet.
+func (m *Model) runCopy(node *model.TreeNode, leftToRight, mirror bool, replace []string, copyUnknown bool) tea.Cmd {
 	m.copying = true
 	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
-	return tea.Batch(m.copyNode(node, leftToRight, mirror, replace), m.ensureTick())
+	return tea.Batch(m.copyNode(node, leftToRight, mirror, replace, copyUnknown), m.ensureTick())
 }
 
 func (m *Model) finishCopy(msg copyDoneMsg) tea.Cmd {
@@ -139,7 +161,7 @@ func (m *Model) setCopyParallel(n int) {
 
 // copyNode hands the transfer engine a snapshot of what it needs and reports
 // back with the rescan root and the changed paths.
-func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool, replace []string) tea.Cmd {
+func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool, replace []string, copyUnknown bool) tea.Cmd {
 	var relPath string
 	m.readTree(func(*model.TreeNode) { relPath = node.RelPath })
 	src, dst := m.left, m.right
@@ -153,7 +175,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool, replace
 		Src: src, Dst: dst, Scanner: m.scanner, Node: node, RelPath: relPath,
 		LeftToRight: leftToRight, Mirror: mirror, Opts: *m.cmpOpts, Parallel: parallel,
 		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
-		Replace: replace,
+		Replace: replace, CopyUnknown: copyUnknown,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = transport.ContextWithFatalCancel(ctx, cancel)
@@ -171,6 +193,38 @@ func (m *Model) presence(node *model.TreeNode) model.Presence {
 	var p model.Presence
 	m.readTree(func(*model.TreeNode) { p = node.Compare.Presence })
 	return p
+}
+
+// unknownCopies counts, under the read lock, the files a copy of a folder
+// would rewrite only because they are not compared yet. A single file the
+// user copies is copied: that is what was asked.
+func (m *Model) unknownCopies(node *model.TreeNode, leftToRight bool) int {
+	n := 0
+	m.readTree(func(*model.TreeNode) {
+		if node.IsDir {
+			n = model.CountUnknownCopies(node, m.cmpOpts, leftToRight)
+		}
+	})
+	return n
+}
+
+// unlisted reports, under the read lock, a folder under node not listed yet.
+func (m *Model) unlisted(node *model.TreeNode) bool {
+	var u bool
+	m.readTree(func(*model.TreeNode) { u = model.UnlistedDir(node) != nil })
+	return u
+}
+
+// nodeLabel is node's name as the dialogs show it, under the read lock.
+func (m *Model) nodeLabel(node *model.TreeNode) string {
+	var name string
+	m.readTree(func(*model.TreeNode) {
+		name = node.Name
+		if node.IsDir {
+			name += "/"
+		}
+	})
+	return name
 }
 
 // copyConfirmLines counts collisions and mirror deletes across the subtree, so

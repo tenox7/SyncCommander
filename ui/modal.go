@@ -170,9 +170,15 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 		case m.pendingDelete != nil:
 			return m.confirmDelete(m.pendingDelete.presence)
 		case m.pendingCopy != nil:
-			return m.confirmCopy()
+			// Files not compared yet are copied only when the dialog asked.
+			return m.confirmCopy(m.pendingCopy.unknown > 0)
 		}
 		m.confirm.Close()
+	case "s", "S":
+		// Copy, but skip the files not compared yet the dialog asked about.
+		if m.pendingCopy != nil && m.pendingCopy.unknown > 0 {
+			return m.confirmCopy(false)
+		}
 	case "esc", "n", "N", "q":
 		m.cancelConfirm()
 	}
