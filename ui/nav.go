@@ -47,7 +47,7 @@ func (m *Model) toggleCursor() tea.Cmd {
 	node := p.CursorNode()
 	lazyList := false
 	m.mutateTree(func(*model.TreeNode) {
-		if node != nil && node.IsDir && !node.Listed && !m.scanning() {
+		if node != nil && node.IsDir && !node.Listed && m.mayStart(opScan) {
 			node.Expanded = true
 			lazyList = true
 			return

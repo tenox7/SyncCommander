@@ -38,7 +38,7 @@ func TestStatusBarShowsScanProgress(t *testing.T) {
 // U10: a scan has no popup to show its stop key, so the status bar shows
 // it where it shows ?=help.
 func TestStatusBarShowsTheStopKey(t *testing.T) {
-	for state, want := range map[string]string{"DIR SCAN": "x=stop", "CHECKSUM": "x=stop", "": "?=help", "COPY": "?=help"} {
+	for state, want := range map[string]string{"DIR SCAN": "x=stop", "CHECKSUM": "x=stop", "RENAME": "x=stop", "TOUCH": "x=stop", "": "?=help", "COPY": "?=help"} {
 		if s := ansi.Strip(RenderStatusBar(StatusInfo{State: state}, 120)); !strings.Contains(s, want) {
 			t.Errorf("state %q: the status bar lacks %q:\n%s", state, want, s)
 		}

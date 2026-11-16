@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -10,12 +11,17 @@ import (
 	"sc/transport"
 )
 
+// renameDoneMsg is how a rename reports back: its error, and the node to
+// rescan when the rename joined it with a row of the other side.
 type renameDoneMsg struct {
+	opDoneMsg
 	err    error
 	rescan *model.TreeNode
 }
 
-type touchDoneMsg struct{}
+// undoTimeout bounds the undo of a half-done rename, which runs also after
+// x: a server that hangs on it does not hold the keys for ever.
+const undoTimeout = 2 * time.Minute
 
 func (m *Model) openRename(node *model.TreeNode) {
 	if node == nil {
@@ -70,9 +76,10 @@ func renameTaken(node *model.TreeNode, newName string) string {
 	return ""
 }
 
-// renameNode renames the node on every side it exists on. When a side fails
-// the parent is re-listed, so the tree shows what is really there instead of
-// the old row.
+// renameNode starts the rename of the node on every side it exists on. When
+// a side fails the parent is re-listed, so the tree shows what is really
+// there instead of the old row. A rename that x stopped is not a failure:
+// the log says the user canceled it.
 func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 	left, right, scanner, opts := m.left.backend, m.right.backend, m.scanner, *m.cmpOpts
 	var oldRel string
@@ -82,8 +89,7 @@ func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 	if dir := model.DirOf(oldRel); dir != "" {
 		newRel = dir + "/" + newName
 	}
-	return func() tea.Msg {
-		ctx := context.Background()
+	return m.start(opRename, func(ctx context.Context, done opDoneMsg) doneMsg {
 		var err error
 		switch presence {
 		case model.PresenceLeftOnly:
@@ -94,20 +100,23 @@ func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 			err = renameBoth(ctx, left, right, oldRel, newRel)
 		}
 		if err != nil {
-			transport.Log.Add("rename", transport.DirFail, oldRel+" -> "+newRel+": "+err.Error())
+			if ctx.Err() == nil {
+				transport.Log.Add("rename", transport.DirFail, oldRel+" -> "+newRel+": "+err.Error())
+			}
 			refreshParent(ctx, scanner, oldRel, opts)
-			return renameDoneMsg{err: err}
+			return renameDoneMsg{opDoneMsg: done, err: err}
 		}
 		if scanner.RenameNode(node, newName, newRel, oldRel, opts) {
-			return renameDoneMsg{rescan: node}
+			return renameDoneMsg{opDoneMsg: done, rescan: node}
 		}
-		return renameDoneMsg{}
-	}
+		return renameDoneMsg{opDoneMsg: done}
+	})
 }
 
 // renameBoth renames on both sides, undoing the left rename when the right
-// one fails so the sides stay in step. A failed undo is logged and the parent
-// refresh shows the split.
+// one fails so the sides stay in step. The undo runs also when x stopped the
+// rename: a stop must not leave the sides apart. A failed undo is logged and
+// the parent refresh shows the split.
 func renameBoth(ctx context.Context, left, right model.Backend, oldRel, newRel string) error {
 	if err := left.Rename(ctx, oldRel, newRel); err != nil {
 		return err
@@ -116,36 +125,28 @@ func renameBoth(ctx context.Context, left, right model.Backend, oldRel, newRel s
 	if err == nil {
 		return nil
 	}
-	if uerr := left.Rename(ctx, newRel, oldRel); uerr != nil {
+	undo, cancel := context.WithTimeout(context.WithoutCancel(ctx), undoTimeout)
+	defer cancel()
+	if uerr := left.Rename(undo, newRel, oldRel); uerr != nil {
 		transport.Log.Add("rename", transport.DirErr, "undo left "+newRel+" -> "+oldRel+": "+uerr.Error())
 	}
 	return err
 }
 
-func (m *Model) finishRename(msg renameDoneMsg) tea.Cmd {
-	if msg.err != nil {
-		m.autoOpenLog()
-	}
-	m.refreshTreeNow()
-	if msg.rescan == nil {
-		return nil
-	}
-	return m.queueRescan(msg.rescan, nil)
-}
-
-// touchNode copies the newer side's timestamps onto the older side of a file
-// present on both.
+// touchNode starts the touch: it copies the newer side's timestamps onto the
+// older side of a file present on both. A touch that x stopped is not a
+// failure: the log says the user canceled it.
 func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	if node == nil || m.presence(node) != model.PresenceBoth {
 		return nil
 	}
 	left, right, scanner, opts := m.left.backend, m.right.backend, m.scanner, *m.cmpOpts
-	return func() tea.Msg {
+	return m.start(opTouch, func(ctx context.Context, done opDoneMsg) doneMsg {
 		var l, r *model.FileEntry
 		var relPath string
 		scanner.ReadTree(func(*model.TreeNode) { l, r = node.Entries(); relPath = node.RelPath })
 		if l == nil || r == nil {
-			return touchDoneMsg{}
+			return done
 		}
 		newer, older := l, r
 		olderBackend, touched, side := right, model.SideRight, "right"
@@ -153,16 +154,18 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			newer, older = r, l
 			olderBackend, touched, side = left, model.SideLeft, "left"
 		}
-		if err := olderBackend.SetTimes(context.Background(), older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime); err != nil {
+		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime); err != nil {
 			// A failed touch logged nothing (U9).
-			transport.Log.Add("touch", transport.DirFail, side+" "+older.RelPath+": "+err.Error())
+			if ctx.Err() == nil {
+				transport.Log.Add("touch", transport.DirFail, side+" "+older.RelPath+": "+err.Error())
+			}
 		} else {
 			// Touch only changes metadata; the file body is unchanged. Roll the
 			// cached CRC fingerprint forward to the new mtime so the preserving
 			// merge below treats CRC as still valid.
 			scanner.MutateTree(func(*model.TreeNode) { node.Sides[touched].ChecksumModTime = newer.ModTime })
 		}
-		refreshParent(context.Background(), scanner, relPath, opts)
-		return touchDoneMsg{}
-	}
+		refreshParent(ctx, scanner, relPath, opts)
+		return done
+	})
 }

@@ -11,26 +11,53 @@ import (
 	"sc/transport"
 )
 
+// opKind is what an operation does. Scans, the checksum pass and the writes
+// each have a lane of their own: one of each runs at a time (mayStart).
 type opKind int
 
 const (
-	opScan opKind = iota
-	opChecksum
+	opScan     opKind = iota // a scan, a rescan or a listing
+	opChecksum               // a checksum pass
+	opCopy
+	opDelete
+	opRename
+	opTouch
 )
 
-// scanOp is one running scanner operation. gen tells a late done message from
-// a cancelled predecessor apart from the current op, so a stale one can never
-// clear the flag that keeps the tick loop alive.
-type scanOp struct {
+// writes says whether the operation changes files: a copy, a delete, a
+// rename or a touch.
+func (k opKind) writes() bool { return k >= opCopy }
+
+// String is the operation as the log names it.
+func (k opKind) String() string {
+	return [...]string{"scan", "checksum", "copy", "delete", "rename", "touch"}[k]
+}
+
+// op is one running operation (D11): a scan, a checksum pass or a write.
+// Each runs under its own context, which x, quit and a reopen cancel, and
+// has a generation, which tells its done message from the late one of an
+// operation that was dropped. Rename and touch were no operations at all:
+// nothing showed them, x did not stop them, and a second write could start
+// beside them (U14).
+type op struct {
+	kind    opKind
 	gen     uint64
 	cancel  context.CancelFunc
 	stopped bool // the user stopped it: x again says nothing more
 }
 
+// opDoneMsg is how an operation reports back: which one it was. A scan's
+// and a checksum pass's done message is just this; a copy's and a rename's
+// embed it and add what they did.
 type opDoneMsg struct {
 	kind opKind
 	gen  uint64
 }
+
+// doneMsg is any operation's done message.
+type doneMsg interface{ header() opDoneMsg }
+
+func (d opDoneMsg) header() opDoneMsg { return d }
 
 // rescanReq is a rescan that has to wait for the running scan to finish.
 type rescanReq struct {
@@ -38,43 +65,89 @@ type rescanReq struct {
 	changed *model.ChangedPaths
 }
 
-// startOp runs one scanner operation in the background under its own
-// cancellable context and reports back with the op's generation.
-func (m *Model) startOp(kind opKind, run func(ctx context.Context)) tea.Cmd {
-	m.opGen++
-	ctx, cancel := context.WithCancel(context.Background())
-	op := &scanOp{gen: m.opGen, cancel: cancel}
-	if kind == opChecksum {
-		m.cksum = op
-	} else {
-		m.scan = op
+// slot is where the running operation of kind's lane is kept.
+func (m *Model) slot(kind opKind) **op {
+	switch kind {
+	case opScan:
+		return &m.scan
+	case opChecksum:
+		return &m.cksum
 	}
-	return tea.Batch(func() tea.Msg {
-		run(ctx)
-		return opDoneMsg{kind: kind, gen: op.gen}
-	}, m.ensureTick())
+	return &m.write
 }
 
-// finishOp clears the op a done message belongs to and ignores messages from
-// cancelled predecessors. Errors the op logged as it ended open the log here:
-// the tick loop stops with the op, so it never sees them. A rescan queued
-// behind the scan starts now.
-func (m *Model) finishOp(msg opDoneMsg) tea.Cmd {
-	slot := &m.scan
-	if msg.kind == opChecksum {
-		slot = &m.cksum
+// mayStart is the one rule for what runs beside what (D11). Each key asked
+// a flag of its own: r asked "not scanning", c "not checksumming", and
+// rename and touch asked nothing (U14). Now one scan, one checksum pass and
+// one write run at a time, and a write holds the keys while it runs
+// (handleKey), so the user starts nothing beside it. A scan or a checksum
+// pass may run beside a write: one that ran when the write started, or a
+// rescan that waited behind it.
+func (m *Model) mayStart(kind opKind) bool { return *m.slot(kind) == nil }
+
+// running reports whether an operation of kind runs.
+func (m *Model) running(kind opKind) bool {
+	o := *m.slot(kind)
+	return o != nil && o.kind == kind
+}
+
+// startOp runs a scan or a checksum pass: an operation with nothing to
+// report but that it ended.
+func (m *Model) startOp(kind opKind, run func(ctx context.Context)) tea.Cmd {
+	return m.start(kind, func(ctx context.Context, done opDoneMsg) doneMsg {
+		run(ctx)
+		return done
+	})
+}
+
+// start runs an operation in the background under its own context, unless
+// its lane is taken (mayStart). run returns the operation's done message,
+// built on done. A write also stops at a fatal error, one that every next
+// step would hit too (a read-only rsync module).
+func (m *Model) start(kind opKind, run func(ctx context.Context, done opDoneMsg) doneMsg) tea.Cmd {
+	if !m.mayStart(kind) {
+		return nil
 	}
-	if *slot == nil || (*slot).gen != msg.gen {
+	m.opGen++
+	ctx, cancel := context.WithCancel(context.Background())
+	if kind.writes() {
+		ctx = transport.ContextWithFatalCancel(ctx, cancel)
+	}
+	done := opDoneMsg{kind: kind, gen: m.opGen}
+	*m.slot(kind) = &op{kind: kind, gen: done.gen, cancel: cancel}
+	return tea.Batch(func() tea.Msg { return run(ctx, done) }, m.ensureTick())
+}
+
+// finishOp ends the operation a done message belongs to and acts on what it
+// reports. The message of an operation that was dropped (by a reopen) acts
+// on nothing. Errors the operation logged as it ended open the log here:
+// the tick loop stops with it, so it never sees them. A rescan queued
+// behind the scan starts now.
+func (m *Model) finishOp(msg doneMsg) tea.Cmd {
+	h := msg.header()
+	slot := m.slot(h.kind)
+	if *slot == nil || (*slot).gen != h.gen {
 		return nil
 	}
 	(*slot).cancel()
 	*slot = nil
 	m.refreshTreeNow()
 	m.autoOpenLog()
-	if msg.kind == opScan && m.pendingRescan != nil {
-		r := m.pendingRescan
-		m.pendingRescan = nil
-		return m.rescanNode(r.node, r.changed)
+	switch r := msg.(type) {
+	case copyDoneMsg:
+		if r.rescanRoot != nil {
+			return m.queueRescan(r.rescanRoot, r.changed)
+		}
+	case renameDoneMsg:
+		if r.rescan != nil {
+			return m.queueRescan(r.rescan, nil)
+		}
+	default:
+		if h.kind == opScan && m.pendingRescan != nil {
+			p := m.pendingRescan
+			m.pendingRescan = nil
+			return m.rescanNode(p.node, p.changed)
+		}
 	}
 	return nil
 }
@@ -82,7 +155,7 @@ func (m *Model) finishOp(msg opDoneMsg) tea.Cmd {
 // queueRescan starts a rescan now, or once the running scan finishes. Two
 // pending rescans collapse into one of the whole tree.
 func (m *Model) queueRescan(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
-	if !m.scanning() {
+	if m.mayStart(opScan) {
 		return m.rescanNode(node, changed)
 	}
 	if m.pendingRescan != nil {
@@ -92,26 +165,29 @@ func (m *Model) queueRescan(node *model.TreeNode, changed *model.ChangedPaths) t
 	return nil
 }
 
+// cancelOps stops every operation and drops what waits for one: on quit and
+// before a reopen. Their late done messages then act on nothing. A reopen
+// kept the rescan queued behind the scan, which then ran on the new root's
+// scanner with a folder of the old tree (U14).
 func (m *Model) cancelOps() {
-	for _, op := range []*scanOp{m.scan, m.cksum} {
-		if op != nil {
-			op.cancel()
+	for _, slot := range []**op{&m.scan, &m.cksum, &m.write} {
+		if *slot != nil {
+			(*slot).cancel()
+			*slot = nil
 		}
 	}
+	m.pendingRescan = nil
 }
 
-// stopScanOps is x while no copy or delete runs: it stops the running scan
-// and checksum pass, which no key stopped (U10). What was listed or summed
+// stopScanOps is x while no write runs: it stops the running scan and
+// checksum pass, which no key stopped (U10). What was listed or summed
 // stays; a folder the scan was listing is marked as not listed.
 func (m *Model) stopScanOps() {
-	for _, o := range []struct {
-		op   *scanOp
-		what string
-	}{{m.scan, "scan"}, {m.cksum, "checksum"}} {
-		if o.op != nil && !o.op.stopped {
-			o.op.stopped = true
-			o.op.cancel()
-			transport.Log.Add("scan", transport.DirIn, "user canceled "+o.what)
+	for _, o := range []*op{m.scan, m.cksum} {
+		if o != nil && !o.stopped {
+			o.stopped = true
+			o.cancel()
+			transport.Log.Add("scan", transport.DirIn, "user canceled "+o.kind.String())
 		}
 	}
 	// A rescan queued behind the scan, after a copy or a rename, goes with
@@ -132,6 +208,22 @@ func (m *Model) stopScanOps() {
 	}
 }
 
+// stopWrite is x while a write runs: it stops it, and its done message
+// ends it. The log calls a stopped copy a transfer, as it always has.
+func (m *Model) stopWrite() {
+	o := m.write
+	if o == nil || o.stopped {
+		return
+	}
+	o.stopped = true
+	what := o.kind.String()
+	if o.kind == opCopy {
+		what = "transfer"
+	}
+	transport.Log.Add(o.kind.String(), transport.DirIn, "user canceled "+what)
+	o.cancel()
+}
+
 func (m *Model) startScan() tea.Cmd {
 	opts, scanner := *m.cmpOpts, m.scanner
 	return m.startOp(opScan, func(ctx context.Context) {
@@ -141,7 +233,7 @@ func (m *Model) startScan() tea.Cmd {
 
 // checksumNode checksums one file or subtree; one at a time.
 func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
-	if node == nil || m.checksumming() {
+	if node == nil {
 		return nil
 	}
 	scanner := m.scanner
@@ -159,7 +251,7 @@ func (m *Model) rescanNode(node *model.TreeNode, changed *model.ChangedPaths) te
 // top-level entries show up wherever the cursor sits.
 func (m *Model) rescanCursor() tea.Cmd {
 	row, ok := m.activePanel().CursorRow()
-	if m.scanning() || (ok && row.Attr != nil) {
+	if ok && row.Attr != nil {
 		return nil
 	}
 	opts, scanner, node := *m.cmpOpts, m.scanner, row.Node
@@ -178,7 +270,7 @@ func (m *Model) rescanCursor() tea.Cmd {
 // deepRescanAll re-lists the whole tree from scratch.
 func (m *Model) deepRescanAll() tea.Cmd {
 	tree := m.scanner.Tree()
-	if tree == nil || m.scanning() {
+	if tree == nil {
 		return nil
 	}
 	opts, scanner := *m.cmpOpts, m.scanner

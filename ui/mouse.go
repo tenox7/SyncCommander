@@ -41,7 +41,7 @@ func (m *Model) wheel(k tea.KeyType) (tea.Model, tea.Cmd) {
 // the row's guides or arrow, or the second of two selecting clicks on it within
 // doubleClickTime, also expands or collapses it, like Enter.
 func (m *Model) click(x, y int) tea.Cmd {
-	if m.openModal() != nil || m.transferring() {
+	if m.openModal() != nil || m.writing() {
 		return nil
 	}
 	p := m.left.panel

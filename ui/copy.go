@@ -13,7 +13,10 @@ import (
 	"sc/transport"
 )
 
+// copyDoneMsg is how a copy reports back: what to rescan, and the paths it
+// changed.
 type copyDoneMsg struct {
+	opDoneMsg
 	rescanRoot *model.TreeNode
 	changed    *model.ChangedPaths
 }
@@ -204,20 +207,8 @@ func (m *Model) confirmCopy(copyUnknown bool) tea.Cmd {
 
 // runCopy starts the copy with the user's answers.
 func (m *Model) runCopy(node *model.TreeNode, leftToRight bool, c copyChoices) tea.Cmd {
-	m.copying = true
 	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
-	return tea.Batch(m.copyNode(node, leftToRight, c), m.ensureTick())
-}
-
-func (m *Model) finishCopy(msg copyDoneMsg) tea.Cmd {
-	m.copying = false
-	cancelStored(&m.copyProgress.Cancel)
-	m.autoOpenLog()
-	m.refreshTreeNow()
-	if msg.rescanRoot == nil {
-		return nil
-	}
-	return m.queueRescan(msg.rescanRoot, msg.changed)
+	return m.copyNode(node, leftToRight, c)
 }
 
 // slotSpin is one in-flight row's liveness: the frame only advances on ticks
@@ -231,7 +222,7 @@ type slotSpin struct {
 // copy spinners only while bytes move, so a stalled transfer shows a frozen
 // spinner. Resumed prefixes don't count as movement.
 func (m *Model) tickCopy() {
-	if !m.copying {
+	if !m.copying() {
 		return
 	}
 	m.copyProgress.SyncTotals()
@@ -266,7 +257,7 @@ func (m *Model) tickSlotSpins() {
 // flight. Raising starts a file at once; lowering waits, since the semaphore
 // never stops a running file, it just does not refill the next one to finish.
 func (m *Model) adjustCopyParallel(delta int) {
-	if !m.copying || m.copyProgress.Batched.Load() {
+	if !m.copying() || m.copyProgress.Batched.Load() {
 		return
 	}
 	next := min(max(m.copyParallel+delta, 1), m.parallelMax)
@@ -287,9 +278,12 @@ func (m *Model) setCopyParallel(n int) {
 	transport.SetParallel(m.right.backend, n)
 }
 
-// copyNode hands the transfer engine a snapshot of what it needs and reports
-// back with the rescan root and the changed paths.
+// copyNode starts the copy: it hands the transfer engine a snapshot of what
+// it needs, and reports back with the rescan root and the changed paths.
 func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, c copyChoices) tea.Cmd {
+	if !m.mayStart(opCopy) {
+		return nil
+	}
 	var relPath string
 	m.readTree(func(*model.TreeNode) { relPath = node.RelPath })
 	src, dst := m.left.backend, m.right.backend
@@ -305,14 +299,11 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, c copyChoices) 
 		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
 		Replace: c.replace, CopyUnknown: c.copyUnknown, Newer: c.newer,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = transport.ContextWithFatalCancel(ctx, cancel)
 	m.copyProgress.Reset(parallel, leftToRight)
-	m.copyProgress.Cancel.Store(&cancel)
-	return func() tea.Msg {
+	return m.start(opCopy, func(ctx context.Context, done opDoneMsg) doneMsg {
 		res := transfer.Copy(ctx, req)
-		return copyDoneMsg{rescanRoot: res.RescanRoot, changed: res.Changed}
-	}
+		return copyDoneMsg{opDoneMsg: done, rescanRoot: res.RescanRoot, changed: res.Changed}
+	})
 }
 
 // presence reads one node's compare presence under the read lock; the scanner

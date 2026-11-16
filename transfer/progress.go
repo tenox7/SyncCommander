@@ -5,7 +5,6 @@
 package transfer
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +32,6 @@ type Progress struct {
 	FileStartBytes     atomic.Int64
 	FileStartBaseBytes atomic.Int64
 	LeftToRight        atomic.Bool
-	Cancel             atomic.Pointer[context.CancelFunc]
 	Sem                atomic.Pointer[DynSem]
 
 	parallelMu sync.Mutex // orders SetParallel against runParallel publishing Sem

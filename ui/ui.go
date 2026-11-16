@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,17 +33,16 @@ type Model struct {
 	left, right pane
 	insecure    bool
 
-	scanner       *model.Scanner
-	cmpOpts       *model.CompareOpts
-	deepScan      bool
-	scanParallel  int
-	scan          *scanOp
-	cksum         *scanOp
-	opGen         uint64
-	pendingRescan *rescanReq
+	scanner      *model.Scanner
+	cmpOpts      *model.CompareOpts
+	deepScan     bool
+	scanParallel int
+	// The running operations, one per lane (mayStart), and the rescan that
+	// waits for the scan.
+	scan, cksum, write *op
+	opGen              uint64
+	pendingRescan      *rescanReq
 
-	copying        bool
-	deleting       bool
 	copyProgress   *transfer.Progress
 	deleteProgress *DeleteProgress
 	pendingCopy    *pendingCopyInfo
@@ -163,17 +161,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layoutPanels()
 	case tickMsg:
 		return m, m.tick()
-	case opDoneMsg:
+	case doneMsg:
 		return m, m.finishOp(msg)
-	case renameDoneMsg:
-		return m, m.finishRename(msg)
-	case touchDoneMsg:
-		m.refreshTreeNow()
-		m.autoOpenLog()
-	case deleteDoneMsg:
-		m.finishDelete()
-	case copyDoneMsg:
-		return m, m.finishCopy(msg)
 	case diffLoadDoneMsg:
 		m.finishDiffLoad(msg)
 	}
@@ -199,11 +188,13 @@ func (m *Model) tick() tea.Cmd {
 
 func (m *Model) scanning() bool     { return m.scan != nil }
 func (m *Model) checksumming() bool { return m.cksum != nil }
-func (m *Model) transferring() bool { return m.copying || m.deleting }
+func (m *Model) writing() bool      { return m.write != nil }
+func (m *Model) copying() bool      { return m.running(opCopy) }
+func (m *Model) deleting() bool     { return m.running(opDelete) }
 
 // busy reports whether any background operation is live, which is what keeps
 // the tick loop running.
-func (m *Model) busy() bool { return m.scanning() || m.checksumming() || m.transferring() }
+func (m *Model) busy() bool { return m.scanning() || m.checksumming() || m.writing() }
 
 // autoOpenLog pops the log up when new errors or failures have arrived.
 func (m *Model) autoOpenLog() {
@@ -215,17 +206,3 @@ func (m *Model) autoOpenLog() {
 // touch that failed). The log opened by itself on errors only, and the UI
 // logs its own failures as FAIL (U9).
 func problems() int { return transport.Log.ErrCount() + transport.Log.FailedCount() }
-
-// cancelAll stops every background operation; used on quit.
-func (m *Model) cancelAll() {
-	cancelStored(&m.copyProgress.Cancel)
-	cancelStored(&m.deleteProgress.Cancel)
-	m.cancelOps()
-}
-
-// cancelStored fires and clears a cancel func shared with a worker goroutine.
-func cancelStored(p *atomic.Pointer[context.CancelFunc]) {
-	if c := p.Swap(nil); c != nil {
-		(*c)()
-	}
-}

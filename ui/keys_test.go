@@ -158,7 +158,7 @@ func TestSwapSidesMirrorsTreeAndPanels(t *testing.T) {
 	if leftOnly.Compare.Presence != model.PresenceRightOnly || leftOnly.Sides[model.SideLeft].Entry != nil {
 		t.Fatalf("tree not mirrored: presence=%v", leftOnly.Compare.Presence)
 	}
-	m.copying = true
+	runningOp(m, opCopy, nil)
 	press(m, "s")
 	if m.left.backend != oldRight {
 		t.Fatal("swap ran while a copy was in progress")
@@ -223,9 +223,7 @@ func TestReopenBackendsKeepsUnchangedSide(t *testing.T) {
 func TestCancelKeyStopsTransfersAndBlocksTreeKeys(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	var copyCancelled, deleteCancelled bool
-	cancel := context.CancelFunc(func() { copyCancelled = true })
-	m.copyProgress.Cancel.Store(&cancel)
-	m.copying = true
+	runningOp(m, opCopy, func() { copyCancelled = true })
 	press(m, "j")
 	if m.left.panel.cursor != 0 {
 		t.Fatal("j moved the cursor during a copy")
@@ -234,10 +232,8 @@ func TestCancelKeyStopsTransfersAndBlocksTreeKeys(t *testing.T) {
 	if !copyCancelled {
 		t.Fatal("x did not cancel the copy")
 	}
-	m.copying = false
-	delCancel := context.CancelFunc(func() { deleteCancelled = true })
-	m.deleteProgress.Cancel.Store(&delCancel)
-	m.deleting = true
+	m.write = nil
+	runningOp(m, opDelete, func() { deleteCancelled = true })
 	press(m, "X")
 	if !deleteCancelled {
 		t.Fatal("X did not cancel the delete")

@@ -12,8 +12,6 @@ import (
 	"sc/transport"
 )
 
-type deleteDoneMsg struct{}
-
 type DeleteProgress struct {
 	Total  atomic.Int64
 	Done   atomic.Int64
@@ -21,11 +19,9 @@ type DeleteProgress struct {
 	File   atomic.Value
 	Side   atomic.Value
 	Start  atomic.Int64
-	Cancel atomic.Pointer[context.CancelFunc]
 }
 
-func (p *DeleteProgress) reset(total int64, file, side string, cancel context.CancelFunc) {
-	p.Cancel.Store(&cancel)
+func (p *DeleteProgress) reset(total int64, file, side string) {
 	p.Done.Store(0)
 	p.Failed.Store(0)
 	p.Total.Store(total)
@@ -105,21 +101,16 @@ func (m *Model) confirmDelete(side model.Presence) tea.Cmd {
 	node := pd.node
 	m.pendingDelete = nil
 	m.confirm.Close()
-	m.deleting = true
-	return tea.Batch(m.deleteNode(node, side), m.ensureTick())
+	return m.deleteNode(node, side)
 }
 
-func (m *Model) finishDelete() {
-	m.deleting = false
-	cancelStored(&m.deleteProgress.Cancel)
-	m.autoOpenLog()
-	m.refreshTreeNow()
-}
-
-// deleteNode removes the node from the chosen sides, then re-lists its parent.
-// Progress counts the subtree once per side, so the bar moves even when a
-// backend deletes recursively in one call.
+// deleteNode starts the delete: it removes the node from the chosen sides,
+// then re-lists its parent. Progress counts the subtree once per side, so
+// the bar moves even when a backend deletes recursively in one call.
 func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
+	if !m.mayStart(opDelete) {
+		return nil
+	}
 	scanner, opts, progress := m.scanner, *m.cmpOpts, m.deleteProgress
 	var relPath string
 	var isDir bool
@@ -147,10 +138,8 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 		perSide++
 	}
 	perSide = max(perSide, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = transport.ContextWithFatalCancel(ctx, cancel)
-	progress.reset(perSide*int64(len(sides)), relPath, label, cancel)
-	return func() tea.Msg {
+	progress.reset(perSide*int64(len(sides)), relPath, label)
+	return m.start(opDelete, func(ctx context.Context, done opDoneMsg) doneMsg {
 		for _, s := range sides {
 			if ctx.Err() != nil {
 				break
@@ -164,8 +153,8 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 			progress.Done.Add(perSide)
 		}
 		refreshParent(ctx, scanner, relPath, opts)
-		return deleteDoneMsg{}
-	}
+		return done
+	})
 }
 
 func removeOne(ctx context.Context, backend model.Backend, relPath string, isDir bool) error {

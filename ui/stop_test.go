@@ -142,13 +142,12 @@ func TestXStopsTheListingAfterADelete(t *testing.T) {
 	}
 	right.stuck.Store(true) // the delete goes through; the listing after it hangs
 	settled(m)
-	m.deleting = true
 	msgs := runCmd(m.deleteNode(file, model.PresenceRightOnly))
-	if _, done := waitFor[deleteDoneMsg](msgs, 300*time.Millisecond); done {
+	if _, done := waitFor[opDoneMsg](msgs, 300*time.Millisecond); done {
 		t.Fatal("the delete ended by itself; its listing was to hang")
 	}
 	press(m, "x")
-	msg, done := waitFor[deleteDoneMsg](msgs, 5*time.Second)
+	msg, done := waitFor[opDoneMsg](msgs, 5*time.Second)
 	if !done {
 		t.Fatal("x did not stop the listing after the delete")
 	}

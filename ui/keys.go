@@ -2,32 +2,33 @@ package ui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
-
-	"sc/transport"
 )
 
 // handleKey routes a key press: ctrl+c always quits, an open dialog owns the
-// keyboard, a running transfer allows only its own few keys.
+// keyboard, a running write allows only its own few keys.
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	if k == "ctrl+c" {
-		m.cancelAll()
+		m.cancelOps()
 		return m, tea.Quit
 	}
 	if d := m.openModal(); d != nil {
 		return m, m.handleModalKey(d, msg)
 	}
-	if m.transferring() {
-		m.handleTransferKey(k)
+	if m.writing() {
+		m.handleWriteKey(k)
 		return m, nil
 	}
 	return m, m.handleTreeKey(k)
 }
 
-func (m *Model) handleTransferKey(k string) {
+// handleWriteKey is the key set while a copy, a delete, a rename or a touch
+// runs: the write holds the keys, so nothing starts beside it (mayStart).
+// x stops it; + and - change a copy's files in flight.
+func (m *Model) handleWriteKey(k string) {
 	switch k {
 	case "x", "X":
-		m.cancelTransfer()
+		m.stopWrite()
 	case "~", "`":
 		m.logView.Open()
 	case "-":
@@ -35,20 +36,6 @@ func (m *Model) handleTransferKey(k string) {
 	case "+", "=":
 		m.adjustCopyParallel(+1)
 	}
-}
-
-// cancelTransfer asks the running copy or delete to stop; its done message
-// clears the flag.
-func (m *Model) cancelTransfer() {
-	cancel, op, what := m.copyProgress.Cancel.Load(), "copy", "transfer"
-	if m.deleting {
-		cancel, op, what = m.deleteProgress.Cancel.Load(), "delete", "delete"
-	}
-	if cancel == nil {
-		return
-	}
-	transport.Log.Add(op, transport.DirIn, "user canceled "+what)
-	(*cancel)()
 }
 
 // handleTreeKey is the idle key set: navigation, and everything that starts

@@ -46,6 +46,18 @@ func TestStaleOpDoneIsIgnored(t *testing.T) {
 	}
 }
 
+// runningOp registers a running operation of kind, as its start does, with
+// stop as what x and quit call.
+func runningOp(m *Model, kind opKind, stop context.CancelFunc) *op {
+	if stop == nil {
+		stop = func() {}
+	}
+	m.opGen++
+	o := &op{kind: kind, gen: m.opGen, cancel: stop}
+	*m.slot(kind) = o
+	return o
+}
+
 // A rescan requested while a scan runs waits for it instead of racing it.
 func TestRescanQueuedBehindRunningScan(t *testing.T) {
 	src := openBackendOrSkip(t, "fake://tiny")

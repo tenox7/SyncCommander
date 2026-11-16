@@ -47,8 +47,7 @@ func TestRelistInsideAOneSidedFolder(t *testing.T) {
 	settled(m)
 	errs := transport.Log.ErrCount()
 
-	m.deleting = true
-	m.Update(m.deleteNode(f, model.PresenceLeftOnly)())
+	m.Update(runFirst(m.deleteNode(f, model.PresenceLeftOnly)))
 	if file("only/f.txt") != nil {
 		t.Error("the deleted file is still in the tree")
 	}

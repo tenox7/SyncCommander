@@ -154,7 +154,7 @@ func TestFolderCopyAsksWhetherToDelete(t *testing.T) {
 			if _, ok := runFirst(cmd).(copyDoneMsg); !ok {
 				t.Fatalf("%s: the copy did not run", tc.name)
 			}
-		} else if cmd != nil || m.copying || m.pendingCopy != nil {
+		} else if cmd != nil || m.copying() || m.pendingCopy != nil {
 			t.Fatalf("%s: %s did not cancel", tc.name, tc.key)
 		}
 		if _, err := os.Stat(filepath.Join(right, "d", "new.txt")); (err == nil) != tc.copied {

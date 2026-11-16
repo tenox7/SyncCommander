@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -35,8 +36,12 @@ func (m *Model) View() string {
 
 	operation := ""
 	switch {
-	case m.deleting:
+	case m.deleting():
 		operation = spinner + " deleting..."
+	case m.running(opRename):
+		operation = spinner + " renaming..."
+	case m.running(opTouch):
+		operation = spinner + " touching..."
 	case m.checksumming():
 		operation = spinner + " checksumming..."
 	}
@@ -50,20 +55,20 @@ func (m *Model) View() string {
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, RenderStatusBar(status, m.width))
 
-	if m.copying {
+	if m.copying() {
 		screen = overlayCentered(screen, m.copyPopup(), m.width, m.height)
 	}
-	if m.deleting {
+	if m.deleting() {
 		screen = overlayCentered(screen, m.deletePopup(), m.width, m.height)
 	}
 	return shownScreen(screen)
 }
 
 // setPanelSpinners marks the sides with work in flight: both during a
-// transfer or checksum, otherwise whichever side the scanner is listing.
+// write or checksum, otherwise whichever side the scanner is listing.
 func (m *Model) setPanelSpinners(spinner string, progress model.ScanProgress) {
 	left, right := spinner, spinner
-	if !m.transferring() && !m.checksumming() {
+	if !m.writing() && !m.checksumming() {
 		left, right = "", ""
 		if progress.LeftActive {
 			left = spinner
@@ -147,18 +152,20 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		info.Objects = m.cachedStats.TotalFiles + m.cachedStats.TotalDirs
 	}
 	switch {
-	case m.copying:
+	case m.copying():
 		info.State = "COPY"
 		info.FilesDone = m.copyProgress.Done.Load()
 		info.FilesTotal = m.copyProgress.Total.Load()
 		info.BytesCopied = m.copyProgress.Bytes.Load()
 		info.BaseBytes = m.copyProgress.BaseBytes.Load()
 		info.Elapsed = elapsedSince(m.copyProgress.Start.Load())
-	case m.deleting:
+	case m.deleting():
 		info.State = "DELETE"
 		info.FilesDone = m.deleteProgress.Done.Load()
 		info.FilesTotal = m.deleteProgress.Total.Load()
 		info.Elapsed = elapsedSince(m.deleteProgress.Start.Load())
+	case m.writing():
+		info.State = strings.ToUpper(m.write.kind.String()) // RENAME, TOUCH
 	case m.checksumming() || progress.Phase == model.PhaseChecksumming:
 		info.State = "CHECKSUM"
 		info.ChecksumDone = progress.ChecksumDone

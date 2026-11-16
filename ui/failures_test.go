@@ -33,8 +33,7 @@ func TestFailedDeleteOpensTheLog(t *testing.T) {
 		t.Fatal("no file present on both sides")
 	}
 	settled(m)
-	m.deleting = true
-	m.Update(m.deleteNode(node, model.PresenceBoth)())
+	m.Update(runFirst(m.deleteNode(node, model.PresenceBoth)))
 	if !m.logView.visible {
 		t.Fatal("a delete failed and the log stayed closed")
 	}

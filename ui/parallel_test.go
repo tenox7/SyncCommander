@@ -35,7 +35,7 @@ func TestPlusMinusChangeFilesInFlight(t *testing.T) {
 	sem := transfer.NewDynSem(2)
 	m.copyProgress.Reset(2, true)
 	m.copyProgress.Sem.Store(sem)
-	m.copying = true
+	runningOp(m, opCopy, nil)
 
 	for range 3 {
 		press(m, "+")
@@ -102,7 +102,7 @@ func TestSettingsParallelReachesPoolsAtNextCopy(t *testing.T) {
 	if file == nil {
 		t.Fatal("fake tree has no file")
 	}
-	if _, ok := m.copyNode(file, true, copyChoices{})().(copyDoneMsg); !ok {
+	if _, ok := runFirst(m.copyNode(file, true, copyChoices{})).(copyDoneMsg); !ok {
 		t.Fatal("copy did not finish")
 	}
 	if left.n != 7 || right.n != 7 {

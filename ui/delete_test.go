@@ -30,7 +30,7 @@ func TestDeleteHalfFailureIsCounted(t *testing.T) {
 	}
 	name, parent := node.Name, node.Parent
 	failedBefore := transport.Log.FailedCount()
-	if _, ok := m.deleteNode(node, model.PresenceBoth)().(deleteDoneMsg); !ok {
+	if _, ok := runFirst(m.deleteNode(node, model.PresenceBoth)).(opDoneMsg); !ok {
 		t.Fatal("delete did not finish")
 	}
 	if got := m.deleteProgress.Failed.Load(); got != 1 {
