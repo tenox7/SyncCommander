@@ -273,6 +273,10 @@ func (c *copier) copyOne(f item) {
 	defer p.Done.Add(1)
 	srcEntry, dstEntry := f.src, f.dst
 	if srcEntry == nil {
+		// Nothing to copy is not a success: counted as done, it would let the
+		// mirror pass delete while nothing was written.
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": not on the source side")
 		return
 	}
 	if srcEntry.IsDir {

@@ -151,6 +151,18 @@ func (n *TreeNode) Entries() (left, right *FileEntry) {
 	return n.Sides[SideLeft].Entry, n.Sides[SideRight].Entry
 }
 
+// IsRoot reports the top row. It has no entries: it stands for both base
+// directories, which always exist.
+func (n *TreeNode) IsRoot() bool { return n.IsDir && n.RelPath == "" }
+
+// dirOn reports whether n is a directory on side.
+func (n *TreeNode) dirOn(side Side) bool {
+	if e := n.Sides[side].Entry; e != nil {
+		return e.IsDir
+	}
+	return n.IsRoot()
+}
+
 // oneSideSummed reports a file with a cached checksum on exactly one side.
 func (n *TreeNode) oneSideSummed() bool {
 	return (n.Sides[SideLeft].Checksum != "") != (n.Sides[SideRight].Checksum != "")
@@ -819,8 +831,7 @@ func UnlistedDir(node *TreeNode) *TreeNode {
 func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, result *[]*TreeNode) {
 	from, to := CopySides(leftToRight)
 	src, dst := node.Sides[from].Entry, node.Sides[to].Entry
-	srcIsDir := src != nil && src.IsDir
-	if !srcIsDir {
+	if !node.dirOn(from) {
 		switch node.Compare.Presence {
 		case PresenceBoth:
 			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
