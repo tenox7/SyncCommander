@@ -648,12 +648,20 @@ func (b *RsyncBackend) Rename(context.Context, string, string) error {
 	return errors.New("rsync: rename not supported")
 }
 
-func rsyncFilterEscape(name string) string {
-	if !strings.ContainsAny(name, "*?[") {
+// rsyncFilterName writes name into a filter rule so that the rule matches
+// only that name. rsync reads a rule as a wildcard pattern when it holds *,
+// ? or [ (exclude.c add_rule), and in a pattern a backslash makes the byte
+// after it stand for itself; it compares any other rule as written,
+// backslashes too. wild says the rule is a pattern whatever the name holds,
+// as a rule ending in "/***" is.
+func rsyncFilterName(name string, wild bool) string {
+	if !wild && !strings.ContainsAny(name, "*?[") {
 		return name
 	}
-	return strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`).Replace(name)
+	return rsyncFilterEscaper.Replace(name)
 }
+
+var rsyncFilterEscaper = strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`)
 
 func (b *RsyncBackend) Remove(ctx context.Context, relPath string) error {
 	return b.remove(ctx, relPath, false)
@@ -683,11 +691,11 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	}
 	defer os.RemoveAll(tmpDir)
 
-	esc := rsyncFilterEscape(path.Base(clean))
-	args := []string{"-r", "--delete", "--include=/" + esc}
+	name := path.Base(clean)
+	args := []string{"-r", "--delete", "--include=/" + rsyncFilterName(name, false)}
 	op := "REMOVE"
 	if recursive {
-		args = append(args, "--include=/"+esc+"/***")
+		args = append(args, "--include=/"+rsyncFilterName(name, true)+"/***")
 		op = "REMOVEALL"
 	}
 	args = append(args, "--exclude=*", tmpDir+"/", dest+"/")
