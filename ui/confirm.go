@@ -23,6 +23,7 @@ func (d *ConfirmDialog) Open(title string, lines []string, danger bool) {
 	d.title = title
 	d.lines = lines
 	d.danger = danger
+	d.choiceMode = false
 }
 
 func (d *ConfirmDialog) OpenChoice(title string, lines []string, danger bool) {

@@ -180,7 +180,7 @@ func TestRenameAndDeleteKeysOpenDialogs(t *testing.T) {
 		t.Fatal("esc left the rename input open")
 	}
 	press(m, "d")
-	if !m.confirm.IsOpen() || m.pendingDelete != file {
+	if !m.confirm.IsOpen() || m.pendingDelete == nil || m.pendingDelete.node != file {
 		t.Fatalf("d: confirm open=%v pending=%v", m.confirm.IsOpen(), m.pendingDelete)
 	}
 	press(m, "esc") // a both-side file asks which side to delete; esc cancels

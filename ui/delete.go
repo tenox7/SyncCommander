@@ -40,14 +40,23 @@ type deleteSide struct {
 	name    string
 }
 
+// pendingDeleteInfo is a delete waiting in its dialog. presence is the
+// node's presence when the dialog opened: the sides the user was asked about.
+type pendingDeleteInfo struct {
+	node     *model.TreeNode
+	presence model.Presence
+}
+
 // openDelete asks before deleting the node; a both-side node also asks which
 // side.
 func (m *Model) openDelete(node *model.TreeNode) {
 	if node == nil {
 		return
 	}
-	m.pendingDelete = node
-	m.readTree(func(*model.TreeNode) { m.buildDeleteConfirm(node) })
+	m.readTree(func(*model.TreeNode) {
+		m.pendingDelete = &pendingDeleteInfo{node: node, presence: node.Compare.Presence}
+		m.buildDeleteConfirm(node)
+	})
 }
 
 func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
@@ -83,9 +92,17 @@ func describeSubtree(node *model.TreeNode) string {
 	return fmt.Sprintf("%d files, %d folders", files, dirs)
 }
 
-// confirmDelete runs the pending delete on side.
+// confirmDelete runs the pending delete on side. When a rescan changed the
+// node's sides while the dialog was open, the answer was about other sides
+// than the node has now: nothing is deleted and the dialog asks again.
 func (m *Model) confirmDelete(side model.Presence) tea.Cmd {
-	node := m.pendingDelete
+	pd := m.pendingDelete
+	if m.presence(pd.node) != pd.presence {
+		m.openDelete(pd.node)
+		m.confirm.lines = append(m.confirm.lines, "", "⚠ This changed while the dialog was open. Check the sides again.")
+		return nil
+	}
+	node := pd.node
 	m.pendingDelete = nil
 	m.confirm.Close()
 	m.deleting = true

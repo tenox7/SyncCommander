@@ -39,7 +39,7 @@ type Model struct {
 	copyProgress   *transfer.Progress
 	deleteProgress *DeleteProgress
 	pendingCopy    *pendingCopyInfo
-	pendingDelete  *model.TreeNode
+	pendingDelete  *pendingDeleteInfo
 	copyParallel   int
 	parallelMax    int
 	batchTransfer  bool

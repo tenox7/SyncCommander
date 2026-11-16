@@ -168,7 +168,7 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	case "y", "Y":
 		switch {
 		case m.pendingDelete != nil:
-			return m.confirmDelete(m.presence(m.pendingDelete))
+			return m.confirmDelete(m.pendingDelete.presence)
 		case m.pendingCopy != nil:
 			return m.confirmCopy()
 		}
