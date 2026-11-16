@@ -168,18 +168,31 @@ func (c *md4Cache) fromFileList(scope string, recursive bool, list []rsyncpkg.Fi
 func rsyncModeToFileMode(m int32) os.FileMode {
 	mode := os.FileMode(m) & os.ModePerm
 	switch m & rsyncpkg.S_IFMT {
+	case rsyncpkg.S_IFREG:
 	case rsyncpkg.S_IFDIR:
 		mode |= os.ModeDir
 	case rsyncpkg.S_IFLNK:
 		mode |= os.ModeSymlink
+	case rsyncpkg.S_IFIFO:
+		mode |= os.ModeNamedPipe
+	case rsyncpkg.S_IFSOCK:
+		mode |= os.ModeSocket
+	case rsyncpkg.S_IFCHR:
+		mode |= os.ModeDevice | os.ModeCharDevice
+	case rsyncpkg.S_IFBLK:
+		mode |= os.ModeDevice
+	default:
+		mode |= os.ModeIrregular
 	}
 	return mode
 }
 
 // fileInfoEntry converts one dry-run file list item to an entry under scope;
-// false for the "." self entry and for symlinks.
+// false for the "." self entry. Stock rsync lists no links, pipes or devices
+// without -l and -D; gorsyncd lists them, and they keep their type here: a
+// pipe taken for a file would be opened by a download (L2, L9).
 func fileInfoEntry(scope string, fi rsyncpkg.FileInfo) (model.FileEntry, bool) {
-	if fi.Name == "" || fi.Name == "." || fi.Mode&rsyncpkg.S_IFMT == rsyncpkg.S_IFLNK {
+	if fi.Name == "" || fi.Name == "." {
 		return model.FileEntry{}, false
 	}
 	mode := rsyncModeToFileMode(fi.Mode)

@@ -196,6 +196,7 @@ func copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []
 		side = "left"
 	}
 	collisions := model.CollectTypeCollisions(node, leftToRight)
+	_, dst := model.CopySides(leftToRight)
 	var delFiles, delDirs int
 	if node.IsDir {
 		delFiles, delDirs = model.CountMirrorDeletes(node, leftToRight)
@@ -213,7 +214,7 @@ func copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []
 		for i, c := range collisions {
 			replace = append(replace, c.RelPath)
 			if i < maxConfirmPaths {
-				lines = append(lines, "  "+describeTwin(c))
+				lines = append(lines, "  "+describeTwin(c, dst))
 			}
 		}
 		if n := len(collisions) - maxConfirmPaths; n > 0 {
@@ -230,9 +231,13 @@ func copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []
 }
 
 // describeTwin names a destination entry a copy replaces with the other type.
-func describeTwin(n *model.TreeNode) string {
+func describeTwin(n *model.TreeNode, dst model.Side) string {
 	if !n.IsDir {
-		return n.RelPath + "  (file)"
+		kind := "file"
+		if e := n.Sides[dst].Entry; e != nil {
+			kind = e.Kind()
+		}
+		return n.RelPath + "  (" + kind + ")"
 	}
 	return n.RelPath + "/  (folder: " + describeSubtree(n) + ")"
 }

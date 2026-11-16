@@ -65,9 +65,8 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 			// the other side. Fail the folder instead.
 			return nil, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
+		// A link, pipe or device is listed with its type, so the tree shows
+		// it and a copy does not take its name for free; nothing reads it.
 		entry := model.FileEntry{
 			RelPath: path.Join(relDir, d.Name()),
 			Name:    d.Name(),
@@ -83,7 +82,7 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 }
 
 func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	f, err := os.Open(b.LocalPath(relPath))
+	f, err := openRegular(b.LocalPath(relPath))
 	if err != nil {
 		return "", err
 	}
@@ -157,10 +156,12 @@ func (b *LocalBackend) write(ctx context.Context, relPath string, flags int, mod
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
 	}
-	if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+	if fi, err := os.Lstat(p); err == nil && fi.IsDir() {
 		return fmt.Errorf("local: refuse to overwrite existing directory %s", p)
+	} else if err == nil && !fi.Mode().IsRegular() {
+		return specialFileErr(p, fi.Mode())
 	}
-	f, err := os.OpenFile(p, flags, mode)
+	f, err := os.OpenFile(p, flags|oNoFollow, mode)
 	if err != nil {
 		return err
 	}
@@ -183,7 +184,7 @@ func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 }
 
 func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	f, err := os.Open(b.LocalPath(relPath))
+	f, err := openRegular(b.LocalPath(relPath))
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +201,29 @@ func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode
 	if mode == 0 {
 		mode = 0755
 	}
-	return os.MkdirAll(b.LocalPath(relPath), mode.Perm())
+	p := b.LocalPath(relPath)
+	if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return specialFileErr(p, fi.Mode()) // files written in it would land in the link's target
+	}
+	return os.MkdirAll(p, mode.Perm())
+}
+
+// openRegular opens a local file for reading, and nothing else: a named pipe
+// would block the open until a writer comes, and a link would be read
+// through, out of the tree (L2, L9).
+func openRegular(p string) (*os.File, error) {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, specialFileErr(p, fi.Mode())
+	}
+	return os.Open(p)
+}
+
+func specialFileErr(p string, m os.FileMode) error {
+	return fmt.Errorf("local: %s is a %s: %w", p, model.KindName(m), ErrSpecialFile)
 }
 
 // Rename refuses an existing target, which os.Rename would replace. A target

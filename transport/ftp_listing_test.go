@@ -20,6 +20,7 @@ import (
 // as a name, answering with an empty listing.
 type fakeFTPD struct {
 	ls          map[string][]string // folder -> ls -l lines, dot names too
+	mlsd        map[string][]string // folder -> MLSD lines; set, the server offers MLSD
 	files       map[string]fakeFTPFile
 	dashAIsName bool
 	mu          sync.Mutex
@@ -86,6 +87,10 @@ func (f *fakeFTPD) serve(c net.Conn) {
 		case "PASS":
 			reply("230 Login successful.")
 		case "FEAT":
+			if f.mlsd != nil {
+				reply("211-Features:\r\n EPSV\r\n PASV\r\n SIZE\r\n MLST type*;size*;modify*;\r\n211 End")
+				continue
+			}
 			reply("211-Features:\r\n EPSV\r\n PASV\r\n SIZE\r\n211 End")
 		case "TYPE":
 			reply("200 Switching to Binary mode.")
@@ -123,6 +128,24 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			}
 			dc.Close()
 			reply("226 Directory send OK.")
+		case "MLSD":
+			lines, ok := f.mlsd[path.Clean(arg)]
+			if !ok || pasv == nil {
+				reply("550 Failed to list.")
+				continue
+			}
+			reply("150 Here comes the listing.")
+			dc, err := pasv.Accept()
+			pasv.Close()
+			pasv = nil
+			if err != nil {
+				continue
+			}
+			for _, l := range lines {
+				io.WriteString(dc, l+"\r\n")
+			}
+			dc.Close()
+			reply("226 Listing done.")
 		case "RETR":
 			file, ok := f.files[path.Clean(arg)]
 			if !ok || pasv == nil {

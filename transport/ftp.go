@@ -310,13 +310,18 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if e.Name == "." || e.Name == ".." || e.Type == ftp.EntryTypeLink {
+		if e.Name == "." || e.Name == ".." {
 			continue
 		}
 		isDir := e.Type == ftp.EntryTypeFolder
 		mode := os.FileMode(0644)
-		if isDir {
+		switch e.Type {
+		case ftp.EntryTypeFolder:
 			mode = os.ModeDir | 0755
+		case ftp.EntryTypeLink:
+			mode = os.ModeSymlink | 0777 // listed, never read or written through (L2)
+		case ftpEntrySpecial:
+			mode = os.ModeIrregular | 0644
 		}
 		modTime := e.Time
 		if useMDTM {
@@ -381,6 +386,7 @@ func (b *FTPBackend) listChecked(arg string) ([]*ftp.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	markMLSDTypes(raw, entries)
 	if n, example := unparsedLines(raw, entries); n > 0 {
 		return nil, fmt.Errorf("LIST %s: the server sent %d listing line(s) sc cannot read, such as %q", arg, n, example)
 	}
@@ -448,6 +454,58 @@ func unparsedLines(raw []byte, entries []*ftp.Entry) (n int, example string) {
 		}
 	}
 	return len(lines) - len(entries), left[0]
+}
+
+// ftpEntrySpecial marks an MLSD entry whose type is neither file nor
+// folder nor symbolic link: a device or a pipe.
+const ftpEntrySpecial ftp.EntryType = -1
+
+// markMLSDTypes reads the type fact of the raw MLSD lines. The library knows
+// only file and dir, and lists any other type as a file: a link
+// (OS.unix=symlink, OS.unix=slink:target) would be read and written
+// through, and a device opened (L2, L9). The name is what follows the
+// first space, as the library takes it.
+func markMLSDTypes(raw []byte, entries []*ftp.Entry) {
+	var special map[string]ftp.EntryType
+	s := bufio.NewScanner(bytes.NewReader(raw))
+	for s.Scan() {
+		line := strings.TrimRight(s.Text(), "\r")
+		semi, space := strings.Index(line, ";"), strings.Index(line, " ")
+		if semi < 0 || space < 0 || semi > space {
+			continue // not an MLSD line
+		}
+		for _, fact := range strings.Split(line[:space], ";") {
+			k, v, _ := strings.Cut(fact, "=")
+			if !strings.EqualFold(k, "type") {
+				continue
+			}
+			t := mlsdType(v)
+			if t == ftp.EntryTypeFile || t == ftp.EntryTypeFolder {
+				break
+			}
+			if special == nil {
+				special = make(map[string]ftp.EntryType)
+			}
+			special[line[space+1:]] = t
+		}
+	}
+	for _, e := range entries {
+		if t, ok := special[e.Name]; ok {
+			e.Type = t
+		}
+	}
+}
+
+func mlsdType(v string) ftp.EntryType {
+	switch v = strings.ToLower(v); {
+	case v == "file":
+		return ftp.EntryTypeFile
+	case v == "dir" || v == "cdir" || v == "pdir":
+		return ftp.EntryTypeFolder
+	case strings.HasPrefix(v, "os.unix=symlink") || strings.HasPrefix(v, "os.unix=slink"):
+		return ftp.EntryTypeLink
+	}
+	return ftpEntrySpecial
 }
 
 // listCapture records what a listing's data connection reads while a List

@@ -125,7 +125,7 @@ const unreadRecord = `%s\t%T@\t%A@\t%C@\t%m\tD\t`
 // or an entry it cannot lstat, becomes a record of type ! holding the error
 // in the first field and the full path last. A file deleted while it lists
 // is skipped: leaving it out is right.
-const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":"f";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
+const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
 
 func (s *sshShell) listCmd(dir string, recursive bool) string {
 	if s.usePerl.Load() {
@@ -307,10 +307,12 @@ type listRecord struct {
 }
 
 // parseListRecord decodes one lister record; the trailing name field may
-// contain anything but NUL. Symlinks are skipped like on every backend.
+// contain anything but NUL. A link, pipe or device keeps its type (find's
+// %y letter) in the mode: it is listed, never read or written through (L2,
+// L9).
 func parseListRecord(rec string) (listRecord, bool) {
 	f := strings.SplitN(rec, "\t", 7)
-	if len(f) < 7 || f[5] == "l" {
+	if len(f) < 7 {
 		return listRecord{}, false
 	}
 	if f[5] == "!" {
@@ -326,8 +328,22 @@ func parseListRecord(rec string) (listRecord, bool) {
 		IsDir:   f[5] == "d" || f[5] == "D",
 		Mode:    os.FileMode(modeVal),
 	}
-	if e.IsDir {
+	switch f[5] {
+	case "d", "D":
 		e.Mode |= os.ModeDir
+	case "f":
+	case "l":
+		e.Mode |= os.ModeSymlink
+	case "p":
+		e.Mode |= os.ModeNamedPipe
+	case "s":
+		e.Mode |= os.ModeSocket
+	case "b":
+		e.Mode |= os.ModeDevice
+	case "c":
+		e.Mode |= os.ModeDevice | os.ModeCharDevice
+	default:
+		e.Mode |= os.ModeIrregular
 	}
 	return listRecord{name: f[6], entry: e, unread: f[5] == "D"}, true
 }

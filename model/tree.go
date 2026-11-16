@@ -113,9 +113,12 @@ func (t *SideTotals) add(o SideTotals) {
 }
 
 type TreeNode struct {
-	RelPath        string
-	Name           string
-	IsDir          bool
+	RelPath string
+	Name    string
+	IsDir   bool
+	// IsSpecial marks a row of links, pipes or devices (FileEntry.IsSpecial):
+	// its own kind, so a file of the same name is a twin, as a folder is.
+	IsSpecial      bool
 	Sides          [2]SideState // indexed by Side
 	Parent         *TreeNode
 	Compare        CompareResult
@@ -292,19 +295,22 @@ func (c *ChangedPaths) index() {
 // Children/Listed/Expanded state; new entries are added, missing ones
 // dropped. changed names paths whose cached checksums must not survive.
 func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, opts CompareOpts, changed *ChangedPaths) []*TreeNode {
-	keyFor := func(name string, isDir bool) string {
-		if isDir {
+	keyFor := func(name string, isDir, special bool) string {
+		switch {
+		case isDir:
 			return name + "/"
+		case special:
+			return name + "\x00" // no name holds a NUL
 		}
 		return name
 	}
 	existing := make(map[string]*TreeNode, len(parent.Children))
 	for _, c := range parent.Children {
-		existing[keyFor(c.Name, c.IsDir)] = c
+		existing[keyFor(c.Name, c.IsDir, c.IsSpecial)] = c
 	}
 	byKey := make(map[string]*TreeNode)
-	pick := func(name string, isDir bool, relPath string) *TreeNode {
-		k := keyFor(name, isDir)
+	pick := func(name string, isDir, special bool, relPath string) *TreeNode {
+		k := keyFor(name, isDir, special)
 		if n, ok := byKey[k]; ok {
 			return n
 		}
@@ -316,23 +322,24 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 			return old
 		}
 		n := &TreeNode{
-			RelPath: relPath,
-			Name:    name,
-			IsDir:   isDir,
-			Depth:   depth,
-			Parent:  parent,
+			RelPath:   relPath,
+			Name:      name,
+			IsDir:     isDir,
+			IsSpecial: special,
+			Depth:     depth,
+			Parent:    parent,
 		}
 		byKey[k] = n
 		return n
 	}
 	for i := range leftEntries {
 		e := &leftEntries[i]
-		n := pick(e.Name, e.IsDir, e.RelPath)
+		n := pick(e.Name, e.IsDir, e.IsSpecial(), e.RelPath)
 		n.Sides[SideLeft].Entry = e
 	}
 	for i := range rightEntries {
 		e := &rightEntries[i]
-		n := pick(e.Name, e.IsDir, e.RelPath)
+		n := pick(e.Name, e.IsDir, e.IsSpecial(), e.RelPath)
 		n.Sides[SideRight].Entry = e
 	}
 	nodes := make([]*TreeNode, 0, len(byKey))
@@ -377,7 +384,7 @@ func pruneSubtreeToSide(children []*TreeNode, keep Side, opts CompareOpts) []*Tr
 // Compare.Checksum reflects whatever survived: AttrUnknown when either side
 // is missing a cached sum and both sides are present.
 func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
-	if n.IsDir {
+	if n.IsDir || n.IsSpecial {
 		return
 	}
 	for s := range n.Sides {
@@ -406,7 +413,8 @@ func checksumStatus(n *TreeNode) AttrStatus {
 	return AttrDifferent
 }
 
-// sortNodes orders directories first, then by name.
+// sortNodes orders directories first, then by name, a file before its
+// special twin.
 func sortNodes(nodes []*TreeNode) {
 	slices.SortFunc(nodes, func(a, b *TreeNode) int {
 		if a.IsDir != b.IsDir {
@@ -415,9 +423,19 @@ func sortNodes(nodes []*TreeNode) {
 			}
 			return 1
 		}
-		return strings.Compare(a.Name, b.Name)
+		if c := strings.Compare(a.Name, b.Name); c != 0 || a.IsSpecial == b.IsSpecial {
+			return c
+		}
+		if a.IsSpecial {
+			return 1
+		}
+		return -1
 	})
 }
+
+// sameKind reports rows of one kind: folder, file, or special. Rows of one
+// name and different kinds are twins.
+func sameKind(a, b *TreeNode) bool { return a.IsDir == b.IsDir && a.IsSpecial == b.IsSpecial }
 
 func compareNode(n *TreeNode, opts CompareOpts) {
 	l, r := n.Entries()
@@ -430,7 +448,7 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 		n.Compare.Presence = PresenceLeftOnly
 		return
 	}
-	if n.IsDir {
+	if n.IsDir || n.IsSpecial {
 		n.Compare.Size = AttrNA
 		n.Compare.ModTime = AttrNA
 		n.Compare.ATime = AttrNA
@@ -868,15 +886,16 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 }
 
 // CollectTypeCollisions returns the destination nodes a copy of node has to
-// remove before it can write: same-name twins of the opposite type (file vs
-// folder) of node itself, and of every node the copy writes inside it. Twins
-// of node's siblings belong to other copies and are never returned.
+// remove before it can write: same-name twins of another kind (file, folder,
+// link or other special) of node itself, and of every node the copy writes
+// inside it. Twins of node's siblings belong to other copies and are never
+// returned. A special source row is never written, so nothing is in its way.
 func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 	var result []*TreeNode
 	src, dst := CopySides(leftToRight)
-	if node.Parent != nil && node.Sides[src].Entry != nil {
+	if node.Parent != nil && node.Sides[src].Entry != nil && !node.IsSpecial {
 		for _, sib := range node.Parent.Children {
-			if sib != node && sib.Name == node.Name && sib.IsDir != node.IsDir && sib.Sides[dst].Entry != nil {
+			if sib != node && sib.Name == node.Name && !sameKind(sib, node) && sib.Sides[dst].Entry != nil {
 				result = append(result, sib)
 			}
 		}
@@ -887,32 +906,38 @@ func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 	return result
 }
 
-// findTwinPairs appends each child that is on the destination side only and
-// has a same-name twin of the other type on the source side.
+// findTwinPairs appends each child on the destination side that has a
+// same-name twin of another kind on the source side, which the copy writes
+// there. A special source row is never written, so its twin stays.
 func findTwinPairs(children []*TreeNode, leftToRight bool, result *[]*TreeNode) {
 	src, dst := CopySides(leftToRight)
-	var dirs map[string]*TreeNode
+	// Twins need a folder or a special row; most folders have no name twice.
+	var named map[string][]*TreeNode
 	for _, c := range children {
-		if c.IsDir {
-			if dirs == nil {
-				dirs = make(map[string]*TreeNode)
+		if c.IsDir || c.IsSpecial {
+			if named == nil {
+				named = make(map[string][]*TreeNode)
 			}
-			dirs[c.Name] = c
+			named[c.Name] = append(named[c.Name], c)
 		}
 	}
-	if dirs == nil {
+	if named == nil {
 		return
 	}
-	for _, f := range children {
-		d := dirs[f.Name]
-		if f.IsDir || d == nil {
+	for _, c := range children {
+		if g, ok := named[c.Name]; ok && !c.IsDir && !c.IsSpecial {
+			named[c.Name] = append(g, c)
+		}
+	}
+	for _, b := range children {
+		if b.Sides[dst].Entry == nil {
 			continue
 		}
-		switch {
-		case f.Sides[src].Entry != nil && d.Sides[dst].Entry != nil:
-			*result = append(*result, d)
-		case d.Sides[src].Entry != nil && f.Sides[dst].Entry != nil:
-			*result = append(*result, f)
+		for _, a := range named[b.Name] {
+			if !sameKind(a, b) && !a.IsSpecial && a.Sides[src].Entry != nil {
+				*result = append(*result, b)
+				break
+			}
 		}
 	}
 }
@@ -974,14 +999,14 @@ func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
 }
 
 // hasTwinWithSrc reports whether child has a sibling with the same Name but
-// opposite IsDir, where that sibling has a src-side entry. Used to exclude
+// another kind, where that sibling has a src-side entry. Used to exclude
 // type-collision twins from mirror-delete logic — they're cleaned up by
 // CollectTypeCollisions and would otherwise be double-processed (and risk
 // removing the just-copied file at the same path).
 func hasTwinWithSrc(parent, child *TreeNode, leftToRight bool) bool {
 	src, _ := CopySides(leftToRight)
 	for _, sibling := range parent.Children {
-		if sibling == child || sibling.Name != child.Name || sibling.IsDir == child.IsDir {
+		if sibling == child || sibling.Name != child.Name || sameKind(sibling, child) {
 			continue
 		}
 		if sibling.Sides[src].Entry != nil {

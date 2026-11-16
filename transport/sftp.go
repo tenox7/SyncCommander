@@ -136,9 +136,7 @@ func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileE
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
+		// Links, pipes and devices are listed with their type (L2, L9).
 		entry := model.FileEntry{
 			RelPath: path.Join(relDir, info.Name()),
 			Name:    info.Name(),

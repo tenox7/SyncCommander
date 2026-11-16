@@ -579,7 +579,7 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	var groups []checksumGroup
 	if node.IsDir {
 		groups = s.groupFiles(node, false)
-	} else if node.Compare.Presence == PresenceBoth {
+	} else if node.Compare.Presence == PresenceBoth && !node.IsSpecial {
 		groups = []checksumGroup{{files: []*TreeNode{node}}}
 	}
 	s.resetChecksumPhase(groups)
@@ -790,7 +790,7 @@ func renamedEntry(e *FileEntry, name, rel string) *FileEntry {
 // the caller re-scans it.
 func mergeRenamedCollision(parent, node *TreeNode, opts CompareOpts) bool {
 	for i, sib := range parent.Children {
-		if sib == node || sib.Name != node.Name || sib.IsDir != node.IsDir {
+		if sib == node || sib.Name != node.Name || !sameKind(sib, node) {
 			continue
 		}
 		merged := false
@@ -1167,7 +1167,7 @@ func groupFilesByTopLevel(root *TreeNode, onlyPending bool) []checksumGroup {
 	var rootFiles []*TreeNode
 	for _, child := range root.Children {
 		if !child.IsDir {
-			if child.Compare.Presence == PresenceBoth && needsChecksum(child, onlyPending) {
+			if !child.IsSpecial && child.Compare.Presence == PresenceBoth && needsChecksum(child, onlyPending) {
 				rootFiles = append(rootFiles, child)
 			}
 			continue
@@ -1185,7 +1185,7 @@ func groupFilesByTopLevel(root *TreeNode, onlyPending bool) []checksumGroup {
 }
 
 func collectFiles(node *TreeNode, files *[]*TreeNode, onlyPending bool) {
-	if !node.IsDir && node.Compare.Presence == PresenceBoth && needsChecksum(node, onlyPending) {
+	if !node.IsDir && !node.IsSpecial && node.Compare.Presence == PresenceBoth && needsChecksum(node, onlyPending) {
 		*files = append(*files, node)
 	}
 	for _, child := range node.Children {

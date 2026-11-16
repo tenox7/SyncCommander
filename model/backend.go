@@ -19,6 +19,40 @@ type FileEntry struct {
 	Mode      os.FileMode
 }
 
+// IsSpecial reports an entry that is neither a folder nor a regular file: a
+// symbolic link, a named pipe, a socket or a device. It is listed, so the
+// tree shows it and a same-name file or folder on the other side is a type
+// conflict, but it is never read, summed or copied: a link leads out of the
+// tree, and opening a pipe waits for a writer (L2, L9).
+func (e *FileEntry) IsSpecial() bool { return !e.IsDir && e.Mode&os.ModeType != 0 }
+
+// Kind names what the entry is, for messages.
+func (e *FileEntry) Kind() string {
+	if e.IsDir {
+		return "folder"
+	}
+	return KindName(e.Mode)
+}
+
+// KindName names what an entry of mode m is, for messages.
+func KindName(m os.FileMode) string {
+	switch {
+	case m&os.ModeDir != 0:
+		return "folder"
+	case m&os.ModeSymlink != 0:
+		return "symbolic link"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeDevice != 0:
+		return "device"
+	case m&os.ModeType != 0:
+		return "special file"
+	}
+	return "file"
+}
+
 // Backend is one side of a sync. List returns every entry of relDir, or an
 // error when it cannot vouch for that: a listing that is short without an
 // error makes mirror delete what it left out. Under a context from

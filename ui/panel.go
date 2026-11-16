@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -177,9 +178,12 @@ func (p *Panel) renderRow(r model.Row) string {
 	sideIsDir := entry != nil && entry.IsDir
 
 	name := node.Name
-	if sideIsDir {
+	switch {
+	case sideIsDir:
 		name = p.dirStyle(node).Render(name + "/")
-	} else {
+	case entry != nil && entry.IsSpecial():
+		name = p.nodeStyle(node).Render(name + specialMark(entry))
+	default:
 		name = p.nodeStyle(node).Render(name)
 	}
 	arrow := "▶"
@@ -343,6 +347,9 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	if entry == nil {
 		return ""
 	}
+	if entry.IsSpecial() {
+		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), shortKind(entry)))
+	}
 	if !entry.IsDir {
 		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
 	}
@@ -351,6 +358,36 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 		return ""
 	}
 	return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", t.Dirs, t.Files, model.FormatSize(t.Size)))
+}
+
+// specialMark follows a link, pipe or socket's name, as in ls -F. sc lists
+// them but never reads or copies them.
+func specialMark(e *model.FileEntry) string {
+	switch {
+	case e.Mode&os.ModeSymlink != 0:
+		return "@"
+	case e.Mode&os.ModeNamedPipe != 0:
+		return "|"
+	case e.Mode&os.ModeSocket != 0:
+		return "="
+	}
+	return ""
+}
+
+// shortKind fills the size column of a special entry: its own size (a
+// link's is the length of its target's name) means nothing here.
+func shortKind(e *model.FileEntry) string {
+	switch {
+	case e.Mode&os.ModeSymlink != 0:
+		return "link"
+	case e.Mode&os.ModeNamedPipe != 0:
+		return "pipe"
+	case e.Mode&os.ModeSocket != 0:
+		return "socket"
+	case e.Mode&os.ModeDevice != 0:
+		return "device"
+	}
+	return "special"
 }
 
 func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {

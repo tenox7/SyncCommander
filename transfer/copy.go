@@ -57,6 +57,7 @@ type item struct {
 type entry struct {
 	relPath string
 	isDir   bool
+	kind    string // for messages: "file", "folder", "symbolic link", ...
 }
 
 type copier struct {
@@ -174,7 +175,7 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
 			if dstEntry := c.Sides[dst].Entry; dstEntry != nil {
-				collisions = append(collisions, entry{relPath: c.RelPath, isDir: dstEntry.IsDir})
+				collisions = append(collisions, entry{relPath: c.RelPath, isDir: dstEntry.IsDir, kind: dstEntry.Kind()})
 			}
 		}
 		nodes := []*model.TreeNode{req.Node}
@@ -184,7 +185,7 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 		files = make([]item, 0, len(nodes))
 		for _, f := range nodes {
 			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry}
-			if it.src != nil {
+			if it.src != nil && !it.src.IsSpecial() {
 				totalBytes += it.src.Size
 			}
 			files = append(files, it)
@@ -210,13 +211,6 @@ func (req Request) twinSet(collisions []entry) map[string]*twin {
 	return twins
 }
 
-func kindOf(isDir bool) string {
-	if isDir {
-		return "folder"
-	}
-	return "file"
-}
-
 // clearTwin removes the twin in the way of relPath, at that path or above
 // it, the first time a write needs it gone. An unconfirmed twin is never
 // removed: the write fails instead.
@@ -232,7 +226,7 @@ func (c *copier) clearTwin(relPath string) error {
 		return nil
 	}
 	tw.once.Do(func() {
-		kind := kindOf(tw.isDir)
+		kind := tw.kind
 		if !tw.confirmed {
 			tw.err = fmt.Errorf("the destination has a %s %s in the way, not replaced without confirmation (copy again to see the dialog)", kind, tw.relPath)
 			return
@@ -241,7 +235,7 @@ func (c *copier) clearTwin(relPath string) error {
 			tw.err = fmt.Errorf("could not remove the %s %s in the way: %w", kind, tw.relPath, err)
 			return
 		}
-		transport.Log.Add("copy", transport.DirIn, "removed "+kind+" "+tw.relPath+" to replace it with a "+kindOf(!tw.isDir))
+		transport.Log.Add("copy", transport.DirIn, "removed "+kind+" "+tw.relPath+" to put the copy there")
 	})
 	return tw.err
 }
@@ -283,8 +277,8 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	srcRoot := lp.LocalPath("")
 	var batchFiles, batchBytes int64
 	_ = filepath.WalkDir(filepath.Join(srcRoot, c.req.RelPath), func(_ string, d fs.DirEntry, werr error) error {
-		if werr != nil || d.IsDir() {
-			return nil
+		if werr != nil || !d.Type().IsRegular() {
+			return nil // rsync skips links, pipes and devices without -l and -D
 		}
 		if info, err := d.Info(); err == nil {
 			batchFiles++
@@ -378,6 +372,12 @@ func (c *copier) copyOne(f item) {
 		// mirror pass delete while nothing was written.
 		p.Failed.Add(1)
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": not on the source side")
+		return
+	}
+	// A link, pipe or device is never read or copied (L2, L9). It goes before
+	// the twin: nothing is written at its name, so nothing there is removed.
+	if srcEntry.IsSpecial() {
+		transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+srcEntry.Kind()+" (sc copies files and folders only)")
 		return
 	}
 	// A file can be one object on both sides even when its folders are not:

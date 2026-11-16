@@ -22,8 +22,8 @@ const diffMaxBytes = 8 << 20
 
 // openDiff opens the diff view on a file and starts loading both sides.
 func (m *Model) openDiff(node *model.TreeNode) tea.Cmd {
-	if node == nil || node.IsDir {
-		return nil
+	if node == nil || node.IsDir || node.IsSpecial {
+		return nil // a link or a pipe is never read
 	}
 	var cmd tea.Cmd
 	m.readTree(func(*model.TreeNode) {

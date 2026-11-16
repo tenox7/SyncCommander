@@ -2,6 +2,7 @@ package transport
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"testing"
 
@@ -18,8 +19,13 @@ func TestParseFindRecordKeepsTabsAndNewlinesInNames(t *testing.T) {
 	if e := r.entry; e.Size != 12 || e.IsDir || e.Mode != 0o644 || e.ModTime.Unix() != 1700000000 || e.ModTime.Nanosecond() != 500000000 {
 		t.Errorf("entry = %+v", e)
 	}
-	if _, ok := parseListRecord("1\t2\t3\t4\t777\tl\tlink"); ok {
-		t.Error("symlink record must be skipped")
+	// L2, L9: links, pipes, sockets and devices are listed with their type,
+	// never as files.
+	for letter, want := range map[string]os.FileMode{"l": os.ModeSymlink, "p": os.ModeNamedPipe, "s": os.ModeSocket, "b": os.ModeDevice, "c": os.ModeDevice | os.ModeCharDevice, "o": os.ModeIrregular} {
+		e, ok := parseListRecord("1\t2\t3\t4\t777\t" + letter + "\tx")
+		if !ok || e.entry.IsDir || e.entry.Mode.Type() != want || !e.entry.IsSpecial() {
+			t.Errorf("record of type %s = %+v ok=%v; want mode type %v, special", letter, e.entry, ok, want)
+		}
 	}
 	if d, ok := parseListRecord("0\t2\t3\t4\t755\td\tdir"); !ok || !d.entry.IsDir || !d.entry.Mode.IsDir() || d.unread {
 		t.Errorf("dir record = %+v ok=%v", d, ok)
