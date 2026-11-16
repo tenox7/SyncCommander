@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -492,14 +494,96 @@ func (c *copier) mirrorDelete() {
 			deletes = append(deletes, entry{relPath: d.RelPath, isDir: d.IsDir})
 		}
 	})
+	// The tree is a snapshot from before the copy. Each folder is listed
+	// again on both sides and a name is deleted only while it is still on the
+	// destination alone; see stillDestOnly.
+	var dirs []string
+	byDir := map[string][]entry{}
 	for _, d := range deletes {
+		dir := model.DirOf(d.relPath)
+		if _, ok := byDir[dir]; !ok {
+			dirs = append(dirs, dir)
+		}
+		byDir[dir] = append(byDir[dir], d)
+	}
+	for _, dir := range dirs {
 		if c.ctx.Err() != nil {
 			return
 		}
-		if err := c.remove(d); err != nil {
-			transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.relPath+": "+err.Error())
+		keep, err := c.stillDestOnly(dir)
+		if err != nil {
+			transport.Log.Add("copy", transport.DirErr, "mirror delete in "+displayPath(dir)+" skipped: "+err.Error())
 			continue
 		}
-		transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.relPath)
+		for _, d := range byDir[dir] {
+			if c.ctx.Err() != nil {
+				return
+			}
+			if why := keep(path.Base(d.relPath)); why != "" {
+				transport.Log.Add("copy", transport.DirWarn, "mirror delete "+d.relPath+" skipped: "+why)
+				continue
+			}
+			if err := c.remove(d); err != nil {
+				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.relPath+": "+err.Error())
+				continue
+			}
+			transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.relPath)
+		}
 	}
+}
+
+// stillDestOnly lists dir on both sides now, after the copy, and returns the
+// check a mirror delete in dir must pass: "" to delete name, else why not.
+//
+// Names are matched byte for byte, but a case-insensitive destination (macOS,
+// Windows, SMB, FAT) stores photo.jpg in the existing Photo.JPG: the copy
+// just wrote into the "destination-only" file. So a name that differs from a
+// source name only in letter case is kept, unless the destination lists both
+// names (then they are two files). And when a file copied into dir is not
+// listed under its own name or a case variant of it, the destination renames
+// what it stores (Unicode normalization, for one): nothing in dir is deleted.
+func (c *copier) stillDestOnly(dir string) (func(name string) string, error) {
+	srcList, err := c.src.List(c.ctx, dir)
+	if err != nil {
+		return nil, fmt.Errorf("listing the source: %w", err)
+	}
+	dstList, err := c.dst.List(c.ctx, dir)
+	if err != nil {
+		return nil, fmt.Errorf("listing the destination: %w", err)
+	}
+	onSrc := make(map[string]bool, len(srcList))
+	srcFold := make(map[string]string, len(srcList))
+	for _, e := range srcList {
+		onSrc[e.Name] = true
+		srcFold[strings.ToLower(e.Name)] = e.Name
+	}
+	onDst := make(map[string]bool, len(dstList))
+	dstFold := make(map[string]bool, len(dstList))
+	for _, e := range dstList {
+		onDst[e.Name] = true
+		dstFold[strings.ToLower(e.Name)] = true
+	}
+	c.mu.Lock()
+	var renamed string
+	for p := range c.dstChanged {
+		if name := path.Base(p); model.DirOf(p) == dir && !onDst[name] && !dstFold[strings.ToLower(name)] {
+			renamed = name
+			break
+		}
+	}
+	c.mu.Unlock()
+	return func(name string) string {
+		switch {
+		case renamed != "":
+			return "the destination does not list the copied " + renamed + " under that name, so names here cannot be matched"
+		case !onDst[name]:
+			return "no longer on the destination"
+		case onSrc[name]:
+			return "now on the source too"
+		}
+		if twin, ok := srcFold[strings.ToLower(name)]; ok && !onDst[twin] {
+			return "on this destination it is the same file as " + twin + " (the names differ only in letter case)"
+		}
+		return ""
+	}, nil
 }

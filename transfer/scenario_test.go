@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"sc/model"
@@ -338,4 +339,93 @@ func TestScenarioUnconfirmedConflictFoundAfterListing(t *testing.T) {
 		t.Errorf("failed=%d, want 1 (the file y)", p.Failed.Load())
 	}
 	wantTree(t, "copy of A without a dialog", right, "A/", "A/y/", "A/y/keep.txt", "A/z.txt")
+}
+
+func caseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, ".case-probe"), "")
+	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
+	os.Remove(filepath.Join(dir, ".case-probe"))
+	return err == nil
+}
+
+// F3: on a case-insensitive destination photo.jpg is written into the
+// existing Photo.JPG. The mirror pass must not delete Photo.JPG, the file it
+// just wrote, but still deletes what really is only on the destination.
+func TestScenarioMirrorCaseInsensitiveDestination(t *testing.T) {
+	root := t.TempDir()
+	if !caseInsensitive(t, root) {
+		t.Skip("this filesystem is case-sensitive")
+	}
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "album", "photo.jpg"), "the new picture")
+	writeFile(t, filepath.Join(left, "Docs", "a.txt"), "new text")
+	writeFile(t, filepath.Join(right, "album", "Photo.JPG"), "the old picture")
+	writeFile(t, filepath.Join(right, "album", "old.txt"), "only on the destination")
+	writeFile(t, filepath.Join(right, "DOCS", "a.txt"), "old")
+	s := newScenario(t, left, right)
+
+	p := s.copy(t, "", true, true)
+	if p.Failed.Load() != 0 {
+		t.Errorf("failed=%d", p.Failed.Load())
+	}
+	wantTree(t, "mirror to a case-insensitive disk", right, "DOCS/", "DOCS/a.txt", "album/", "album/Photo.JPG")
+	if got := readFile(t, filepath.Join(right, "album", "Photo.JPG")); got != "the new picture" {
+		t.Errorf("album/Photo.JPG = %q", got)
+	}
+	if got := readFile(t, filepath.Join(right, "DOCS", "a.txt")); got != "new text" {
+		t.Errorf("DOCS/a.txt = %q", got)
+	}
+}
+
+// F3: on a case-sensitive destination Photo.JPG and photo.jpg are two files,
+// so the mirror pass still removes the old name.
+func TestScenarioMirrorCaseSensitiveDestination(t *testing.T) {
+	left := t.TempDir()
+	writeFile(t, filepath.Join(left, "album", "photo.jpg"), "the picture")
+	lb := transport.NewLocalBackend(left)
+	rb, err := transport.NewFakeBackend("fake://x?dirs=0&files=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := rb.Mkdir(ctx, "album", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := rb.CopyFrom(ctx, "album/Photo.JPG", strings.NewReader("the picture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sc := model.NewScanner(lb, rb, 1, 1, true)
+	sc.Scan(ctx, scenarioOpts)
+	s := &scenario{left: left, lb: lb, rb: rb, sc: sc}
+	if p := s.copy(t, "album", true, true); p.Failed.Load() != 0 {
+		t.Errorf("failed=%d", p.Failed.Load())
+	}
+	entries, err := rb.List(ctx, "album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	if !slices.Equal(names, []string{"photo.jpg"}) {
+		t.Errorf("case-sensitive destination album/ holds %q, want [photo.jpg]", names)
+	}
+}
+
+// The tree is a snapshot: a name that reached the source after the scan is
+// not destination-only any more, and the mirror pass keeps it.
+func TestScenarioMirrorKeepsNameThatIsNowOnTheSource(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "a", "x.txt"), "x")
+	writeFile(t, filepath.Join(right, "a", "late.txt"), "made on both sides after the scan")
+	writeFile(t, filepath.Join(right, "a", "gone.txt"), "really only on the destination")
+	s := newScenario(t, left, right)
+	writeFile(t, filepath.Join(left, "a", "late.txt"), "made on both sides after the scan")
+	if p := s.copy(t, "a", true, true); p.Failed.Load() != 0 {
+		t.Errorf("failed=%d", p.Failed.Load())
+	}
+	wantTree(t, "mirror after the source changed", right, "a/", "a/late.txt", "a/x.txt")
 }
