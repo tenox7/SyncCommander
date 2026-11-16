@@ -626,6 +626,9 @@ func (b *FakeBackend) Rename(ctx context.Context, oldRelPath, newRelPath string)
 	if !ok {
 		return fmt.Errorf("fake: %s: %w", oldRelPath, fs.ErrNotExist)
 	}
+	if _, taken := b.lookup(newRelPath); taken {
+		return renameTargetTaken("fake", newRelPath)
+	}
 	e.RelPath = newRelPath
 	e.Name = strings.TrimPrefix(newRelPath[len(model.DirOf(newRelPath)):], "/")
 	b.putMut(oldRelPath, &fakeMut{deleted: true})

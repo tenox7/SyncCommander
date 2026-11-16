@@ -546,12 +546,17 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	}
 	resp, err := b.do(ctx, "MOVE", b.urlFor(oldRelPath, false), nil, map[string]string{
 		"Destination": b.urlFor(newRelPath, false),
-		"Overwrite":   "T",
+		// T would make the server delete an existing target first, a
+		// folder with all it holds.
+		"Overwrite": "F",
 	})
 	if err != nil {
 		return err
 	}
 	defer drainClose(resp.Body)
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		return renameTargetTaken("webdav", newRelPath)
+	}
 	if resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("MOVE %s: %s", oldRelPath, resp.Status)
 		Log.Add("webdav", DirErr, err.Error())

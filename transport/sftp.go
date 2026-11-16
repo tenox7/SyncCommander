@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -257,9 +258,16 @@ func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode)
 	return nil
 }
 
-// Rename prefers posix-rename@openssh.com, which replaces an existing target
-// the way mv does; plain SSH_FXP_RENAME is refused by OpenSSH in that case.
+// Rename refuses an existing target. It then prefers
+// posix-rename@openssh.com, which is rename(2); plain SSH_FXP_RENAME needs
+// hard links on OpenSSH. A case-only rename skips the check: on a
+// case-insensitive server the target is the file itself.
 func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
+	if !strings.EqualFold(oldRelPath, newRelPath) {
+		if _, err := b.sftp.Lstat(b.abs(newRelPath)); err == nil {
+			return renameTargetTaken("sftp", newRelPath)
+		}
+	}
 	rename := b.sftp.Rename
 	if _, ok := b.sftp.HasExtension("posix-rename@openssh.com"); ok {
 		rename = b.sftp.PosixRename

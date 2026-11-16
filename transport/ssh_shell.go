@@ -320,11 +320,18 @@ func (s *sshShell) Mkdir(ctx context.Context, relPath string, mode os.FileMode) 
 	return err
 }
 
-// Rename refuses an existing directory at the destination, where mv would
-// silently move the source inside it.
+// renameCmd moves src to dst unless dst is taken: mv would replace a file
+// there, or move src into a folder there. A dst that is src itself (a
+// case-only rename on a case-insensitive disk) is not taken, unless it is a
+// folder, where mv would move it into itself.
+func renameCmd(src, dst string) string {
+	src, dst = shellQuote(src), shellQuote(dst)
+	return fmt.Sprintf("if [ -d %[2]s ] || { { [ -e %[2]s ] || [ -L %[2]s ]; } && ! [ %[1]s -ef %[2]s ]; }; then echo destination already exists >&2; exit 1; fi; mv %[1]s %[2]s", src, dst)
+}
+
+// Rename refuses a taken destination; see renameCmd.
 func (s *sshShell) Rename(ctx context.Context, oldRel, newRel string) error {
-	src, dst := shellQuote(s.abs(oldRel)), shellQuote(s.abs(newRel))
-	_, err := s.run(ctx, fmt.Sprintf("if [ -d %s ]; then echo destination is a directory >&2; exit 1; fi; mv %s %s", dst, src, dst))
+	_, err := s.run(ctx, renameCmd(s.abs(oldRel), s.abs(newRel)))
 	s.listCache.forgetRenamed(oldRel, newRel)
 	return err
 }

@@ -137,7 +137,7 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrUnsupported) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

@@ -373,6 +373,11 @@ func (b *RcloneBackend) ensureDir(ctx context.Context, relPath string) error {
 }
 
 func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	if taken, err := nameTaken(ctx, b.liveList, newRelPath); err != nil {
+		return err
+	} else if taken {
+		return renameTargetTaken("rclone", newRelPath)
+	}
 	b.dirs.Clear()
 	defer func() {
 		b.objs.drop(oldRelPath)

@@ -114,8 +114,17 @@ func TestSFTPBackendE2E(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "dir", "b.bin"), []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := b.Rename(ctx, "dir/a.bin", "dir/b.bin"); err == nil {
+		t.Fatal("rename onto an existing file succeeded")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "dir", "b.bin")); string(got) != "old" {
+		t.Fatalf("a refused rename replaced the target: %q", got)
+	}
+	if err := os.Remove(filepath.Join(root, "dir", "b.bin")); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.Rename(ctx, "dir/a.bin", "dir/b.bin"); err != nil {
-		t.Fatal("rename onto existing:", err)
+		t.Fatal("rename to a free name:", err)
 	}
 	mtime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	if err := b.SetTimes(ctx, "dir/b.bin", mtime, mtime, time.Time{}); err != nil {

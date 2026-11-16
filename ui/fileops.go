@@ -31,8 +31,43 @@ func (m *Model) openRename(node *model.TreeNode) {
 			transport.Log.Add("rename", transport.DirErr, oldName+": a name cannot contain a path separator")
 			return nil
 		}
+		var taken string
+		m.readTree(func(*model.TreeNode) { taken = renameTaken(node, newName) })
+		if taken != "" {
+			m.input.SetError(taken)
+			return nil
+		}
 		return m.renameNode(node, newName)
 	})
+}
+
+// renameTaken says where newName is already used next to node, on a side
+// the rename writes to (the sides node exists on), or "" when it is free
+// there. The rename would replace that entry: a file, or a whole folder on
+// WebDAV. A name used only on the other side is fine: the rename then joins
+// the two rows into one.
+func renameTaken(node *model.TreeNode, newName string) string {
+	if node.Parent == nil {
+		return ""
+	}
+	var taken [2]bool
+	for _, sib := range node.Parent.Children {
+		if sib == node || sib.Name != newName {
+			continue
+		}
+		for s := range taken {
+			taken[s] = taken[s] || node.Sides[s].Entry != nil && sib.Sides[s].Entry != nil
+		}
+	}
+	switch {
+	case taken[model.SideLeft] && taken[model.SideRight]:
+		return newName + " already exists on both sides"
+	case taken[model.SideLeft]:
+		return newName + " already exists on the left"
+	case taken[model.SideRight]:
+		return newName + " already exists on the right"
+	}
+	return ""
 }
 
 // renameNode renames the node on every side it exists on. When a side fails

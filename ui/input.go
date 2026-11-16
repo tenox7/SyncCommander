@@ -12,6 +12,7 @@ type InputDialog struct {
 	title   string
 	ed      lineEditor
 	onDone  func(string) tea.Cmd
+	err     string // why the last Enter was refused; the dialog stays open
 }
 
 func NewInputDialog() *InputDialog {
@@ -23,7 +24,12 @@ func (d *InputDialog) Open(title, initial string, onDone func(string) tea.Cmd) {
 	d.title = title
 	d.ed.set(initial)
 	d.onDone = onDone
+	d.err = ""
 }
+
+// SetError refuses the value just entered: called from onDone, it keeps the
+// dialog open with msg under the text.
+func (d *InputDialog) SetError(msg string) { d.err = msg }
 
 func (d *InputDialog) Close() {
 	d.visible = false
@@ -33,11 +39,14 @@ func (d *InputDialog) Close() {
 func (d *InputDialog) IsOpen() bool { return d.visible }
 
 func (d *InputDialog) Confirm() tea.Cmd {
+	d.err = ""
 	var cmd tea.Cmd
 	if d.onDone != nil {
 		cmd = d.onDone(d.ed.String())
 	}
-	d.Close()
+	if d.err == "" {
+		d.Close()
+	}
 	return cmd
 }
 
@@ -56,6 +65,10 @@ func (d *InputDialog) View(width, height int) string {
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(d.title))
 	sb.WriteString("\n\n")
 	sb.WriteString(d.ed.render())
+	if d.err != "" {
+		sb.WriteString("\n")
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(d.err))
+	}
 	sb.WriteString("\n\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Enter=confirm  Esc=cancel"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, styleInputBorder.Render(sb.String()))

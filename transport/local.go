@@ -193,8 +193,17 @@ func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode
 	return os.MkdirAll(b.LocalPath(relPath), mode.Perm())
 }
 
+// Rename refuses an existing target, which os.Rename would replace. A target
+// that is the same file, as in a case-only rename on a case-insensitive disk,
+// is not in the way.
 func (b *LocalBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	return os.Rename(b.LocalPath(oldRelPath), b.LocalPath(newRelPath))
+	oldPath, newPath := b.LocalPath(oldRelPath), b.LocalPath(newRelPath)
+	if ni, err := os.Lstat(newPath); err == nil {
+		if oi, err := os.Lstat(oldPath); err != nil || !os.SameFile(oi, ni) {
+			return renameTargetTaken("local", newRelPath)
+		}
+	}
+	return os.Rename(oldPath, newPath)
 }
 
 func (b *LocalBackend) Remove(_ context.Context, relPath string) error {

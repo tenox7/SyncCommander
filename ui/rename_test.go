@@ -3,6 +3,9 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"sc/model"
@@ -98,5 +101,52 @@ func TestRenameHalfFailureRefreshesParent(t *testing.T) {
 	}
 	if l, r := sideNames(parent, oldName); l || !r {
 		t.Fatalf("old name: left=%v right=%v, want right only", l, r)
+	}
+}
+
+// F28: e onto a name that exists on a side being renamed is refused before
+// any backend call; the dialog stays open and says why.
+func TestRenameRefusesTakenName(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	for _, side := range []string{left, right} {
+		writeTestFile(t, filepath.Join(side, "a.txt"), "AAA")
+		writeTestFile(t, filepath.Join(side, "b.txt"), "BBB")
+	}
+	m := scannedModel(t, left, right)
+	m.openRename(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "a.txt" }))
+	m.input.ed.set("b.txt")
+	if cmd := m.input.Confirm(); cmd != nil {
+		cmd()
+	}
+	if !m.input.IsOpen() || !strings.Contains(m.input.err, "already exists on both sides") {
+		t.Errorf("dialog open=%v err=%q, want it open with the reason", m.input.IsOpen(), m.input.err)
+	}
+	for _, side := range []string{left, right} {
+		if b, _ := os.ReadFile(filepath.Join(side, "b.txt")); string(b) != "BBB" {
+			t.Errorf("%s/b.txt = %q after a refused rename", filepath.Base(side), b)
+		}
+	}
+}
+
+// A name used only on the other side is free: renaming a right-only file to
+// the name of a left-only one joins the two rows.
+func TestRenameOntoOtherSidesNameIsAllowed(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeTestFile(t, filepath.Join(left, "y.txt"), "same")
+	writeTestFile(t, filepath.Join(right, "x.txt"), "same")
+	m := scannedModel(t, left, right)
+	m.openRename(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "x.txt" }))
+	m.input.ed.set("y.txt")
+	cmd := m.input.Confirm()
+	if cmd == nil || m.input.IsOpen() {
+		t.Fatalf("rename refused: %q", m.input.err)
+	}
+	if msg := cmd().(renameDoneMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if _, err := os.Stat(filepath.Join(right, "y.txt")); err != nil {
+		t.Error("right x.txt was not renamed to y.txt")
 	}
 }
