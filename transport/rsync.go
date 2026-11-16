@@ -267,6 +267,10 @@ func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remot
 	if err != nil {
 		return nil, err
 	}
+	// Bytes on the socket show the stall guard the transfer moves, also
+	// when no progress is credited: a push of a source that counted its
+	// own bytes (D5).
+	conn = activeConn(ctx, conn)
 	defer conn.Close()
 	defer context.AfterFunc(ctx, func() { conn.Close() })()
 	result := &rsyncclient.Result{}
@@ -586,6 +590,7 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 		adder = NewCappedAdder(counter, tailSize)
 	}
 	label := fmt.Sprintf("APPEND %s @%d/%d", relPath, offset, src.Size())
+	ExpectSilence(ctx, appendVerifySilence(offset))
 	err = b.push(ctx, label, srcPath, dest+"/", adder, tailSize, offset, "--append-verify")
 	if err == nil {
 		b.noteSent(relPath, srcPath)

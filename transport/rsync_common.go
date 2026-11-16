@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	rsyncpkg "github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -72,13 +73,16 @@ type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
 
-// countingRW wraps a session stream so bytes written credit adder; nil when
-// there is no progress to report.
-func countingRW(adder *CappedAdder) func(io.ReadWriteCloser) io.ReadWriteCloser {
-	if adder == nil {
+// countingRW wraps a session stream so bytes written credit adder and tell
+// the stall guard over ctx the transfer moves, also when nothing is
+// credited (a source that counted itself, D5); nil when neither listens.
+func countingRW(ctx context.Context, adder *CappedAdder) func(io.ReadWriteCloser) io.ReadWriteCloser {
+	if adder == nil && watchFromContext(ctx) == nil {
 		return nil
 	}
-	return func(rw io.ReadWriteCloser) io.ReadWriteCloser { return &CountingReadWriter{RW: rw, Adder: adder} }
+	return func(rw io.ReadWriteCloser) io.ReadWriteCloser {
+		return &CountingReadWriter{RW: rw, Adder: adder, ctx: ctx}
+	}
 }
 
 // transferErr fails a transfer run that rsync itself ends with exit code
@@ -431,14 +435,16 @@ func (l *rsyncListing) unreadBy(msg string) ([]string, bool) {
 // tailProgress credits what rsync receives as dir/base to the context's
 // progress counter until the returned stop runs: the growth beyond skip of
 // the file itself for a receive in place (--append), else of rsync's temp
-// file (see tailDirSize). Without a counter it is a no-op.
-func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int64) func() {
+// file (see tailDirSize). stop(true), after a receive that worked, credits
+// what the last look missed: the file is all there. Without a counter it
+// is a no-op.
+func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int64) func(ok bool) {
 	counter := progressFromContext(ctx)
 	if counter == nil {
-		return func() {}
+		return func(bool) {}
 	}
-	size, ok := fileSizeFromContext(ctx)
-	if !ok || size <= 0 {
+	size, known := fileSizeFromContext(ctx)
+	if known = known && size > 0; !known {
 		size = 1 << 62
 	}
 	size = max(size-skip, 0)
@@ -446,9 +452,19 @@ func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int6
 	if bp := baseProgressFromContext(ctx); bp != nil {
 		baseAdder = NewCappedAdder(bp, size)
 	}
-	stop := make(chan struct{})
-	go tailDirSize(stop, dir, base, inplace, NewCappedAdder(counter, size), baseAdder, skip)
-	return func() { close(stop) }
+	stop, done := make(chan struct{}), make(chan struct{})
+	adder := NewCappedAdder(counter, size)
+	go func() {
+		defer close(done)
+		tailDirSize(stop, dir, base, inplace, adder, baseAdder, skip)
+	}()
+	return func(ok bool) {
+		close(stop)
+		<-done
+		if ok && known {
+			adder.Add(size)
+		}
+	}
 }
 
 // rsyncOpenViaTemp receives relPath into a fresh temp dir through recv and
@@ -473,9 +489,12 @@ func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv fu
 		}
 	}
 	if err == nil {
+		// Below protocol 30 the sender hashes the prefix before it sends
+		// the rest (an --append is verified there): nothing moves meanwhile.
+		ExpectSilence(ctx, HashTime(offset))
 		stop := tailProgress(ctx, tmpDir, filepath.Base(relPath), offset > 0, offset)
 		err = recv(tmpDir + "/")
-		stop()
+		stop(err == nil)
 	}
 	var f *os.File
 	if err == nil {
@@ -499,7 +518,9 @@ func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv fu
 	}
 	rc := &tempReadCloser{File: f, tmpDir: tmpDir}
 	if progressFromContext(ctx) != nil {
-		return WrapPreCounted(rc), nil
+		// Counted as it came in; reading it on, as fast as the
+		// destination takes it, still shows the copy alive (D5).
+		return WrapPreCounted(activeReadCloser(ctx, rc)), nil
 	}
 	return rc, nil
 }
@@ -526,7 +547,7 @@ func rsyncRecvToLocal(ctx context.Context, proto, relPath, dstPath string, recv 
 	}
 	stop := tailProgress(ctx, parent, filepath.Base(dstPath), false, 0)
 	err := recv(parent + "/")
-	stop()
+	stop(err == nil)
 	if err != nil {
 		return err
 	}
@@ -542,6 +563,12 @@ func rsyncRecvToLocal(ctx context.Context, proto, relPath, dstPath string, recv 
 	Log.Add(proto, DirIn, fmt.Sprintf("RECV %s OK (%d bytes)", relPath, fi.Size()))
 	return nil
 }
+
+// appendVerifySilence is how long an --append-verify of a file whose first
+// offset bytes are already there sends nothing (R7): the sender reads and
+// hashes that prefix before the first byte of the rest, and the receiver
+// hashes its copy of it before it takes the rest.
+func appendVerifySilence(offset int64) time.Duration { return 2 * HashTime(offset) }
 
 // stageUpload spools src into tmpFile so rsync can send from disk, crediting
 // half the progress budget for the read (the push credits the rest). Returns
@@ -565,7 +592,7 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 	if readAdder != nil {
 		dst = &CountingWriter{W: f, Adder: readAdder}
 	}
-	_, err = io.Copy(dst, src)
+	_, err = io.Copy(dst, ActiveReader(ctx, src))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -583,7 +610,9 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 
 // spoolTo writes the whole source into path so rsync can send it from disk.
 // A source that gives another number of bytes than its size fails: rsync
-// would send and verify the short copy as if it were the file.
+// would send and verify the short copy as if it were the file. No progress
+// shows it (the engine credited the prefix, the push credits the rest), so
+// each read tells the stall guard it works (R7).
 func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.FileMode) error {
 	rd, err := src.Open(ctx)
 	if err != nil {
@@ -594,7 +623,7 @@ func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.Fi
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(f, rd)
+	n, err := io.Copy(f, ActiveReader(ctx, rd))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

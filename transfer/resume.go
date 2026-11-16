@@ -108,13 +108,22 @@ func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend
 		}
 		why := "no checksum algorithm shared by both sides"
 		if scanner.NegotiateChecksum() {
+			// Each side reads and hashes the whole file and reports
+			// nothing until it is done: the stall guard, which watches
+			// bytes move, is told to wait that long (F5).
+			transport.ExpectSilence(ctx, transport.HashTime(size))
 			srcSum, serr := src.Checksum(ctx, relPath)
+			transport.ExpectSilence(ctx, transport.HashTime(size))
 			dstSum, derr := dst.Checksum(ctx, relPath)
 			if serr == nil && derr == nil && srcSum != "" && dstSum != "" {
 				if srcSum != dstSum {
 					return fmt.Errorf("%w: %s (src %s, dst %s)", errResumeMismatch, relPath, srcSum, dstSum)
 				}
 				return nil
+			}
+			// Ended (a stall, the user): no compare can run either.
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			why = "checksum unavailable"
 		}
@@ -126,7 +135,7 @@ func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend
 // comparePrefix reads the first n bytes of relPath from both sides and reports
 // errResumeMismatch when they differ. Only the prefix needs checking: the
 // tail was just streamed from src. Fresh counters keep the read-back out of
-// the copy's progress.
+// the copy's progress; each block read tells the stall guard it works (F5).
 func comparePrefix(ctx context.Context, src, dst model.Backend, relPath string, n int64) error {
 	ctx = transport.ContextWithProgress(ctx, new(atomic.Int64))
 	ctx = transport.ContextWithBaseProgress(ctx, new(atomic.Int64))
@@ -140,7 +149,7 @@ func comparePrefix(ctx context.Context, src, dst model.Backend, relPath string, 
 		return err
 	}
 	defer dr.Close()
-	same, err := sameBytes(sr, dr, n)
+	same, err := sameBytes(transport.ActiveReader(ctx, sr), transport.ActiveReader(ctx, dr), n)
 	if err != nil {
 		return err
 	}
@@ -217,6 +226,11 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath
 		return nil
 	}
 	if err := verify(ctx, offset); err != nil {
+		// A verify the stall guard ended reads "context canceled", which
+		// the log drops: say what happened (F5).
+		if transport.Stalled(ctx) {
+			err = fmt.Errorf("verify %s: no answer within the time a slow side needs: %w", relPath, transport.ErrStall)
+		}
 		transport.Log.Add("copy", transport.DirWarn, err.Error()+", recopying in full")
 		rollback()
 		return err
@@ -236,9 +250,11 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPa
 	}
 	defer reader.Close()
 	defer transport.CancelCloser(ctx, reader)()
+	// Asked once dst is connected: a reconnecting wrapper only knows the
+	// answer of the backend it connected to (F21).
 	dstOwnsProgress := false
-	if owner, ok := dst.(transport.ProgressOwner); ok && owner.OwnsCopyProgress() {
-		dstOwnsProgress = true
+	if ok, err := transport.Supports[transport.ProgressOwner](ctx, dst); err == nil && ok {
+		dstOwnsProgress = dst.(transport.ProgressOwner).OwnsCopyProgress()
 	}
 	var added atomic.Int64
 	var srcReader io.Reader = reader

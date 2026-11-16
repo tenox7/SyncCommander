@@ -156,31 +156,31 @@ func (c *CappedAdder) Used() int64 {
 // beyond skip at the start is credited to base too, so it shows in the
 // totals without inflating the rate. Any other receive writes a temp file
 // next to the name and renames it at the end (R12): until then the file
-// under the name is the old version and counts for nothing.
+// under the name is the old version and counts for nothing, and the temp
+// file is found by reading the folder (tempWatch). What the last look
+// missed is the caller's to credit once the receive worked.
 func tailDirSize(stop <-chan struct{}, dir, basename string, inplace bool, adder, base *CappedAdder, skip int64) {
 	if adder == nil {
 		return
 	}
 	finalPath := filepath.Join(dir, basename)
-	size := func() int64 {
-		if !inplace {
-			return rsyncTempSize(dir, basename)
-		}
-		if fi, err := os.Stat(finalPath); err == nil {
-			return fi.Size()
-		}
-		return 0
-	}
 	last := skip
-	if n := size(); inplace && n > last {
-		adder.Add(n - last)
-		if base != nil {
-			base.Add(n - last)
+	if inplace {
+		if n := fileSizeOf(finalPath); n > last {
+			adder.Add(n - last)
+			if base != nil {
+				base.Add(n - last)
+			}
+			last = n
 		}
-		last = n
 	}
-	update := func() {
-		if delta := size() - last; delta > 0 {
+	temp := tempWatch{dir: dir, base: basename, start: time.Now()}
+	update := func(now time.Time, search bool) {
+		if !inplace {
+			adder.Add(temp.grown(now, search))
+			return
+		}
+		if delta := fileSizeOf(finalPath) - last; delta > 0 {
 			adder.Add(delta)
 			last += delta
 		}
@@ -190,36 +190,104 @@ func tailDirSize(stop <-chan struct{}, dir, basename string, inplace bool, adder
 	for {
 		select {
 		case <-stop:
-			update()
+			// No folder read for a file that is done: a copy of many
+			// small files into a large folder would read it once each.
+			update(time.Now(), false)
 			return
-		case <-ticker.C:
-			update()
+		case now := <-ticker.C:
+			update(now, true)
 		}
 	}
 }
 
-// rsyncTempSize is the size of the largest temp file rsync may be receiving
-// basename into in dir: gorsync's ".<basename>.<random>", or "temp-rsync-*"
-// on Windows. The names are compared, not globbed, so a name with * ? [ in
-// it still matches. sc's own part file is not rsync's.
-func rsyncTempSize(dir, basename string) int64 {
+func fileSizeOf(p string) int64 {
+	if fi, err := os.Stat(p); err == nil {
+		return fi.Size()
+	}
+	return 0
+}
+
+// tempWatch follows the temp file rsync receives base into, in dir:
+// gorsync's ".<base>.<random>", or "temp-rsync-*" on Windows. The folder
+// may hold a million names, so it is read at most once a second, and only
+// while no temp file is followed or the one followed did not grow since
+// the last read: a temp file left by a run that was killed never grows,
+// the live one does. Before, every file read the whole folder ten times a
+// second (F9).
+type tempWatch struct {
+	dir, base string
+	start     time.Time // what was written before this is not counted
+	path      string    // the temp file followed, "" while none
+	size      int64     // its size at the last look
+	searched  time.Time // the last folder read
+	moved     bool      // it grew since then
+}
+
+// readDirNames reads a folder's names; a var so a test can count the reads.
+var readDirNames = func(dir string) ([]string, error) {
 	d, err := os.Open(dir)
 	if err != nil {
-		return 0
+		return nil, err
 	}
-	names, _ := d.Readdirnames(-1)
-	d.Close()
-	prefix := "." + basename + "."
-	var n int64
+	defer d.Close()
+	return d.Readdirnames(-1)
+}
+
+// grown returns how much the temp file grew since the last look; search
+// lets it read the folder when it is time to.
+func (w *tempWatch) grown(now time.Time, search bool) int64 {
+	var delta int64
+	if w.path != "" {
+		if fi, err := os.Lstat(w.path); err == nil {
+			delta = max(fi.Size()-w.size, 0)
+			w.size = fi.Size()
+			w.moved = w.moved || delta > 0
+		} else {
+			w.path = "" // renamed into place, or removed
+		}
+	}
+	if search && (w.path == "" || !w.moved) && now.Sub(w.searched) >= time.Second {
+		w.searched, w.moved = now, false
+		if p, fi := w.newest(); p != "" && p != w.path {
+			// Written since the receive began: all of it is this
+			// receive's. Older, a leftover: only its growth counts.
+			w.path, w.size = p, fi.Size()
+			if fi.ModTime().After(w.start) {
+				delta += fi.Size()
+			}
+		}
+	}
+	return delta
+}
+
+// newest returns the most recently written temp file rsync may be receiving
+// base into. The names are compared, not globbed, so a name with * ? [ in
+// it still matches. sc's own part file is not rsync's.
+func (w *tempWatch) newest() (string, os.FileInfo) {
+	names, _ := readDirNames(w.dir)
+	var path string
+	var newest os.FileInfo
 	for _, name := range names {
-		if !strings.HasPrefix(name, prefix) && !strings.HasPrefix(name, "temp-rsync-") || model.IsPartName(name) {
+		if !isRsyncTemp(name, w.base) || model.IsPartName(name) {
 			continue
 		}
-		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() && fi.Size() > n {
-			n = fi.Size()
+		p := filepath.Join(w.dir, name)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() && (newest == nil || fi.ModTime().After(newest.ModTime())) {
+			path, newest = p, fi
 		}
 	}
-	return n
+	return path, newest
+}
+
+// isRsyncTemp reports whether name is a temp file rsync may receive base
+// into: gorsync's ".<base>.<digits>", or "temp-rsync-*". Only digits may
+// follow, so ".a.b.123", the temp file of "a.b", is not taken for one of "a".
+func isRsyncTemp(name, base string) bool {
+	rest, ok := strings.CutPrefix(name, "."+base+".")
+	if !ok {
+		return strings.HasPrefix(name, "temp-rsync-")
+	}
+	return rest != "" && strings.Trim(rest, "0123456789") == ""
 }
 
 // CountingWriter wraps a writer and pushes byte deltas through a CappedAdder.
@@ -237,10 +305,12 @@ func (c *CountingWriter) Write(p []byte) (int, error) {
 }
 
 // CountingReadWriter wraps a stream and reports bytes written through the
-// writer side via a CappedAdder. Reads and Close are passed through unchanged.
+// writer side via a CappedAdder, if any, and to the stall guard over ctx, if
+// set. Reads and Close are passed through unchanged.
 type CountingReadWriter struct {
 	RW    io.ReadWriteCloser
 	Adder *CappedAdder
+	ctx   context.Context
 }
 
 func (c *CountingReadWriter) Read(p []byte) (int, error) { return c.RW.Read(p) }
@@ -249,6 +319,9 @@ func (c *CountingReadWriter) Write(p []byte) (int, error) {
 	n, err := c.RW.Write(p)
 	if n > 0 {
 		c.Adder.Add(int64(n))
+		if c.ctx != nil {
+			Touch(c.ctx)
+		}
 	}
 	return n, err
 }

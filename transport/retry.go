@@ -37,24 +37,27 @@ func CancelCloser(ctx context.Context, c io.Closer) func() {
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// WithStallGuard runs op against a child of parent. If counter does not
-// advance for idle, the child ctx is canceled, unblocking whatever op is
-// waiting on. Parent cancellation propagates normally. If the stall fires
-// while parent is still healthy, op's err is normalized to ErrStall so
-// Retry treats it as retryable (rather than as a parent-ctx cancel which
+// WithStallGuard runs op against a child of parent. If neither counter nor
+// the steps' own signs of work (Touch, ExpectSilence) advance for idle, the
+// child ctx is canceled with ErrStall as its cause, unblocking whatever op
+// is waiting on. Parent cancellation propagates normally. If the stall
+// fires while parent is still healthy, op's err is normalized to ErrStall
+// so Retry treats it as retryable (rather than as a parent-ctx cancel which
 // would abort retries). idle <= 0 disables the guard.
 func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Duration, op func(context.Context) error) error {
 	if counter == nil || idle <= 0 {
 		return op(parent)
 	}
-	attemptCtx, cancel := context.WithCancel(parent)
-	defer cancel()
+	attemptCtx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	w := &stallWatch{parent: watchFromContext(parent)}
+	attemptCtx = context.WithValue(attemptCtx, stallWatchKey{}, w)
 
 	var stalled atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		last := counter.Load()
+		last, lastTouch := counter.Load(), w.touches.Load()
 		lastChange := time.Now()
 		tickInterval := max(idle/4, time.Second)
 		t := time.NewTicker(tickInterval)
@@ -64,15 +67,18 @@ func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Dur
 			case <-attemptCtx.Done():
 				return
 			case now := <-t.C:
-				cur := counter.Load()
-				if cur != last {
-					last = cur
-					lastChange = now
+				cur, touch := counter.Load(), w.touches.Load()
+				if cur != last || touch != lastTouch {
+					last, lastTouch, lastChange = cur, touch, now
 					continue
 				}
-				if now.Sub(lastChange) >= idle {
+				from := lastChange
+				if quiet := time.Unix(0, w.quiet.Load()); quiet.After(from) {
+					from = quiet
+				}
+				if now.Sub(from) >= idle {
 					stalled.Store(true)
-					cancel()
+					cancel(ErrStall)
 					return
 				}
 			}
@@ -80,7 +86,7 @@ func WithStallGuard(parent context.Context, counter *atomic.Int64, idle time.Dur
 	}()
 
 	err := op(attemptCtx)
-	cancel()
+	cancel(nil)
 	<-done
 
 	if stalled.Load() && parent.Err() == nil {

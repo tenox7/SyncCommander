@@ -62,7 +62,10 @@ type lazyBackend struct {
 	lastErr     error
 	nextConnect time.Time
 	pausedUntil time.Time
-	dialMu      sync.Mutex
+	// The connected backend counts its own upload progress (rsync), kept
+	// from the last connection (F21).
+	ownsProgress atomic.Bool
+	dialMu       sync.Mutex
 }
 
 // NewLazyBackend connects through factory on first use. The factory gets
@@ -120,6 +123,8 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	b.failed = 0
 	probed := b.probed
 	b.mu.Unlock()
+	owner, ok := inner.(ProgressOwner)
+	b.ownsProgress.Store(ok && owner.OwnsCopyProgress())
 	cp, hasSums := inner.(model.ChecksumProber)
 	if probed && hasSums {
 		cp.ProbeChecksums() // on the server, so not under mu
@@ -255,6 +260,13 @@ func NotConnecting(b model.Backend) bool {
 	defer l.mu.Unlock()
 	return l.authErr != nil || time.Now().Before(l.pausedUntil)
 }
+
+// OwnsCopyProgress passes on the connected backend's answer: an rsync
+// destination counts its own upload progress, and the copy engine must not
+// count it again. The wrapper used to have no such method, so every copy to
+// an rsync destination was counted twice (F21). The answer is the last
+// connection's: the same server, between a lost connection and the next.
+func (b *lazyBackend) OwnsCopyProgress() bool { return b.ownsProgress.Load() }
 
 // do runs op against the connected backend under Retry.
 func (b *lazyBackend) do(ctx context.Context, what string, op func(model.Backend) error) error {
@@ -419,6 +431,10 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	c.n.Add(int64(n))
 	return n, err
 }
+
+// Unwrap lets IsPreCounted see the source under it: without it an rsync
+// destination counted a download that had counted itself (F21).
+func (c *countingReader) Unwrap() io.Reader { return c.r }
 
 func (b *lazyBackend) Close() error {
 	b.mu.Lock()

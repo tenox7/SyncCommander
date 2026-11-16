@@ -315,7 +315,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	}
 	var wrap func(io.ReadWriteCloser) io.ReadWriteCloser
 	if counter := progressFromContext(ctx); counter != nil {
-		wrap = countingRW(NewCappedAdder(counter, 1<<62))
+		wrap = countingRW(ctx, NewCappedAdder(counter, 1<<62))
 	}
 	_, err = b.runPooled(ctx, "BATCH "+srcPath+" via", client, remoteDest, []string{srcPath}, wrap)
 	b.invalidateAfterTreeSend(relPath)
@@ -368,7 +368,7 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	if err != nil {
 		return err
 	}
-	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
+	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(ctx, adder))
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	settlePush(ctx, adder, budget, err)
@@ -412,6 +412,7 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src mo
 		adder = NewCappedAdder(counter, tailSize)
 	}
 	label := fmt.Sprintf("APPEND %s @%d/%d via", relPath, offset, src.Size())
+	ExpectSilence(ctx, appendVerifySilence(offset))
 	return b.sendFile(ctx, label, srcPath, relPath, truncateCmd(b.abs(relPath), offset), []string{"--append-verify"}, adder, tailSize)
 }
 

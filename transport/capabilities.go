@@ -75,4 +75,5 @@ var (
 	_ ParallelSetter           = (*lazyBackend)(nil)
 	_ model.PartWriter         = (*lazyBackend)(nil)
 	_ model.RegionChecksummer  = (*lazyBackend)(nil)
+	_ ProgressOwner            = (*lazyBackend)(nil)
 )
