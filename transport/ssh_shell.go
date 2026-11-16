@@ -132,7 +132,20 @@ func (s *sshShell) listCmd(dir string, recursive bool) string {
 		depth, name = "", "%p"
 	}
 	return fmt.Sprintf(`find %s%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0' -prune \) -o -printf '%s%s\0'`,
-		shellQuote(dir), depth, unreadRecord, name, findRecord, name)
+		shellQuote(findStart(dir)), depth, unreadRecord, name, findRecord, name)
+}
+
+// findStart names dir for find as dir/. : find does not follow a start
+// folder that is a symlink, it prints nothing and exits 0, but it follows
+// the link to reach the "." inside it. A dir that is a file then fails with
+// "Not a directory" instead of listing as empty. The paths find prints
+// carry the "/.", which relUnder cleans away. perl's opendir follows links
+// and fails on files already.
+func findStart(dir string) string {
+	if strings.HasSuffix(dir, "/") {
+		return dir + "."
+	}
+	return dir + "/."
 }
 
 // list runs the directory lister into stdout, switching to the perl form for
@@ -169,7 +182,7 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 		case r.err != "":
 			// perl could not open the folder or stat an entry: the listing
 			// is short, and exit status 0 says nothing.
-			err := fmt.Errorf("cannot read %s: %s", r.name, r.err)
+			err := fmt.Errorf("cannot read %s: %s", path.Clean(r.name), r.err)
 			Log.Add(s.proto, DirErr, err.Error())
 			return nil, err
 		}
@@ -230,7 +243,7 @@ func (l *shellListing) add(rec string) {
 	}
 	relPath := path.Join(l.scope, rel)
 	if r.err != "" {
-		l.reports = append(l.reports, r.name+": "+r.err)
+		l.reports = append(l.reports, path.Clean(r.name)+": "+r.err)
 		l.unreadBy(relPath)
 		return
 	}
@@ -242,7 +255,7 @@ func (l *shellListing) add(rec string) {
 		l.dirs[relPath] = true
 	}
 	if r.unread {
-		l.reports = append(l.reports, r.name+": cannot be read")
+		l.reports = append(l.reports, path.Clean(r.name)+": cannot be read")
 		l.unread[relPath] = true
 	}
 	l.g.add(r.entry)

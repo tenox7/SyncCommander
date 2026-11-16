@@ -144,3 +144,69 @@ func TestShellListingMissingBase(t *testing.T) {
 		})
 	}
 }
+
+// S3: a base folder that is a symlink lists the folder it points to, live
+// and after the deep listing, with find and with perl; GNU find printed
+// nothing for it and exited 0. A base that is a file fails its listing.
+// rsync+ssh:// lists folders with find too.
+func TestShellListingSymlinkBase(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"real/a.txt", "real/sub/b.txt"} {
+		full := filepath.Join(dir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("not a folder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	want := map[string][]string{"": {"a.txt", "sub"}, "sub": {"b.txt"}}
+	addr := startExecSSHServer(t)
+	for _, lister := range []string{"find", "perl"} {
+		t.Run(lister, func(t *testing.T) {
+			ctx := context.Background()
+			live := openShellBackend(t, "scp", addr, link, lister)
+			defer live.Close()
+			deep := openShellBackend(t, "scp", addr, link, lister)
+			defer deep.Close()
+			deep.PreloadRecursive(ctx, "")
+			for name, b := range map[string]shellBackend{"live": live, "after the deep listing": deep} {
+				for d, w := range want {
+					if names, err := listNames(ctx, b, d); err != nil || !slices.Equal(names, w) {
+						t.Errorf("%s: List(%q) under a linked base = %q, %v; want %q", name, d, names, err, w)
+					}
+				}
+			}
+			file := openShellBackend(t, "scp", addr, filepath.Join(dir, "file"), lister)
+			defer file.Close()
+			if names, err := listNames(ctx, file, ""); err == nil {
+				t.Errorf("List of a base that is a file = %q and no error", names)
+			}
+		})
+	}
+	t.Run("rsync+ssh", func(t *testing.T) {
+		if !gnuFindHere() {
+			t.Skip("find here lacks -printf, -readable or -executable; the shell backends use perl")
+		}
+		if _, err := exec.LookPath("rsync"); err != nil {
+			t.Skip("no rsync binary")
+		}
+		b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+addr+link, true, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		for d, w := range want {
+			if names, err := listNames(context.Background(), b, d); err != nil || !slices.Equal(names, w) {
+				t.Errorf("List(%q) under a linked base = %q, %v; want %q", d, names, err, w)
+			}
+		}
+	})
+}
