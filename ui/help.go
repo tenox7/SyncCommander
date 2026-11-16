@@ -51,7 +51,7 @@ var helpOperations = []helpEntry{
 	{"s", "Swap left and right"},
 	{">", "Copy left → right"},
 	{"<", "Copy right → left"},
-	{"x", "Cancel in-progress copy"},
+	{"x", "Stop the running operation"},
 	{"+/-", "More/fewer parallel copies"},
 }
 

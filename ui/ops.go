@@ -22,8 +22,9 @@ const (
 // a cancelled predecessor apart from the current op, so a stale one can never
 // clear the flag that keeps the tick loop alive.
 type scanOp struct {
-	gen    uint64
-	cancel context.CancelFunc
+	gen     uint64
+	cancel  context.CancelFunc
+	stopped bool // the user stopped it: x again says nothing more
 }
 
 type opDoneMsg struct {
@@ -96,6 +97,38 @@ func (m *Model) cancelOps() {
 		if op != nil {
 			op.cancel()
 		}
+	}
+}
+
+// stopScanOps is x while no copy or delete runs: it stops the running scan
+// and checksum pass, which no key stopped (U10). What was listed or summed
+// stays; a folder the scan was listing is marked as not listed.
+func (m *Model) stopScanOps() {
+	for _, o := range []struct {
+		op   *scanOp
+		what string
+	}{{m.scan, "scan"}, {m.cksum, "checksum"}} {
+		if o.op != nil && !o.op.stopped {
+			o.op.stopped = true
+			o.op.cancel()
+			transport.Log.Add("scan", transport.DirIn, "user canceled "+o.what)
+		}
+	}
+	// A rescan queued behind the scan, after a copy or a rename, goes with
+	// it: it would wait on the same server. Its folder is marked as a
+	// stopped scan marks the folders it was listing, so its rows do not
+	// pass for what is there, and a copy or a mirror lists it again first.
+	if r := m.pendingRescan; m.scan != nil && r != nil {
+		m.pendingRescan = nil
+		m.mutateTree(func(*model.TreeNode) {
+			n := r.node
+			if n != nil && !n.IsDir {
+				n = n.Parent
+			}
+			if n != nil {
+				n.ListErr = true
+			}
+		})
 	}
 }
 
@@ -175,11 +208,9 @@ func timeScan(op, target string, fn func()) {
 	transport.Log.Add("scan", transport.DirIn, fmt.Sprintf("%s done:  %s (%s)", op, target, time.Since(t0).Round(time.Millisecond)))
 }
 
-// refreshParent re-lists relPath's directory on both sides and merges it, so
-// the tree shows what an operation really left there.
-func refreshParent(scanner *model.Scanner, relPath string, opts model.CompareOpts) {
-	dir := model.DirOf(relPath)
-	if le, re, err := scanner.ListBothDir(context.Background(), dir); err == nil {
-		scanner.RefreshDir(dir, le, re, opts)
-	}
+// refreshParent lists relPath's folder again, on the sides that hold it, so
+// the tree shows what an operation really left there. It runs under the
+// operation's context: x stops it with the operation (U10).
+func refreshParent(ctx context.Context, scanner *model.Scanner, relPath string, opts model.CompareOpts) {
+	scanner.RelistDir(ctx, model.DirOf(relPath), opts)
 }

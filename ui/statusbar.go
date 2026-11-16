@@ -452,6 +452,9 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		model.FormatSize(info.Mem.Live), model.FormatSize(info.Mem.Resident), info.Mem.GCCycles)
 
 	right := "?=help"
+	if info.State == "DIR SCAN" || info.State == "CHECKSUM" {
+		right = "x=stop" // a scan has no popup to show its stop key
+	}
 
 	rightW := lipgloss.Width(right)
 	inner := width - 2

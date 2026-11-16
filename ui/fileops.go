@@ -95,7 +95,7 @@ func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
 		}
 		if err != nil {
 			transport.Log.Add("rename", transport.DirFail, oldRel+" -> "+newRel+": "+err.Error())
-			refreshParent(scanner, oldRel, opts)
+			refreshParent(ctx, scanner, oldRel, opts)
 			return renameDoneMsg{err: err}
 		}
 		if scanner.RenameNode(node, newName, newRel, oldRel, opts) {
@@ -162,7 +162,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			// merge below treats CRC as still valid.
 			scanner.MutateTree(func(*model.TreeNode) { node.Sides[touched].ChecksumModTime = newer.ModTime })
 		}
-		refreshParent(scanner, relPath, opts)
+		refreshParent(context.Background(), scanner, relPath, opts)
 		return touchDoneMsg{}
 	}
 }

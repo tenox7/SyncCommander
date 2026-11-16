@@ -419,9 +419,20 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, opts CompareOpts
 }
 
 // refreshEntries re-reads node's own entries from a fresh listing of its
-// parent, so its presence reflects the current state of both backends.
+// parent, so its presence reflects the current state of both backends. It
+// lists the parent on the sides that hold it: listed on both sides, a
+// folder on one side only failed on the other, and r on a row in it
+// changed nothing (U12).
 func (s *Scanner) refreshEntries(ctx context.Context, node *TreeNode, opts CompareOpts, changed *ChangedPaths) error {
-	leftEntries, rightEntries, err := s.listBoth(WithFreshListing(ctx), DirOf(node.RelPath))
+	listLeft, listRight := true, true
+	s.mu.RLock()
+	if p := node.Parent; p != nil {
+		if job, ok := listJob(p, p.Depth+1); ok {
+			listLeft, listRight = job.listLeft, job.listRight
+		}
+	}
+	s.mu.RUnlock()
+	leftEntries, rightEntries, err := s.listDir(WithFreshListing(ctx), DirOf(node.RelPath), listLeft, listRight)
 	if err != nil {
 		return err
 	}
@@ -644,12 +655,6 @@ func asPrefetcher(ctx context.Context, b Backend) ChecksumPrefetcher {
 	return p
 }
 
-func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, []FileEntry, error) {
-	e, r, err := s.listBoth(ctx, relDir)
-	logScanErr(err)
-	return e, r, err
-}
-
 // NegotiateChecksum returns the checksum algorithm both backends offer, the
 // one every Checksum call of this scanner is given, and whether there is
 // one. The first call that can ask both backends picks it.
@@ -731,6 +736,39 @@ func (s *Scanner) FindNearestDestNode(relPath string, leftToRight bool) *TreeNod
 	return s.tree
 }
 
+// RelistDir lists dir again and merges what is there now into the tree, for
+// an operation that changed dir: a delete, a touch, a rename that failed.
+// It lists dir on the sides that hold it, as the scan does. Listed on both
+// sides, a folder on one side only failed on the other, and the tree kept
+// the rows the operation had changed (U12). A listing that fails or is
+// stopped marks dir as failed to list (U10): its rows are no longer what
+// is there, and a copy or a mirror lists it again before it acts
+// (EnsureSubtreeListed).
+func (s *Scanner) RelistDir(ctx context.Context, dir string, opts CompareOpts) {
+	s.mu.RLock()
+	var job dirJob
+	ok := false
+	if s.tree != nil {
+		if n := findNode(s.tree, dir); n != nil {
+			job, ok = listJob(n, n.Depth+1)
+		}
+	}
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	left, right, err := s.listDir(WithFreshListing(ctx), dir, job.listLeft, job.listRight)
+	if err != nil {
+		logScanErr(err)
+		s.lockTree()
+		job.parent.ListErr = true
+		s.unlockTree()
+		return
+	}
+	s.RefreshDir(dir, left, right, opts)
+}
+
+// RefreshDir merges a fresh listing of parentDir into the tree.
 func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, opts CompareOpts) {
 	s.lockTree()
 	defer s.unlockTree()
@@ -743,6 +781,7 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, opts Com
 	}
 	parent.Children = MergeChildren(parent, left, right, parent.Depth+1, opts, nil)
 	parent.Listed = true
+	parent.ListErr = false
 }
 
 func collectExpanded(node *TreeNode, m map[string]bool) {

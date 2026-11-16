@@ -58,6 +58,8 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 	case "q":
 		m.cancelOps()
 		return tea.Quit
+	case "x", "X":
+		m.stopScanOps()
 	case "tab":
 		m.switchPanel()
 	case "up", "k":

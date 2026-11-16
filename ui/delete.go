@@ -163,7 +163,7 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 			}
 			progress.Done.Add(perSide)
 		}
-		refreshParent(scanner, relPath, opts)
+		refreshParent(ctx, scanner, relPath, opts)
 		return deleteDoneMsg{}
 	}
 }
