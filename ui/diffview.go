@@ -136,6 +136,7 @@ func buildTextDiff(leftData, rightData []byte) (lines []diffLine, diffIdxs []int
 		switch op.Type {
 		case difflib.DiffEqual:
 			for _, l := range opLines {
+				l = shown(l)
 				add(diffLine{kind: diffLineEqual, leftStyled: l, rightStyled: l, leftLineNo: leftNo, rightLineNo: rightNo})
 				leftNo++
 				rightNo++
@@ -163,12 +164,12 @@ func buildTextDiff(leftData, rightData []byte) (lines []diffLine, diffIdxs []int
 				continue
 			}
 			for _, l := range opLines {
-				add(diffLine{kind: diffLineDeleted, leftStyled: styleDiffDel.Render(l), leftLineNo: leftNo})
+				add(diffLine{kind: diffLineDeleted, leftStyled: styleDiffDel.Render(shown(l)), leftLineNo: leftNo})
 				leftNo++
 			}
 		case difflib.DiffInsert:
 			for _, l := range opLines {
-				add(diffLine{kind: diffLineInserted, rightStyled: styleDiffAdd.Render(l), rightLineNo: rightNo})
+				add(diffLine{kind: diffLineInserted, rightStyled: styleDiffAdd.Render(shown(l)), rightLineNo: rightNo})
 				rightNo++
 			}
 		}
@@ -180,7 +181,7 @@ func buildTextDiff(leftData, rightData []byte) (lines []diffLine, diffIdxs []int
 // characters coloured; an empty side stays empty.
 func highlightCharDiff(leftText, rightText string) (left, right string) {
 	if leftText == "" || rightText == "" {
-		return styleDiffDel.Render(leftText), styleDiffAdd.Render(rightText)
+		return styleDiffDel.Render(shown(leftText)), styleDiffAdd.Render(shown(rightText))
 	}
 	dmp := difflib.New()
 	diffs := dmp.DiffCleanupSemantic(dmp.DiffMain(leftText, rightText, true))
@@ -188,12 +189,12 @@ func highlightCharDiff(leftText, rightText string) (left, right string) {
 	for _, diff := range diffs {
 		switch diff.Type {
 		case difflib.DiffEqual:
-			l.WriteString(diff.Text)
-			r.WriteString(diff.Text)
+			l.WriteString(shown(diff.Text))
+			r.WriteString(shown(diff.Text))
 		case difflib.DiffDelete:
-			l.WriteString(styleDiffDel.Render(diff.Text))
+			l.WriteString(styleDiffDel.Render(shown(diff.Text)))
 		case difflib.DiffInsert:
-			r.WriteString(styleDiffAdd.Render(diff.Text))
+			r.WriteString(styleDiffAdd.Render(shown(diff.Text)))
 		}
 	}
 	return l.String(), r.String()
@@ -348,10 +349,10 @@ func (d *DiffView) View(width, height int) string {
 	}
 	d.width, d.height = width, height
 	if d.loading {
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, styleDiffTitle.Render("Loading "+d.title+"..."))
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, styleDiffTitle.Render("Loading "+shown(d.title)+"..."))
 	}
 	if d.err != "" {
-		msg := styleDiffDel.Render("Error: "+d.err) + styleDiffDim.Render("\nEsc=close")
+		msg := styleDiffDel.Render("Error: "+shown(d.err)) + styleDiffDim.Render("\nEsc=close")
 		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, msg)
 	}
 	if d.content.mode == diffModeText {
@@ -368,7 +369,7 @@ func (d *DiffView) frame(mode string, rows []string, width int) string {
 	if idxs := d.diffIdxs(); d.navPos >= 0 && len(idxs) > 0 {
 		navInfo = fmt.Sprintf("  [%d/%d]", d.navPos+1, len(idxs))
 	}
-	title := fmt.Sprintf(" %s  %s  %d diffs%s", mode, d.title, len(d.diffIdxs()), navInfo)
+	title := fmt.Sprintf(" %s  %s  %d diffs%s", mode, shown(d.title), len(d.diffIdxs()), navInfo)
 	rule := func(junction string) string {
 		return styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + junction + strings.Repeat("─", width-panelWidth))
 	}

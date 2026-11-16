@@ -62,12 +62,12 @@ func (d *InputDialog) View(width, height int) string {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(d.title))
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Render(shown(d.title)))
 	sb.WriteString("\n\n")
 	sb.WriteString(d.ed.render())
 	if d.err != "" {
 		sb.WriteString("\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(d.err))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(shown(d.err)))
 	}
 	sb.WriteString("\n\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Enter=confirm  Esc=cancel"))

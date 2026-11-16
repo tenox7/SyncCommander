@@ -78,7 +78,7 @@ func (d *OpenDialog) View(width, height int) string {
 	sb.WriteString(field("Right:", &d.right, d.activeRight))
 	if d.errMsg != "" {
 		sb.WriteString("\n\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(d.errMsg))
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(shown(d.errMsg)))
 	}
 	sb.WriteString("\n\n")
 	const schemes = "/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://  restic[s]://  rclone://"

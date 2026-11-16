@@ -170,7 +170,7 @@ func (d *LogDialog) View(width, height int) string {
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
 	for _, line := range lines {
-		sb.WriteString(ansi.Truncate(line, contentWidth, ""))
+		sb.WriteString(ansi.Truncate(shown(line), contentWidth, ""))
 		sb.WriteString("\n")
 	}
 	for i := len(lines); i < vh; i++ {
@@ -179,7 +179,7 @@ func (d *LogDialog) View(width, height int) string {
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
 	if d.status != "" && time.Since(d.statusAt) < 10*time.Second {
-		sb.WriteString(titleStyle.Render(ansi.Truncate(d.status, contentWidth, "")))
+		sb.WriteString(titleStyle.Render(ansi.Truncate(shown(d.status), contentWidth, "")))
 	} else {
 		sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  s=save  Esc=close"))
 	}

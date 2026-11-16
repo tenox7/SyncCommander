@@ -100,12 +100,12 @@ func (d *InfoDialog) View(width, height int) string {
 		algo = "n/a"
 	}
 	sb.WriteString(labelStyle.Render("Checksum"))
-	sb.WriteString(fmt.Sprintf("%s  L:[%s]  R:[%s]", algo, d.cksumLeft, d.cksumRight))
+	sb.WriteString(shown(fmt.Sprintf("%s  L:[%s]  R:[%s]", algo, d.cksumLeft, d.cksumRight)))
 
 	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(d.left))
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(shown(d.left)))
 	sb.WriteString("\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(d.right))
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(shown(d.right)))
 
 	sb.WriteString("\n\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("Esc=close"))

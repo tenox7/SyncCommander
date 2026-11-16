@@ -61,10 +61,10 @@ func (d *ConfirmDialog) View(width, height int) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render(d.title))
+	sb.WriteString(titleStyle.Render(shown(d.title)))
 	for _, line := range d.lines {
 		sb.WriteString("\n")
-		sb.WriteString(line)
+		sb.WriteString(shown(line))
 	}
 	sb.WriteString("\n\n")
 	if d.keys != "" {

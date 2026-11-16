@@ -30,7 +30,7 @@ func (m *Model) View() string {
 	}
 	if d := m.openModal(); d != nil {
 		m.logView.spinner = spinner
-		return d.View(m.width, m.height)
+		return shownScreen(d.View(m.width, m.height))
 	}
 
 	operation := ""
@@ -56,7 +56,7 @@ func (m *Model) View() string {
 	if m.deleting {
 		screen = overlayCentered(screen, m.deletePopup(), m.width, m.height)
 	}
-	return screen
+	return shownScreen(screen)
 }
 
 // setPanelSpinners marks the sides with work in flight: both during a

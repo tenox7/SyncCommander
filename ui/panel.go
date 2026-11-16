@@ -177,7 +177,7 @@ func (p *Panel) renderRow(r model.Row) string {
 	entry := node.Sides[p.side].Entry
 	sideIsDir := entry != nil && entry.IsDir
 
-	name := node.Name
+	name := shown(node.Name)
 	switch {
 	case sideIsDir:
 		name = p.dirStyle(node).Render(name + "/")
@@ -197,7 +197,7 @@ func (p *Panel) renderRow(r model.Row) string {
 		if p.spinner != "" {
 			spin = " " + p.spinner
 		}
-		left = p.eqPrefix(node) + styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(p.title)
+		left = p.eqPrefix(node) + styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(shown(p.title))
 	} else {
 		var pendingCksum, activeCksum bool
 		if sideIsDir {
@@ -342,7 +342,7 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 		return fmt.Sprintf("%s %s %s", chrome, label, st)
 	}
 
-	val, raw, win := a.Val[p.side], a.Raw[p.side], a.Winner
+	val, raw, win := shown(a.Val[p.side]), shown(a.Raw[p.side]), a.Winner
 	if p.side == model.SideRight {
 		win = -win
 	}

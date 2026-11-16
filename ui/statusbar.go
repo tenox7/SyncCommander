@@ -242,6 +242,7 @@ func truncateName(s string, w int) string {
 	if s == "" {
 		return "—"
 	}
+	s = shown(s)
 	if lipgloss.Width(s) <= w {
 		return s
 	}

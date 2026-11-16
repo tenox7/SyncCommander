@@ -64,12 +64,13 @@ func (e *lineEditor) handleKey(msg tea.KeyMsg) bool {
 
 var styleCursorCell = lipgloss.NewStyle().Reverse(true)
 
-// render draws the text with the cursor cell reversed.
+// render draws the text with the cursor cell reversed. A name being
+// renamed can hold controls: they are drawn escaped, the text keeps them.
 func (e *lineEditor) render() string {
 	before := string(e.runes[:e.cursor])
 	cell, after := " ", ""
 	if e.cursor < len(e.runes) {
 		cell, after = string(e.runes[e.cursor]), string(e.runes[e.cursor+1:])
 	}
-	return before + styleCursorCell.Render(cell) + after
+	return shown(before) + styleCursorCell.Render(shown(cell)) + shown(after)
 }
