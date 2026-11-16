@@ -177,6 +177,22 @@ func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
 	return t, nil
 }
 
+// Supports reports whether b has the optional capability T. A lazy backend
+// claims every capability, so it asks the backend it connects to; an error
+// when it cannot connect, so a caller never picks a way to copy on a guess.
+func Supports[T any](ctx context.Context, b model.Backend) (bool, error) {
+	l, ok := b.(*lazyBackend)
+	if !ok {
+		_, ok = b.(T)
+		return ok, nil
+	}
+	_, err := capability[T](l, ctx)
+	if errors.Is(err, ErrUnsupported) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // doAs is do for an optional capability: a backend without it fails fast
 // instead of burning retries.
 func doAs[T any](b *lazyBackend, ctx context.Context, what string, op func(T) error) error {
@@ -335,6 +351,36 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.
 		return err
 	}
 	return b.markBrokenIf(r.AppendFrom(ctx, relPath, src, mode, offset))
+}
+
+func (b *lazyBackend) PartSize(ctx context.Context, relPath string) (int64, error) {
+	if _, err := capability[model.PartWriter](b, ctx); err != nil {
+		return 0, err
+	}
+	return doVal(b, ctx, "stat part of "+relPath, func(in model.Backend) (int64, error) {
+		p, ok := in.(model.PartWriter)
+		if !ok {
+			return 0, ErrUnsupported
+		}
+		return p.PartSize(ctx, relPath)
+	})
+}
+
+func (b *lazyBackend) CommitPart(ctx context.Context, relPath string, mode os.FileMode) error {
+	return doAs(b, ctx, "commit "+relPath, func(p model.PartWriter) error { return p.CommitPart(ctx, relPath, mode) })
+}
+
+func (b *lazyBackend) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
+	if _, err := capability[model.RegionChecksummer](b, ctx); err != nil {
+		return "", err
+	}
+	return doVal(b, ctx, "checksum part of "+relPath, func(in model.Backend) (string, error) {
+		r, ok := in.(model.RegionChecksummer)
+		if !ok {
+			return "", ErrUnsupported
+		}
+		return r.ChecksumRange(ctx, relPath, off, n)
+	})
 }
 
 func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {

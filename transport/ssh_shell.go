@@ -447,6 +447,30 @@ func (s *sshShell) Checksum(ctx context.Context, relPath string) (string, error)
 	return strings.TrimPrefix(fields[0], "\\"), nil
 }
 
+// ChecksumRange sums n bytes of relPath from off on the server, the
+// negotiated command reading them from a pipe (model.RegionChecksummer). A
+// file that ends early gives another sum, never a match.
+func (s *sshShell) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
+	cmd := s.cksumCmds[s.cksumAlgo]
+	if cmd == "" {
+		return "", fmt.Errorf("%s: no %q checksum command on the remote", s.proto, s.cksumAlgo)
+	}
+	fp := shellQuote(s.abs(relPath))
+	read := fmt.Sprintf("head -c %d %s", n, fp)
+	if off > 0 {
+		read = fmt.Sprintf("tail -c +%d %s | head -c %d", off+1, fp, n)
+	}
+	out, err := s.run(ctx, fmt.Sprintf("test -f %s && %s | %s", fp, read, cmd))
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", errors.New("empty checksum output")
+	}
+	return fields[0], nil
+}
+
 const touchLayout = "2006-01-02T15:04:05.000000000Z"
 
 func (s *sshShell) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {

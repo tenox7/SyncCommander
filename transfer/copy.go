@@ -52,6 +52,7 @@ type Result struct {
 type item struct {
 	relPath  string
 	src, dst *model.FileEntry
+	part     bool // the scan listed a part file of it on the destination
 }
 
 type entry struct {
@@ -183,8 +184,9 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 			nodes = model.CollectCopyFiles(req.Node, &req.Opts, req.LeftToRight)
 		}
 		files = make([]item, 0, len(nodes))
+		parts := partsListed(dst)
 		for _, f := range nodes {
-			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry}
+			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f)}
 			if it.src != nil && !it.src.IsSpecial() {
 				totalBytes += it.src.Size
 			}
@@ -192,6 +194,31 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 		}
 	})
 	return collisions, files, totalBytes
+}
+
+// partsListed returns whether the scan listed a part file of a node on the
+// dst side, looking at each folder's rows once.
+func partsListed(dst model.Side) func(*model.TreeNode) bool {
+	byDir := map[*model.TreeNode]map[string]bool{}
+	return func(n *model.TreeNode) bool {
+		dir := n.Parent
+		if dir == nil || n.IsDir {
+			return false
+		}
+		names, ok := byDir[dir]
+		if !ok {
+			for _, c := range dir.Children {
+				if e := c.Sides[dst].Entry; e != nil && e.IsPart() {
+					if names == nil {
+						names = map[string]bool{}
+					}
+					names[c.Name] = true
+				}
+			}
+			byDir[dir] = names
+		}
+		return names[model.PartName(n.Name)]
+	}
 }
 
 // twinSet indexes the conflicts the copy found and marks the ones the user
@@ -276,9 +303,14 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	}
 	srcRoot := lp.LocalPath("")
 	var batchFiles, batchBytes int64
+	parts := false
 	_ = filepath.WalkDir(filepath.Join(srcRoot, c.req.RelPath), func(_ string, d fs.DirEntry, werr error) error {
 		if werr != nil || !d.Type().IsRegular() {
 			return nil // rsync skips links, pipes and devices without -l and -D
+		}
+		if model.IsPartName(d.Name()) {
+			parts = true
+			return fs.SkipAll
 		}
 		if info, err := d.Info(); err == nil {
 			batchFiles++
@@ -286,6 +318,13 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 		}
 		return nil
 	})
+	// One rsync session sends every file in the folder, the parts that
+	// cut-off copies left too: the client sender does not apply --exclude to
+	// its own list. File by file, the parts stay behind.
+	if parts {
+		transport.Log.Add("copy", transport.DirOut, "BATCH "+c.req.RelPath+": holds unfinished copies (.sc-part), which one rsync session would send too; copying file by file")
+		return false
+	}
 	if batchFiles == 0 || !c.clearAllTwins() {
 		return false
 	}
@@ -374,10 +413,15 @@ func (c *copier) copyOne(f item) {
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": not on the source side")
 		return
 	}
-	// A link, pipe or device is never read or copied (L2, L9). It goes before
-	// the twin: nothing is written at its name, so nothing there is removed.
+	// A link, pipe or device is never read or copied (L2, L9), nor is a part
+	// file (L14). It goes before the twin: nothing is written at its name, so
+	// nothing there is removed.
 	if srcEntry.IsSpecial() {
-		transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+srcEntry.Kind()+" (sc copies files and folders only)")
+		why := "sc copies files and folders only"
+		if srcEntry.IsPart() {
+			why = "what a cut-off copy left, never copied itself"
+		}
+		transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+srcEntry.Kind()+" ("+why+")")
 		return
 	}
 	// A file can be one object on both sides even when its folders are not:
@@ -434,11 +478,20 @@ func (c *copier) copyOne(f item) {
 		return ok
 	}
 
-	// Resume first when a partial dst body exists: append the missing tail
-	// rather than overwrite the whole file. tryResumeCopy self-gates (no-op
-	// for absent/full/oversized dst); the appended prefix is never read back,
-	// so verify checks it afterwards.
-	if guarded(func(a context.Context) bool {
+	// A destination that writes part files takes the copy into one and
+	// renames it into place (L14). Others write the file itself.
+	pw, err := partWriter(fileCtx, c.dst)
+	if err != nil {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+		return
+	}
+	// Without parts, resume first when a partial dst body exists: append the
+	// missing tail rather than overwrite the whole file (rsync's way, kept
+	// by decision). tryResumeCopy self-gates (no-op for absent/full/oversized
+	// dst); the appended prefix is never read back, so verify checks it
+	// afterwards.
+	if pw == nil && guarded(func(a context.Context) bool {
 		return tryResumeCopy(a, c.src, c.dst, f.relPath, srcEntry, dstEntry, slotBytes, slotBase, verify)
 	}) {
 		finish(" (resumed)")
@@ -448,21 +501,36 @@ func (c *copier) copyOne(f item) {
 		finish("")
 		return
 	}
+	if pw != nil {
+		resumed, err := c.copyIntoPart(fileCtx, f, pw, slotBytes, slotBase)
+		if err != nil {
+			p.Failed.Add(1)
+			transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+			return
+		}
+		c.markChanged(f.relPath)
+		how := ""
+		if resumed {
+			how = " (resumed)"
+		}
+		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
+		return
+	}
 
 	attempt := 0
-	err := transport.Retry(fileCtx, "copy", "copy "+f.relPath, func() error {
+	err = transport.Retry(fileCtx, "copy", "copy "+f.relPath, func() error {
 		return transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 			attempt++
 			if attempt > 1 {
 				// A retry resumes whatever the failed attempt left behind.
 				if offset := peekDstSize(attemptCtx, c.dst, f.relPath); offset > 0 && offset < srcEntry.Size {
-					err := resumeAttempt(attemptCtx, c.src, c.dst, f.relPath, srcEntry, offset, slotBytes, slotBase, verify)
+					err := resumeAttempt(attemptCtx, c.src, c.dst, f.relPath, f.relPath, srcEntry.Mode, srcEntry, offset, slotBytes, slotBase, verify)
 					if err == nil || (!errors.Is(err, transport.ErrUnsupported) && !errors.Is(err, errResumeMismatch)) {
 						return err
 					}
 				}
 			}
-			return fullCopyAttempt(attemptCtx, c.src, c.dst, f.relPath, srcEntry, slotBytes)
+			return fullCopyAttempt(attemptCtx, c.src, c.dst, f.relPath, f.relPath, srcEntry.Mode, srcEntry, slotBytes)
 		})
 	})
 	if err != nil {

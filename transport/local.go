@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/mmcloughlin/md4"
@@ -82,11 +83,27 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 }
 
 func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, error) {
+	return b.checksum(ctx, relPath, 0, -1)
+}
+
+// ChecksumRange sums n bytes of relPath from off (model.RegionChecksummer).
+func (b *LocalBackend) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
+	return b.checksum(ctx, relPath, off, n)
+}
+
+// checksum sums relPath from off: n bytes, or to the end when n < 0. A file
+// that ends before off+n is an error.
+func (b *LocalBackend) checksum(ctx context.Context, relPath string, off, n int64) (string, error) {
 	f, err := openRegular(b.LocalPath(relPath))
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return "", err
+		}
+	}
 
 	var h hash.Hash
 	switch b.cksumAlgo.Load() {
@@ -102,18 +119,28 @@ func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, er
 		h = sha256.New()
 	}
 	buf := make([]byte, 256*1024)
-	for {
+	for n != 0 {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		n, err := f.Read(buf)
-		if n > 0 {
-			if err := TakeIn(ctx, n); err != nil {
+		want := len(buf)
+		if n > 0 && n < int64(want) {
+			want = int(n)
+		}
+		got, err := f.Read(buf[:want])
+		if got > 0 {
+			if err := TakeIn(ctx, got); err != nil {
 				return "", err
 			}
-			h.Write(buf[:n])
+			h.Write(buf[:got])
+			if n > 0 {
+				n -= int64(got)
+			}
 		}
 		if err == io.EOF {
+			if n > 0 {
+				return "", io.ErrUnexpectedEOF
+			}
 			break
 		}
 		if err != nil {
@@ -137,46 +164,132 @@ func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime,
 }
 
 func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	return b.write(ctx, relPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode, 0, src)
+	f, err := b.create(relPath, mode)
+	if err != nil {
+		return err
+	}
+	return fill(ctx, f, src)
 }
 
-func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+// AppendFrom writes the source from offset on at the end of relPath, which
+// must hold exactly offset bytes (see openEnd).
+func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+	f, err := b.openEnd(relPath, offset)
+	if err != nil {
+		return err
+	}
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
+		f.Close()
 		return err
 	}
 	defer rd.Close()
-	return b.write(ctx, relPath, os.O_CREATE|os.O_WRONLY, mode, offset, rd)
+	return fill(ctx, f, rd)
 }
 
-// write streams src into relPath from offset, cutting the file there first.
-// Close is checked: network filesystems report write errors there.
-func (b *LocalBackend) write(ctx context.Context, relPath string, flags int, mode os.FileMode, offset int64, src io.Reader) error {
+// create opens relPath for a new body, making its folder. It never writes
+// through a link, a pipe or a device (L2, L9).
+func (b *LocalBackend) create(relPath string, mode os.FileMode) (*os.File, error) {
 	p := b.LocalPath(relPath)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-		return err
+		return nil, err
 	}
 	if fi, err := os.Lstat(p); err == nil && fi.IsDir() {
-		return fmt.Errorf("local: refuse to overwrite existing directory %s", p)
+		return nil, fmt.Errorf("local: refuse to overwrite existing directory %s", p)
 	} else if err == nil && !fi.Mode().IsRegular() {
-		return specialFileErr(p, fi.Mode())
+		return nil, specialFileErr(p, fi.Mode())
 	}
-	f, err := os.OpenFile(p, flags|oNoFollow, mode)
+	return os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|oNoFollow, mode)
+}
+
+// openEnd opens relPath to write on after its offset bytes. It never creates
+// the file and refuses one of another size (L14, S8): writing past the end
+// of a shorter file leaves a gap of zeros, and a longer one holds something
+// else.
+func (b *LocalBackend) openEnd(relPath string, offset int64) (*os.File, error) {
+	p := b.LocalPath(relPath)
+	fi, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, appendOffsetErr("local", relPath, -1, offset)
+	case err != nil:
+		return nil, err
+	case fi.IsDir():
+		return nil, fmt.Errorf("local: %s is a folder", p)
+	case !fi.Mode().IsRegular():
+		return nil, specialFileErr(p, fi.Mode())
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|oNoFollow, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if offset > 0 {
-		if err = f.Truncate(offset); err == nil {
-			_, err = f.Seek(offset, io.SeekStart)
-		}
+	if fi, err = f.Stat(); err == nil && fi.Size() != offset {
+		err = appendOffsetErr("local", relPath, fi.Size(), offset)
 	}
 	if err == nil {
-		_, err = io.Copy(LimitWriter(ctx, f), src)
+		_, err = f.Seek(offset, io.SeekStart)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// fill copies src into f, syncs f to disk and closes it. Without the sync, a
+// crash soon after the rename could leave the file's name, size and time
+// with bytes that never reached the disk, and the next compare would call
+// it equal (L14). Close is checked: network file systems report write
+// errors there.
+func fill(ctx context.Context, f *os.File, src io.Reader) error {
+	_, err := io.Copy(LimitWriter(ctx, f), src)
+	if err == nil {
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	return err
+}
+
+// syncFile hands f's bytes to the disk (fsync), except on a file system
+// that cannot (some network and FUSE file systems): nothing more to do.
+func syncFile(f *os.File) error {
+	err := fsync(f)
+	if errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EINVAL) {
+		return nil
+	}
+	return err
+}
+
+// PartSize stats relPath's part (model.PartWriter).
+func (b *LocalBackend) PartSize(_ context.Context, relPath string) (int64, error) {
+	p := b.LocalPath(model.PartPath(relPath))
+	fi, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, nil
+	case err != nil:
+		return 0, err
+	case !fi.Mode().IsRegular():
+		return 0, fmt.Errorf("local: %s is a %s: %w", p, model.KindName(fi.Mode()), model.ErrPartInTheWay)
+	}
+	return fi.Size(), nil
+}
+
+// CommitPart gives relPath's part its mode and renames it over relPath
+// (model.PartWriter); fill synced its bytes. The rename replaces a file or
+// a link in one step, and the mode is what creating the file with it would
+// give, as before parts. A folder at relPath is never replaced.
+func (b *LocalBackend) CommitPart(_ context.Context, relPath string, mode os.FileMode) error {
+	part, final := b.LocalPath(model.PartPath(relPath)), b.LocalPath(relPath)
+	if fi, err := os.Lstat(final); err == nil && fi.IsDir() {
+		return fmt.Errorf("local: %s is a folder: %w", final, fs.ErrExist)
+	}
+	if err := os.Chmod(part, mode.Perm()&^umask); err != nil {
+		return err
+	}
+	return os.Rename(part, final)
 }
 
 func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {

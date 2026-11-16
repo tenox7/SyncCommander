@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -20,16 +21,25 @@ type FileEntry struct {
 }
 
 // IsSpecial reports an entry that is neither a folder nor a regular file: a
-// symbolic link, a named pipe, a socket or a device. It is listed, so the
-// tree shows it and a same-name file or folder on the other side is a type
-// conflict, but it is never read, summed or copied: a link leads out of the
-// tree, and opening a pipe waits for a writer (L2, L9).
-func (e *FileEntry) IsSpecial() bool { return !e.IsDir && e.Mode&os.ModeType != 0 }
+// symbolic link, a named pipe, a socket or a device; or a part file of an
+// unfinished copy (IsPartName). It is listed, so the tree shows it and a
+// same-name file or folder on the other side is a type conflict, but it is
+// never read, summed or copied: a link leads out of the tree, opening a pipe
+// waits for a writer (L2, L9), and a part holds half a file (L14).
+func (e *FileEntry) IsSpecial() bool {
+	return !e.IsDir && (e.Mode&os.ModeType != 0 || IsPartName(e.Name))
+}
+
+// IsPart reports a part file sc writes a copy into (PartName).
+func (e *FileEntry) IsPart() bool { return !e.IsDir && e.Mode&os.ModeType == 0 && IsPartName(e.Name) }
 
 // Kind names what the entry is, for messages.
 func (e *FileEntry) Kind() string {
-	if e.IsDir {
+	switch {
+	case e.IsDir:
 		return "folder"
+	case e.IsPart():
+		return "partial copy"
 	}
 	return KindName(e.Mode)
 }
@@ -112,6 +122,39 @@ type RangeOpener interface {
 	OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error)
 	Size() int64
 	LocalPath() string
+}
+
+// PartWriter is implemented by destinations that take a copy into a part
+// file next to the real one, PartPath(relPath), and rename it over the real
+// file only once it is complete and checked. The real file never holds half
+// a copy, an overwrite cut off half way leaves the old version, and a link
+// at the name is replaced, never written through (review L14, S4).
+//
+// The engine writes the part with CopyFrom and, to resume, AppendFrom: an
+// AppendFrom must never create its file and must fail unless the file holds
+// exactly offset bytes, so a resume never fills a gap with zeros.
+type PartWriter interface {
+	// PartSize returns the size of relPath's part now, from one stat of
+	// that path (not a listing, which may be cached): 0 when there is
+	// none, an error when something other than a file has its name.
+	PartSize(ctx context.Context, relPath string) (int64, error)
+	// CommitPart makes relPath's part durable, gives it mode, and renames
+	// it over relPath. A file or a link at relPath is replaced, a folder
+	// is not.
+	CommitPart(ctx context.Context, relPath string, mode os.FileMode) error
+}
+
+// ErrPartInTheWay is PartSize's error for something other than a file at a
+// part's name, such as a link. The name belongs to sc, so the engine removes
+// it and copies from the start.
+var ErrPartInTheWay = errors.New("not a part file")
+
+// RegionChecksummer is implemented by backends that can checksum n bytes of a
+// file from off, with the algorithm Checksum uses. Before resuming into a
+// part the engine compares its bytes with the same bytes of the source: a
+// part is never appended to on its size alone.
+type RegionChecksummer interface {
+	ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error)
 }
 
 // Resumer is implemented by backends that can resume an interrupted upload by

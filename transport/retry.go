@@ -148,6 +148,20 @@ var ErrSizeMismatch = errors.New("size does not match the listing")
 // opening a pipe waits for a writer that may never come (L2, L9).
 var ErrSpecialFile = errors.New("sc does not read or write through links, pipes or devices")
 
+// ErrAppendOffset is an AppendFrom refusing a file that does not end where
+// the append starts: missing or shorter (writing on would leave a gap of
+// zeros), or longer (L14, S8). The caller looks at the file again.
+var ErrAppendOffset = errors.New("the file does not end where the append starts")
+
+// appendOffsetErr is ErrAppendOffset for relPath holding size bytes, or
+// missing when size < 0.
+func appendOffsetErr(proto, relPath string, size, offset int64) error {
+	if size < 0 {
+		return fmt.Errorf("%s: %s is not there to append to at %d: %w", proto, relPath, offset, ErrAppendOffset)
+	}
+	return fmt.Errorf("%s: %s holds %d bytes, the append starts at %d: %w", proto, relPath, size, offset, ErrAppendOffset)
+}
+
 // SizeMismatch is the error for a copy of got bytes when the listing gave want.
 func SizeMismatch(got, want int64) error {
 	return fmt.Errorf("%w: %d bytes, the source listed %d (it ended early or changed since the scan)", ErrSizeMismatch, got, want)

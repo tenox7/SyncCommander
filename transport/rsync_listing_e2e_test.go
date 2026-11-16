@@ -2,11 +2,7 @@ package transport
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
+	"sc/internal/sshtest"
 )
 
 // R3: a folder the daemon cannot read must fail its listing, through both
@@ -94,87 +89,7 @@ func startExecSSHServer(t *testing.T) string { return startShellServer(t, false)
 // a stock sshd has it.
 func startExecSFTPServer(t *testing.T) string { return startShellServer(t, true) }
 
-func startShellServer(t *testing.T, withSFTP bool) string {
-	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &ssh.ServerConfig{NoClientAuth: true}
-	cfg.AddHostKey(signer)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-	go func() {
-		for {
-			nc, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
-				if err != nil {
-					return
-				}
-				defer conn.Close()
-				go ssh.DiscardRequests(reqs)
-				for ch := range chans {
-					if ch.ChannelType() != "session" {
-						ch.Reject(ssh.UnknownChannelType, "")
-						continue
-					}
-					c, creqs, err := ch.Accept()
-					if err == nil {
-						go serveExecSession(c, creqs, withSFTP)
-					}
-				}
-			}()
-		}
-	}()
-	return l.Addr().String()
-}
-
-func serveExecSession(c ssh.Channel, reqs <-chan *ssh.Request, withSFTP bool) {
-	defer c.Close()
-	for req := range reqs {
-		var sub struct{ Name string }
-		if withSFTP && req.Type == "subsystem" && ssh.Unmarshal(req.Payload, &sub) == nil && sub.Name == "sftp" {
-			req.Reply(true, nil)
-			if srv, err := sftp.NewServer(c); err == nil {
-				srv.Serve()
-			}
-			return
-		}
-		var p struct{ Command string }
-		if req.Type != "exec" || ssh.Unmarshal(req.Payload, &p) != nil {
-			req.Reply(false, nil)
-			continue
-		}
-		req.Reply(true, nil)
-		cmd := exec.Command("sh", "-c", p.Command)
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return
-		}
-		go func() { io.Copy(stdin, c); stdin.Close() }()
-		cmd.Stdout, cmd.Stderr = c, c.Stderr()
-		status := 0
-		if err := cmd.Run(); err != nil {
-			status = 1
-			if ee, ok := err.(*exec.ExitError); ok {
-				status = ee.ExitCode()
-			}
-		}
-		c.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(status)}))
-		return
-	}
-}
+func startShellServer(t *testing.T, withSFTP bool) string { return sshtest.Start(t, withSFTP) }
 
 // R3 over ssh: the remote rsync names the unreadable folder by its absolute
 // path; only that folder and its parent are listed again.

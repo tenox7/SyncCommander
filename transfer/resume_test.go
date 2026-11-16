@@ -127,7 +127,7 @@ func TestResumeVerifyMismatchRejectsAndRollsBack(t *testing.T) {
 		t.Fatal("resumeVerifier = nil with verification enabled")
 	}
 
-	err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify)
+	err := resumeAttempt(context.Background(), src, dst, "f.bin", "f.bin", srcEntry().Mode, srcEntry(), 10, &bytes, &base, verify)
 	if !errors.Is(err, errResumeMismatch) {
 		t.Fatalf("resumeAttempt = %v, want errResumeMismatch", err)
 	}
@@ -143,7 +143,7 @@ func TestResumeVerifyMatchAccepts(t *testing.T) {
 	scanner := model.NewScanner(src, dst, 1, 1, true)
 	verify := resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
 
-	if err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify); err != nil {
+	if err := resumeAttempt(context.Background(), src, dst, "f.bin", "f.bin", srcEntry().Mode, srcEntry(), 10, &bytes, &base, verify); err != nil {
 		t.Fatalf("resumeAttempt = %v, want nil", err)
 	}
 	if got := bytes.Load(); got != int64(len(srcBody)) {
@@ -187,7 +187,7 @@ func TestResumeVerifyWithoutSharedChecksumComparesPrefix(t *testing.T) {
 	src, dst, scanner := pair("XXXXXXXXXX")
 	verify := resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
 	var bytes, base atomic.Int64
-	err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify)
+	err := resumeAttempt(context.Background(), src, dst, "f.bin", "f.bin", srcEntry().Mode, srcEntry(), 10, &bytes, &base, verify)
 	if !errors.Is(err, errResumeMismatch) {
 		t.Fatalf("resumeAttempt = %v, want errResumeMismatch for a corrupt prefix", err)
 	}
@@ -197,7 +197,7 @@ func TestResumeVerifyWithoutSharedChecksumComparesPrefix(t *testing.T) {
 
 	src, dst, scanner = pair(srcBody[:10])
 	verify = resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
-	if err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify); err != nil {
+	if err := resumeAttempt(context.Background(), src, dst, "f.bin", "f.bin", srcEntry().Mode, srcEntry(), 10, &bytes, &base, verify); err != nil {
 		t.Fatalf("resumeAttempt = %v, want nil for a matching prefix", err)
 	}
 }
@@ -209,7 +209,7 @@ func TestResumeVerifyChecksumUnavailableComparesPrefix(t *testing.T) {
 	scanner := model.NewScanner(src, dst, 1, 1, true)
 	verify := resumeVerifier(true, scanner, src, dst, "f.bin", int64(len(srcBody)))
 	var bytes, base atomic.Int64
-	err := resumeAttempt(context.Background(), src, dst, "f.bin", srcEntry(), 10, &bytes, &base, verify)
+	err := resumeAttempt(context.Background(), src, dst, "f.bin", "f.bin", srcEntry().Mode, srcEntry(), 10, &bytes, &base, verify)
 	if !errors.Is(err, errResumeMismatch) {
 		t.Fatalf("resumeAttempt = %v, want errResumeMismatch", err)
 	}

@@ -84,7 +84,7 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 	if offset <= 0 || offset >= srcEntry.Size {
 		return false
 	}
-	return resumeAttempt(ctx, src, dst, relPath, srcEntry, offset, bytes, baseBytes, verify) == nil
+	return resumeAttempt(ctx, src, dst, relPath, relPath, srcEntry.Mode, srcEntry, offset, bytes, baseBytes, verify) == nil
 }
 
 // errResumeMismatch reports that a resumed file did not match the source after
@@ -186,11 +186,12 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 	return 0
 }
 
-// resumeAttempt appends bytes from offset onward, then runs verify (if any)
-// against the finished file. Returns transport.ErrUnsupported if dst cannot
-// append, errResumeMismatch if the result does not match the source; on any
-// error the progress credited during the attempt is rolled back.
-func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context, int64) error) error {
+// resumeAttempt appends relPath's bytes from offset onward to dstPath on dst
+// (relPath itself, or its part), then runs verify (if any) against the
+// finished file. Returns transport.ErrUnsupported if dst cannot append,
+// errResumeMismatch if the result does not match the source; on any error
+// the progress credited during the attempt is rolled back.
+func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath string, mode os.FileMode, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context, int64) error) error {
 	resumer, ok := dst.(model.Resumer)
 	if !ok {
 		return transport.ErrUnsupported
@@ -204,7 +205,7 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		bytes.Add(-added.Load())
 		baseBytes.Add(-offset)
 	}
-	if err := resumer.AppendFrom(ctx, relPath, opener, srcEntry.Mode, offset); err != nil {
+	if err := resumer.AppendFrom(ctx, dstPath, opener, mode, offset); err != nil {
 		rollback()
 		return err
 	}
@@ -223,11 +224,12 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 	return nil
 }
 
-// fullCopyAttempt opens src from byte 0 and writes the whole file via
-// CopyFrom. On failure any progress credited during the attempt is rolled back.
-// A copy succeeds only when CopyFrom took as many bytes as the listing gave,
-// no more and no fewer, and the source closed without an error (F14).
-func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) error {
+// fullCopyAttempt opens relPath on src from byte 0 and writes the whole file
+// to dstPath on dst (relPath itself, or its part) via CopyFrom. On failure
+// any progress credited during the attempt is rolled back. A copy succeeds
+// only when CopyFrom took as many bytes as the listing gave, no more and no
+// fewer, and the source closed without an error (F14).
+func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath string, mode os.FileMode, srcEntry *model.FileEntry, counter *atomic.Int64) error {
 	reader, err := src.Open(ctx, relPath)
 	if err != nil {
 		return err
@@ -245,7 +247,7 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 	}
 	counted := &countingReader{r: srcReader}
 	srcReader = &cancelReader{r: counted, ctx: ctx}
-	err = dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode)
+	err = dst.CopyFrom(ctx, dstPath, srcReader, mode)
 	if err == nil {
 		// A destination that takes the listed number of bytes and stops
 		// (rclone's Put is told the size) leaves the rest of a source that

@@ -375,9 +375,12 @@ func specialMark(e *model.FileEntry) string {
 }
 
 // shortKind fills the size column of a special entry: its own size (a
-// link's is the length of its target's name) means nothing here.
+// link's is the length of its target's name) means nothing here. A part
+// file holds what a cut-off copy wrote; it goes when the copy is redone.
 func shortKind(e *model.FileEntry) string {
 	switch {
+	case e.IsPart():
+		return "part"
 	case e.Mode&os.ModeSymlink != 0:
 		return "link"
 	case e.Mode&os.ModeNamedPipe != 0:

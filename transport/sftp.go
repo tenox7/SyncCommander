@@ -2,8 +2,10 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -165,27 +167,51 @@ func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, 
 	return err
 }
 
-// write streams src into fullPath from offset on a pooled connection, then
-// applies mode. Close is checked: pkg/sftp reports the final flush status
-// there, so ignoring it would report a short file as copied.
-func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, offset int64, src io.Reader, mode os.FileMode) error {
-	if err := b.sftp.MkdirAll(path.Dir(fullPath)); err != nil {
-		return err
+// put writes relPath on a pooled connection and then applies mode: a new
+// body when offset < 0, else the rest of the file after its offset bytes.
+// An append never creates the file and refuses one of another size (L14,
+// S8): writing past the end of a shorter file leaves a gap of zeros. The
+// source opens once the file is ready. The data is synced when the server
+// can, and Close is checked: pkg/sftp reports the final flush status there,
+// so ignoring it would report a short file as copied.
+func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mode os.FileMode, open func() (io.ReadCloser, error)) error {
+	fullPath := b.abs(relPath)
+	flags := os.O_WRONLY
+	if offset < 0 {
+		if err := b.sftp.MkdirAll(path.Dir(fullPath)); err != nil {
+			return err
+		}
+		flags |= os.O_CREATE | os.O_TRUNC
 	}
 	conn, release := b.pool.acquire(ctx)
 	defer release()
 	f, err := conn.sftp.OpenFile(fullPath, flags)
+	if offset >= 0 && errors.Is(err, fs.ErrNotExist) {
+		return appendOffsetErr("sftp", relPath, -1, offset)
+	}
 	if err != nil {
 		return err
 	}
 	stop := CancelCloser(ctx, f)
-	if offset > 0 {
-		if err = f.Truncate(offset); err == nil {
+	if offset >= 0 {
+		var fi os.FileInfo
+		if fi, err = f.Stat(); err == nil && fi.Size() != offset {
+			err = appendOffsetErr("sftp", relPath, fi.Size(), offset)
+		}
+		if err == nil {
 			_, err = f.Seek(offset, io.SeekStart)
 		}
 	}
+	var src io.ReadCloser
+	if err == nil {
+		src, err = open()
+	}
 	if err == nil {
 		_, err = io.Copy(f, src)
+		src.Close()
+	}
+	if err == nil {
+		err = syncSFTP(f)
 	}
 	stop()
 	if cerr := f.Close(); err == nil {
@@ -197,9 +223,20 @@ func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, off
 	return err
 }
 
+// syncSFTP asks the server to sync f to disk (fsync@openssh.com, L14). A
+// server without the extension has no way to, so that is no error.
+func syncSFTP(f *sftp.File) error {
+	err := f.Sync()
+	var se *sftp.StatusError
+	if errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxOpUnsupported {
+		return nil
+	}
+	return err
+}
+
 func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
 	Log.Add("sftp", DirOut, "STOR "+relPath)
-	err := b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0, src, mode)
+	err := b.put(ctx, relPath, -1, mode, func() (io.ReadCloser, error) { return io.NopCloser(src), nil })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
@@ -207,22 +244,77 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 	return err
 }
 
-// AppendFrom resumes at offset; the destination is truncated there first so a
-// file that shrank underneath us does not end up with a zero-filled hole.
+// AppendFrom writes the source from offset on at the end of relPath, which
+// must hold exactly offset bytes (see put).
 func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
 	Log.Add("sftp", DirOut, fmt.Sprintf("APPEND %s @%d", relPath, offset))
-	rd, err := src.OpenAt(ctx, offset)
-	if err != nil {
-		Log.Add("sftp", DirErr, err.Error())
-		return err
-	}
-	defer rd.Close()
-	err = b.write(ctx, b.abs(relPath), os.O_WRONLY|os.O_CREATE, offset, rd, mode)
+	err := b.put(ctx, relPath, offset, mode, func() (io.ReadCloser, error) { return src.OpenAt(ctx, offset) })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 	}
 	return err
+}
+
+// PartSize stats relPath's part (model.PartWriter).
+func (b *SFTPBackend) PartSize(_ context.Context, relPath string) (int64, error) {
+	p := b.abs(model.PartPath(relPath))
+	fi, err := b.sftp.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, nil
+	case err != nil:
+		return 0, err
+	case !fi.Mode().IsRegular():
+		return 0, fmt.Errorf("sftp: %s is a %s: %w", p, model.KindName(fi.Mode()), model.ErrPartInTheWay)
+	}
+	return fi.Size(), nil
+}
+
+// CommitPart renames relPath's part over relPath (model.PartWriter); put
+// synced it when the server could. posix-rename@openssh.com is rename(2),
+// which replaces a file or a link in one step, never a folder. Plain
+// SSH_FXP_RENAME refuses a name in use on OpenSSH, so without the extension
+// the file there goes first: a moment with no file at that name.
+func (b *SFTPBackend) CommitPart(_ context.Context, relPath string, mode os.FileMode) error {
+	Log.Add("sftp", DirOut, "COMMIT "+relPath)
+	err := b.commitPart(model.PartPath(relPath), relPath, mode)
+	b.listCache.invalidateAncestors(relPath)
+	if err != nil {
+		Log.Add("sftp", DirErr, "COMMIT "+relPath+": "+err.Error())
+	}
+	return err
+}
+
+func (b *SFTPBackend) commitPart(partRel, relPath string, mode os.FileMode) error {
+	part, final := b.abs(partRel), b.abs(relPath)
+	if model.PartMode(mode) != mode.Perm() {
+		if err := b.sftp.Chmod(part, mode); err != nil {
+			return err
+		}
+	}
+	folder := func() error {
+		if fi, err := b.sftp.Lstat(final); err == nil && fi.IsDir() {
+			return fmt.Errorf("sftp: %s is a folder: %w", final, fs.ErrExist)
+		}
+		return nil
+	}
+	if _, ok := b.sftp.HasExtension("posix-rename@openssh.com"); ok {
+		err := b.sftp.PosixRename(part, final)
+		if err != nil {
+			if ferr := folder(); ferr != nil {
+				return ferr
+			}
+		}
+		return err
+	}
+	if err := folder(); err != nil {
+		return err
+	}
+	if err := b.sftp.Remove(final); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return b.sftp.Rename(part, final)
 }
 
 func (b *SFTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {

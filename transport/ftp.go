@@ -615,7 +615,17 @@ func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	return b.store(ctx, relPath, src, 0)
 }
 
+// AppendFrom writes the source from offset on at the end of relPath, which
+// must hold exactly offset bytes by SIZE (L14, S8): REST past the end of a
+// shorter file leaves a gap of zeros. A server without SIZE gets no append.
 func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+	size, err := b.size(ctx, relPath)
+	if err != nil {
+		return fmt.Errorf("ftp: size of %s: %v: %w", relPath, err, ErrAppendOffset)
+	}
+	if size != offset {
+		return appendOffsetErr("ftp", relPath, size, offset)
+	}
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
 		return err
@@ -623,6 +633,54 @@ func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 	defer rd.Close()
 	Log.Add("ftp", DirOut, fmt.Sprintf("STOR %s @%d", relPath, offset))
 	return b.store(ctx, relPath, rd, offset)
+}
+
+// size asks the server for relPath's size (SIZE).
+func (b *FTPBackend) size(ctx context.Context, relPath string) (int64, error) {
+	var n int64
+	err := b.withPrimary(ctx, func() error {
+		var err error
+		n, err = b.conn.FileSize(path.Join(b.base, relPath))
+		return err
+	})
+	return n, err
+}
+
+// PartSize asks for the size of relPath's part (model.PartWriter). A
+// negative reply, for no such file or no SIZE, means copying from the start.
+func (b *FTPBackend) PartSize(ctx context.Context, relPath string) (int64, error) {
+	n, err := b.size(ctx, model.PartPath(relPath))
+	var reply *textproto.Error
+	if errors.As(err, &reply) && reply.Code >= 500 {
+		return 0, nil
+	}
+	return n, err
+}
+
+// CommitPart renames relPath's part over relPath (model.PartWriter). A
+// server that will not rename onto a name in use gets the file there
+// deleted first, and only while the part is still there to take its place.
+// A folder is never deleted (DELE refuses one). FTP has no mode and no sync.
+func (b *FTPBackend) CommitPart(ctx context.Context, relPath string, _ os.FileMode) error {
+	part, final := path.Join(b.base, model.PartPath(relPath)), path.Join(b.base, relPath)
+	Log.Add("ftp", DirOut, "COMMIT "+relPath)
+	err := b.withPrimary(ctx, func() error {
+		err := b.conn.Rename(part, final)
+		if err == nil {
+			return nil
+		}
+		if _, serr := b.conn.FileSize(part); serr != nil {
+			return err
+		}
+		if b.conn.Delete(final) != nil {
+			return err
+		}
+		return b.conn.Rename(part, final)
+	})
+	if err != nil {
+		Log.Add("ftp", DirErr, "COMMIT "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 func (b *FTPBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {

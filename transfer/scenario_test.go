@@ -58,9 +58,10 @@ func writeFile(t *testing.T, p, body string) {
 
 // scenario is a scanned pair of local folders.
 type scenario struct {
-	left, right string
-	lb, rb      model.Backend
-	sc          *model.Scanner
+	left, right  string
+	lb, rb       model.Backend
+	sc           *model.Scanner
+	verifyResume bool // -verify-resume for the copies
 }
 
 func newScenario(t *testing.T, left, right string) *scenario {
@@ -114,7 +115,8 @@ func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, 
 	}
 	p := &Progress{}
 	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: s.node(t, relPath), RelPath: relPath,
-		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: replace})
+		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: replace,
+		VerifyResume: s.verifyResume})
 	return p
 }
 

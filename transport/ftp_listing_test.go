@@ -19,12 +19,17 @@ import (
 // dashAIsName it takes no options: it shows every name, and reads "-a dir"
 // as a name, answering with an empty listing.
 type fakeFTPD struct {
-	ls          map[string][]string // folder -> ls -l lines, dot names too
-	mlsd        map[string][]string // folder -> MLSD lines; set, the server offers MLSD
-	files       map[string]fakeFTPFile
-	dashAIsName bool
-	mu          sync.Mutex
-	lists       []string // LIST arguments, in order
+	ls    map[string][]string // folder -> ls -l lines, dot names too
+	mlsd  map[string][]string // folder -> MLSD lines; set, the server offers MLSD
+	files map[string]fakeFTPFile
+	// store holds what STOR wrote, by path; SIZE, RNFR/RNTO and DELE work
+	// on it. With noRenameOver, RNTO refuses a name in use, as some
+	// servers do.
+	store        map[string][]byte
+	noRenameOver bool
+	dashAIsName  bool
+	mu           sync.Mutex
+	lists        []string // LIST arguments, in order
 }
 
 // fakeFTPFile is what RETR of a path sends: the body, then the final reply.
@@ -70,6 +75,8 @@ func (f *fakeFTPD) serve(c net.Conn) {
 	reply := func(s string) { io.WriteString(c, s+"\r\n") }
 	reply("220 (fake vsFTPd)")
 	var pasv net.Listener
+	var rest int64
+	var from string
 	defer func() {
 		if pasv != nil {
 			pasv.Close()
@@ -162,6 +169,79 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			io.WriteString(dc, file.body)
 			dc.Close()
 			reply(file.reply)
+		case "SIZE":
+			f.mu.Lock()
+			body, ok := f.store[path.Clean(arg)]
+			f.mu.Unlock()
+			if !ok {
+				reply("550 Could not get file size.")
+				continue
+			}
+			reply(fmt.Sprintf("213 %d", len(body)))
+		case "REST":
+			fmt.Sscan(arg, &rest)
+			reply("350 Restart position accepted.")
+		case "STOR":
+			if pasv == nil || f.store == nil {
+				reply("553 Could not create file.")
+				continue
+			}
+			reply("150 Ok to send data.")
+			dc, err := pasv.Accept()
+			pasv.Close()
+			pasv = nil
+			if err != nil {
+				continue
+			}
+			data, _ := io.ReadAll(dc)
+			dc.Close()
+			p := path.Clean(arg)
+			f.mu.Lock()
+			// Like vsftpd: write at the REST offset, past the end too,
+			// which leaves a gap of zeros.
+			old := f.store[p]
+			if int64(len(old)) < rest {
+				old = append(old, make([]byte, rest-int64(len(old)))...)
+			}
+			f.store[p] = append(old[:rest:rest], data...)
+			f.mu.Unlock()
+			rest = 0
+			reply("226 Transfer complete.")
+		case "RNFR":
+			f.mu.Lock()
+			_, ok := f.store[path.Clean(arg)]
+			f.mu.Unlock()
+			if !ok {
+				reply("550 RNFR command failed.")
+				continue
+			}
+			from = path.Clean(arg)
+			reply("350 Ready for RNTO.")
+		case "RNTO":
+			to := path.Clean(arg)
+			f.mu.Lock()
+			_, taken := f.store[to]
+			body, ok := f.store[from]
+			if ok && !(taken && f.noRenameOver) {
+				f.store[to] = body
+				delete(f.store, from)
+			}
+			f.mu.Unlock()
+			if !ok || taken && f.noRenameOver {
+				reply("550 Rename failed.")
+				continue
+			}
+			reply("250 Rename successful.")
+		case "DELE":
+			f.mu.Lock()
+			_, ok := f.store[path.Clean(arg)]
+			delete(f.store, path.Clean(arg))
+			f.mu.Unlock()
+			if !ok {
+				reply("550 Delete operation failed.")
+				continue
+			}
+			reply("250 Delete operation successful.")
 		case "QUIT":
 			reply("221 Goodbye.")
 			return

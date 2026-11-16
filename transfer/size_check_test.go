@@ -133,7 +133,9 @@ func TestFTPShortDownloadFails(t *testing.T) {
 // F14: a source that changed size after the scan gives another number of
 // bytes than the listing, with no error. The copy took what it got, called
 // it done and gave it the listed date, so the next compare could call the
-// two sides equal.
+// two sides equal. part.txt resumes the part a cut-off copy left (its bytes
+// are the source's new first bytes), so the check runs on a resumed copy
+// too. A failed copy never takes the file's name (L14).
 func TestCopyOfSourceThatChangedSizeFails(t *testing.T) {
 	defer transport.SetMaxRetries(transport.MaxRetries())
 	transport.SetMaxRetries(1)
@@ -147,7 +149,7 @@ func TestCopyOfSourceThatChangedSizeFails(t *testing.T) {
 		left, right := filepath.Join(root, "l"), filepath.Join(root, "r")
 		writeFile(t, filepath.Join(left, "f.txt"), strings.Repeat("a", 1000))
 		writeFile(t, filepath.Join(left, "part.txt"), strings.Repeat("b", 1000))
-		writeFile(t, filepath.Join(right, "part.txt"), strings.Repeat("b", 300)) // a partial: resume
+		writeFile(t, filepath.Join(right, model.PartPath("part.txt")), tc.now[:300])
 		s := newScenario(t, left, right)
 		for _, f := range []string{"f.txt", "part.txt"} {
 			writeFile(t, filepath.Join(left, f), tc.now)
@@ -155,6 +157,12 @@ func TestCopyOfSourceThatChangedSizeFails(t *testing.T) {
 			p := s.copy(t, f, true, false)
 			if p.Failed.Load() != 1 || copyOK(mark, f) {
 				t.Errorf("%s: source %s since the scan: failed=%d, logged as copied=%v; want a failed copy", f, tc.name, p.Failed.Load(), copyOK(mark, f))
+			}
+			if f == "part.txt" && !logged(mark, "COPY part.txt: resuming after") {
+				t.Errorf("%s: the copy did not resume the part", f)
+			}
+			if onDisk(filepath.Join(right, f)) {
+				t.Errorf("%s: source %s since the scan: the failed copy took the file's name", f, tc.name)
 			}
 		}
 	}
