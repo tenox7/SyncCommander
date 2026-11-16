@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/textproto"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +39,10 @@ type FTPBackend struct {
 	pool    *connPool[*ftpConn]
 	mu      sync.Mutex
 	dirs    sync.Map // directories known to exist, so uploads skip the MKD dance
+	capture *listCapture
+	// dashA is whether LIST takes -a on a server without MLSD: 0 not known
+	// yet, 1 yes, -1 no. See listLocked. Guarded by mu.
+	dashA int
 }
 
 // ftpConn is one extra control+data connection used for a parallel transfer.
@@ -61,7 +67,7 @@ func (c *ftpConn) close() {
 // connections before its TLS branch, so ftps would speak plaintext to port
 // 990 and ftpes data channels would ignore PROT P. The returned net.Conn is
 // the raw control socket, closed on ctx cancel to abort blocked transfers.
-func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config) (*ftp.ServerConn, net.Conn, error) {
+func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	var rawConn net.Conn
 	var dials atomic.Int32
@@ -79,6 +85,9 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config) (*ftp.Serv
 		// and leaves only the data sockets to us.
 		if scheme == "ftps" || (scheme == "ftpes" && n > 1) {
 			c = tls.Client(c, tlsCfg)
+		}
+		if n > 1 && lc != nil {
+			c = &captureConn{Conn: c, lc: lc}
 		}
 		return c, nil
 	}
@@ -121,7 +130,8 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 	tlsCfg := &tls.Config{ServerName: host, InsecureSkipVerify: insecure}
 	addr := host + ":" + port
 
-	conn, rawConn, err := dialFTPConn(addr, scheme, user, pass, tlsCfg)
+	capture := &listCapture{}
+	conn, rawConn, err := dialFTPConn(addr, scheme, user, pass, tlsCfg, capture)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +159,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 		host:    host,
 		port:    port,
 		tlsCfg:  tlsCfg,
+		capture: capture,
 	}
 
 	// Extra connections for parallel transfers. Primary is nil: when the pool
@@ -156,7 +167,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 	// the primary conn under b.mu. maxExtras=0 (parallel<=1) means every
 	// transfer takes the primary path.
 	dial := func() (*ftpConn, error) {
-		c, raw, derr := dialFTPConn(addr, scheme, user, pass, tlsCfg)
+		c, raw, derr := dialFTPConn(addr, scheme, user, pass, tlsCfg, nil)
 		if derr != nil {
 			return nil, derr
 		}
@@ -215,7 +226,7 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 		poolRelease()
 	}
 	if time.Since(c.lastUsed) > 60*time.Second && c.conn.NoOp() != nil {
-		conn, raw, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg)
+		conn, raw, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
 		if err != nil {
 			Log.Add("ftp", DirErr, "extra reconnect failed: "+err.Error())
 			c.lastUsed = time.Time{} // still dead: keep the probe armed
@@ -231,7 +242,7 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 
 func (b *FTPBackend) reconnectLocked() error {
 	b.conn.Quit()
-	conn, rawConn, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg)
+	conn, rawConn, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg, b.capture)
 	if err != nil {
 		b.rawConn = nil
 		return err
@@ -281,8 +292,7 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		return nil, ctx.Err()
 	}
 	dir := path.Join(b.base, relDir)
-	Log.Add("ftp", DirOut, "LIST "+dir)
-	entries, err := b.conn.List(dir)
+	entries, err := b.listLocked(dir)
 	if err == nil && len(entries) == 0 {
 		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
 		err = b.conn.ChangeDir(dir)
@@ -324,6 +334,148 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		})
 	}
 	return result, nil
+}
+
+// listLocked lists dir on the primary connection; b.mu is held. A server
+// without MLSD gets LIST, and servers that work like ls, vsftpd by default,
+// then leave out names starting with "." unless asked with LIST -a. A server
+// that takes no options could read "-a" as a name and answer with nothing.
+// So the first listing that has entries runs both forms, and -a is kept
+// only when its listing is the plain one plus names starting with ".".
+func (b *FTPBackend) listLocked(dir string) ([]*ftp.Entry, error) {
+	if b.conn.IsTimePreciseInList() || b.dashA < 0 {
+		return b.listChecked(dir)
+	}
+	if b.dashA > 0 {
+		return b.listChecked("-a " + dir)
+	}
+	plain, err := b.listChecked(dir)
+	if err != nil {
+		return nil, err
+	}
+	all, err := b.listChecked("-a " + dir)
+	var reply *textproto.Error
+	switch {
+	case err != nil && !errors.As(err, &reply):
+		return nil, err // the connection failed, not the -a
+	case err != nil || !onlyAddsDotNames(plain, all):
+		b.dashA = -1
+		if !hasDotName(plain) {
+			Log.Add("ftp", DirWarn, `this server has no MLSD and does not take LIST -a: names starting with "." may be left out of its listings`)
+		}
+		return plain, nil
+	case len(realEntries(plain)) > 0:
+		b.dashA = 1
+	}
+	return all, nil
+}
+
+// listChecked runs one LIST or MLSD. The library drops a line it cannot
+// parse; such a line is an entry the listing would lack, so it fails the
+// listing here.
+func (b *FTPBackend) listChecked(arg string) ([]*ftp.Entry, error) {
+	Log.Add("ftp", DirOut, "LIST "+arg)
+	b.capture.start()
+	entries, err := b.conn.List(arg)
+	raw := b.capture.stop()
+	if err != nil {
+		return nil, err
+	}
+	if n, example := unparsedLines(raw, entries); n > 0 {
+		return nil, fmt.Errorf("LIST %s: the server sent %d listing line(s) sc cannot read, such as %q", arg, n, example)
+	}
+	return entries, nil
+}
+
+func realEntries(es []*ftp.Entry) []*ftp.Entry {
+	var out []*ftp.Entry
+	for _, e := range es {
+		if e.Name != "." && e.Name != ".." {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func hasDotName(es []*ftp.Entry) bool {
+	for _, e := range realEntries(es) {
+		if strings.HasPrefix(e.Name, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyAddsDotNames reports whether all holds every name of plain, and
+// nothing else but names starting with ".": what ls -a adds.
+func onlyAddsDotNames(plain, all []*ftp.Entry) bool {
+	seen := map[string]bool{}
+	for _, e := range realEntries(plain) {
+		seen[e.Name] = true
+	}
+	for _, e := range realEntries(all) {
+		if !seen[e.Name] && !strings.HasPrefix(e.Name, ".") {
+			return false
+		}
+		delete(seen, e.Name)
+	}
+	return len(seen) == 0
+}
+
+var lsTotalLine = regexp.MustCompile(`(?i)^total\s+\d+$`)
+
+// unparsedLines counts the lines of a raw listing that gave no entry: all
+// lines but blank ones and ls's "total N" are entries. example is one of
+// them, found by the names the entries came with.
+func unparsedLines(raw []byte, entries []*ftp.Entry) (n int, example string) {
+	var lines []string
+	s := bufio.NewScanner(bytes.NewReader(raw))
+	for s.Scan() {
+		if line := strings.TrimSpace(s.Text()); line != "" && !lsTotalLine.MatchString(line) {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) <= len(entries) {
+		return 0, ""
+	}
+	left := lines // each entry takes one line, so at least one is left
+	for _, e := range entries {
+		for i, l := range left {
+			if strings.HasSuffix(l, " "+e.Name) || strings.HasSuffix(l, ";"+e.Name) || strings.Contains(l, " "+e.Name+" -> ") {
+				left = append(left[:i:i], left[i+1:]...)
+				break
+			}
+		}
+	}
+	return len(lines) - len(entries), left[0]
+}
+
+// listCapture records what a listing's data connection reads while a List
+// runs on the primary connection. The library reads it on the List
+// caller's goroutine, so no lock is needed around the buffer.
+type listCapture struct{ buf atomic.Pointer[bytes.Buffer] }
+
+func (lc *listCapture) start() { lc.buf.Store(new(bytes.Buffer)) }
+
+func (lc *listCapture) stop() []byte {
+	if b := lc.buf.Swap(nil); b != nil {
+		return b.Bytes()
+	}
+	return nil
+}
+
+// captureConn is a data connection of the primary FTP connection.
+type captureConn struct {
+	net.Conn
+	lc *listCapture
+}
+
+func (c *captureConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if b := c.lc.buf.Load(); b != nil && n > 0 {
+		b.Write(p[:n])
+	}
+	return n, err
 }
 
 func (b *FTPBackend) currentHasher() *ftpHasher {
@@ -482,7 +634,7 @@ func (b *FTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 }
 
 func (b *FTPBackend) removeAllLocked(fullPath string) error {
-	entries, err := b.conn.List(fullPath)
+	entries, err := b.listLocked(fullPath)
 	if err != nil {
 		return b.conn.Delete(fullPath)
 	}
