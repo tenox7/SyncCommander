@@ -24,29 +24,39 @@ func (m *Model) openParent() tea.Cmd {
 	return m.reopenOrExplain(leftPath, rightPath)
 }
 
-// descendCursor reopens the cursor directory as the root, on every side it
-// exists on.
+// descendCursor reopens the cursor folder as the root of both sides. A
+// folder that is not a folder on both sides is not gone into: b moved the
+// side it was on and left the other at the old root, where every name then
+// showed as on that side only, for a mirror to delete (U13). The location
+// dialog shows where both sides would go, and why not.
 func (m *Model) descendCursor() tea.Cmd {
 	node := m.activePanel().CursorNode()
-	if node == nil || !node.IsDir {
+	if node == nil || !node.IsDir || node.IsRoot() {
 		return nil
 	}
-	leftPath, rightPath := m.left.arg, m.right.arg
-	descend := false
-	m.readTree(func(*model.TreeNode) {
-		l, r := node.Entries()
-		descend = l != nil || r != nil
-		if l != nil {
-			leftPath = childArg(leftPath, node.RelPath)
-		}
-		if r != nil {
-			rightPath = childArg(rightPath, node.RelPath)
-		}
-	})
-	if !descend {
+	var l, r *model.FileEntry
+	m.readTree(func(*model.TreeNode) { l, r = node.Entries() })
+	leftPath, rightPath := childArg(m.left.arg, node.RelPath), childArg(m.right.arg, node.RelPath)
+	if why := notFolderOnBoth(node.RelPath, l, r); why != "" {
+		m.openDlg.Open(transport.MaskURLPassword(leftPath), transport.MaskURLPassword(rightPath))
+		m.openDlg.SetError(why)
 		return nil
 	}
 	return m.reopenOrExplain(leftPath, rightPath)
+}
+
+// notFolderOnBoth says why relPath is not a folder on both sides, "" when
+// it is.
+func notFolderOnBoth(relPath string, left, right *model.FileEntry) string {
+	for _, s := range [...]struct {
+		name string
+		e    *model.FileEntry
+	}{{"left", left}, {"right", right}} {
+		if s.e == nil || !s.e.IsDir {
+			return relPath + " is not a folder on the " + s.name + ": b goes into a folder that is on both sides"
+		}
+	}
+	return ""
 }
 
 // Close closes the backends the panes hold now. A reopen may have replaced
