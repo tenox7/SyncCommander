@@ -249,6 +249,13 @@ func (p *peerMsgs) Write(b []byte) (int, error) {
 
 func (p *peerMsgs) Close() error { return nil }
 
+// all returns every message the peer sent, in order.
+func (p *peerMsgs) all() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.msgs)
+}
+
 // missed reports error messages the peer counted but this report did not
 // see, a line format it does not know: nothing can be pinned on them.
 func (p *peerMsgs) missed(res *rsyncclient.Result) bool {

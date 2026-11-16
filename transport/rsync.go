@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
-	"github.com/gokrazy/rsync/rsynccmd"
 
 	"sc/model"
 )
@@ -109,24 +107,20 @@ func (b *RsyncBackend) baseRel(relPath string) string {
 	return b.base + "/" + relPath
 }
 
-// pushTarget is the rsync:// URL of relDir for a push into it; the folder
+// pushTarget is the daemon path of relDir for a push into it; the folder
 // must be there. A path sent as a pattern (see daemonPath) that matches
 // nothing is used as a plain name: the receiver creates a folder named with
-// the backslashes and reports success. gorsyncd reads every name that way.
-// So for such a path the daemon is asked for the folder's own entry first
-// (-d, no trailing slash: not its contents).
+// the backslashes and reports success. So for such a path the daemon is
+// asked for the folder's own entry first (-d, no trailing slash: not its
+// contents).
 func (b *RsyncBackend) pushTarget(ctx context.Context, relDir string) (string, error) {
-	url, err := b.remoteURL(relDir)
+	remote, err := b.modulePath(relDir, false)
 	if err != nil {
 		return "", err
 	}
 	p := b.baseRel(relDir)
 	if arg, _ := daemonPath(b.module, p); arg == p {
-		return url, nil
-	}
-	remote, err := b.modulePath(relDir, false)
-	if err != nil {
-		return "", err
+		return remote, nil
 	}
 	res, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d"}, remote)
 	if err != nil {
@@ -135,7 +129,7 @@ func (b *RsyncBackend) pushTarget(ctx context.Context, relDir string) (string, e
 	if len(res.FileList) != 1 || !rsyncModeToFileMode(res.FileList[0].Mode).IsDir() {
 		return "", fmt.Errorf("rsync: %s: no such folder on the daemon", relDir)
 	}
-	return url, nil
+	return remote, nil
 }
 
 // maxDaemonPattern is the longest argument sc sends with a pattern in it. A
@@ -185,60 +179,42 @@ func daemonPattern(name string) string {
 	return sb.String()
 }
 
-// remoteURL is the rsync:// form for transfers. gorsync parses it with
-// net/url, so every path segment is percent-encoded or a name holding '#',
-// '?' or '%' would cut or corrupt the path.
-func (b *RsyncBackend) remoteURL(relPath string) (string, error) {
-	mp, err := b.modulePath(relPath, false)
-	if err != nil {
-		return "", err
+// transfer runs one data-moving run between the daemon path remote and
+// local: with send it pushes the local sources into remote, else it receives
+// remote into the one local folder. stdout takes the --progress lines.
+//
+// It logs in with sc's own handshake, so the password only goes into the
+// challenge response. It used to run gorsync's command line, with the
+// password in its rsync:// URL, and gorsync writes that command line to
+// stderr, which went into the error and the log. The error now carries the
+// server's messages and nothing else from stderr. A run rsync would end
+// with exit code 23 or 24 fails (transferErr).
+func (b *RsyncBackend) transfer(ctx context.Context, flags []string, remote string, local []string, send bool, stdout io.Writer) error {
+	peer := &peerMsgs{}
+	opts := []rsyncclient.Option{rsyncclient.WithStderr(peer)}
+	if send {
+		opts = append(opts, rsyncclient.WithSender())
 	}
-	segs := strings.Split(mp, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
+	if stdout != nil {
+		opts = append(opts, rsyncclient.WithStdout(stdout))
 	}
-	hostPart := b.host
-	if b.user != "" {
-		userinfo := url.PathEscape(b.user)
-		if b.pass != "" {
-			userinfo += ":" + url.PathEscape(b.pass)
-		}
-		hostPart = userinfo + "@" + b.host
-	}
-	return "rsync://" + hostPart + "/" + strings.Join(segs, "/"), nil
-}
-
-func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
-	var stdout bytes.Buffer
-	if err := b.rsyncRunStdout(ctx, &stdout, args...); err != nil {
-		return "", err
-	}
-	return stdout.String(), nil
-}
-
-// rsyncRunStdout invokes rsync with stdout routed through w. Used by transfer
-// paths that pass --progress to credit byte progress via rsyncProgressWriter.
-// A run rsync would end with exit code 23 or 24 fails (transferErr).
-func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...string) error {
-	cmd := rsynccmd.Command("rsync", args...)
-	cmd.DialContext = dialLimited
-	var stderr bytes.Buffer
-	cmd.Stdout = nopWriteCloser{w}
-	cmd.Stderr = nopWriteCloser{&stderr}
-	res, err := cmd.Run(ctx)
+	res, err := b.runDaemonPaths(ctx, flags, remote, local, opts...)
 	if err == nil {
 		err = transferErr(res.XferErrors, res.IOErrors)
 	}
 	if err == nil {
 		return nil
 	}
-	errMsg := strings.TrimSpace(stderr.String())
-	if strings.Contains(errMsg, "module is read only") {
-		Log.Add("rsync", DirFatal, "module is read only, aborting operation")
-		TriggerFatalAbort(ctx)
+	msgs := peer.all()
+	for _, m := range msgs {
+		if strings.Contains(m, "module is read only") {
+			Log.Add("rsync", DirFatal, "module is read only, aborting operation")
+			TriggerFatalAbort(ctx)
+			break
+		}
 	}
-	if errMsg != "" {
-		return fmt.Errorf("%v: %s", err, errMsg)
+	if len(msgs) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.Join(msgs[:min(len(msgs), 3)], "; "))
 	}
 	return err
 }
@@ -271,6 +247,18 @@ func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []stri
 
 // runDaemonTo runs client against remotePath, receiving into local.
 func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []string, remotePath, local string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
+	Log.Add("rsync", DirOut, label+" "+remotePath)
+	result, err := b.runDaemonPaths(ctx, flags, remotePath, []string{local}, opts...)
+	if err != nil {
+		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
+	}
+	return result, err
+}
+
+// runDaemonPaths dials the daemon, logs in with sc's own handshake (see
+// daemonHandshake) and runs one client run between remotePath and the
+// local paths.
+func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remotePath string, local []string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
 	client, err := newRsyncClient(flags, append([]rsyncclient.Option{rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict()}, opts...)...)
 	if err != nil {
 		return nil, err
@@ -281,14 +269,10 @@ func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []st
 	}
 	defer conn.Close()
 	defer context.AfterFunc(ctx, func() { conn.Close() })()
-	Log.Add("rsync", DirOut, label+" "+remotePath)
 	result := &rsyncclient.Result{}
 	done, err := b.daemonHandshake(ctx, conn, client, remotePath)
 	if err == nil && !done {
-		result, err = client.Run(ctx, conn, []string{local})
-	}
-	if err != nil {
-		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
+		result, err = client.Run(ctx, conn, local)
 	}
 	return result, err
 }
@@ -481,7 +465,7 @@ func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder 
 		args = append(args, "--progress")
 	}
 	Log.Add("rsync", DirOut, label+" ["+strings.Join(args, " ")+"]")
-	err := b.rsyncRunStdout(ctx, stdout, append(args, src, dest)...)
+	err := b.transfer(ctx, args, dest, []string{src}, true, stdout)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
 	}
@@ -527,14 +511,13 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 // RecvToLocalFile downloads directly to dstPath; --inplace reuses an existing
 // prefix there for resume.
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
-	src, err := b.remoteURL(relPath)
+	remote, err := b.modulePath(relPath, false)
 	if err != nil {
 		return err
 	}
 	return rsyncRecvToLocal(ctx, "rsync", relPath, dstPath, func(dstDir string) error {
-		args := b.transferArgs(src, dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath+" -> "+dstPath)
-		_, err := b.rsyncRun(ctx, args...)
+		err := b.transfer(ctx, b.transferArgs(), remote, []string{dstDir}, false, nil)
 		if err != nil {
 			Log.Add("rsync", DirErr, err.Error())
 		}
@@ -635,7 +618,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	}
 	stageTop := filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0])
 	Log.Add("rsync", DirOut, "MKDIR "+clean)
-	_, err = b.rsyncRun(ctx, "-r", "-t", "-O", stageTop, dest+"/")
+	err = b.transfer(ctx, []string{"-r", "-t", "-O"}, dest+"/", []string{stageTop}, true, nil)
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
@@ -697,9 +680,9 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 		args = append(args, "--include=/"+rsyncFilterName(name, true)+"/***")
 		op = "REMOVEALL"
 	}
-	args = append(args, "--exclude=*", tmpDir+"/", dest+"/")
+	args = append(args, "--exclude=*")
 	Log.Add("rsync", DirOut, op+" "+clean)
-	_, err = b.rsyncRun(ctx, args...)
+	err = b.transfer(ctx, args, dest+"/", []string{tmpDir + "/"}, true, nil)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
 		b.md4.invalidateTree(relPath)
@@ -732,10 +715,6 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 	if err != nil {
 		return nil, err
 	}
-	src, err := b.remoteURL(relPath)
-	if err != nil {
-		return nil, err
-	}
 	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
 		if offset > 0 {
 			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, rsyncclient.WithUnverifiedAppend())
@@ -758,9 +737,8 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 			}
 			return nil
 		}
-		args := b.transferArgs(src, dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath)
-		_, err := b.rsyncRun(ctx, args...)
+		err := b.transfer(ctx, b.transferArgs(), remote, []string{dstDir}, false, nil)
 		if err != nil {
 			Log.Add("rsync", DirErr, err.Error())
 		}

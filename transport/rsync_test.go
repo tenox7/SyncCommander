@@ -5,17 +5,13 @@ import (
 	"testing"
 )
 
-// gorsync parses the rsync:// form with net/url, so a name holding '#', '?'
-// or '%' must be escaped per segment or the path is cut or corrupted.
-func TestRemoteURLEscapesPathSegments(t *testing.T) {
+func TestModulePath(t *testing.T) {
 	b, err := NewRsyncBackend("rsync://u:p%40ss@host:8730/mod/base dir")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := b.remoteURL("a#1/b?c/100%.txt")
-	want := `rsync://u:p%2540ss@host:8730/mod/base%20dir/a%231/b%5C%3Fc/100%25.txt`
-	if got != want || err != nil {
-		t.Errorf("remoteURL =\n %s, %v\nwant\n %s", got, err, want)
+	if got, err := b.modulePath("a#1/b?c/100%.txt", false); got != `mod/base dir/a#1/b\?c/100%.txt` || err != nil {
+		t.Errorf("modulePath = %q, %v", got, err)
 	}
 	if got, err := b.modulePath("x", true); got != "mod/base dir/x/" || err != nil {
 		t.Errorf("modulePath = %q, %v", got, err)

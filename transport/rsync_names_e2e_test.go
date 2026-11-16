@@ -37,7 +37,13 @@ func TestGorsyncdNamesAreNotPatterns(t *testing.T) {
 func startGorsyncd(t *testing.T) (url, mod string) {
 	t.Helper()
 	mod = t.TempDir()
-	srv, err := rsyncd.NewServer([]rsyncd.Module{{Name: "testmod", Path: mod, Writable: true}},
+	return startGorsyncdModule(t, mod, true), mod
+}
+
+// startGorsyncdModule serves dir as the module testmod and returns its URL.
+func startGorsyncdModule(t *testing.T, dir string, writable bool) string {
+	t.Helper()
+	srv, err := rsyncd.NewServer([]rsyncd.Module{{Name: "testmod", Path: dir, Writable: writable}},
 		rsyncd.DontRestrict(), rsyncd.WithStderr(nopWriteCloser{io.Discard}))
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +55,7 @@ func startGorsyncd(t *testing.T) (url, mod string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go srv.Serve(ctx, ln)
-	return fmt.Sprintf("rsync://127.0.0.1:%d/testmod", ln.Addr().(*net.TCPAddr).Port), mod
+	return fmt.Sprintf("rsync://127.0.0.1:%d/testmod", ln.Addr().(*net.TCPAddr).Port)
 }
 
 // N2: gorsyncd sent only "." for a one-folder listing (-n -d dir/), so
