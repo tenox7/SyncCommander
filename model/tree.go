@@ -200,14 +200,6 @@ func (n *TreeNode) SubtreeChecksumScanned() bool {
 	return !n.SubtreePending && n.SubtreeBothFiles > 0 && n.SubtreeChecksumPending == 0
 }
 
-func (n *TreeNode) OverallStatus() AttrStatus {
-	if n.Compare.Presence != PresenceBoth {
-		return AttrDifferent
-	}
-	c := &n.Compare
-	return combineStatus([]AttrStatus{c.Size, c.ModTime, c.ATime, c.CTime, c.BirthTime, c.Mode, c.Checksum})
-}
-
 // combineStatus folds attribute results: any difference wins, otherwise any
 // unknown, otherwise equal. An empty set is unknown.
 func combineStatus(attrs []AttrStatus) AttrStatus {
@@ -527,7 +519,10 @@ type TreeStats struct {
 	LeftFiles, RightFiles int
 	LeftDirs, RightDirs   int
 	LeftSize, RightSize   int64
+	// Files on both sides by NodeStatus: equal, different, or not compared
+	// yet (no checksum yet, or no compare option on).
 	FilesEqual, FilesDiff int
+	FilesUnknown          int
 	FilesLeftOnly         int
 	FilesRightOnly        int
 	TotalDirs             int64
@@ -666,10 +661,13 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 		}
 		switch child.Compare.Presence {
 		case PresenceBoth:
-			if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
+			switch s { // NodeStatus, as the panel shows it
+			case AttrEqual:
 				st.FilesEqual++
-			} else {
+			case AttrDifferent:
 				st.FilesDiff++
+			default:
+				st.FilesUnknown++
 			}
 		case PresenceLeftOnly:
 			st.FilesLeftOnly++
@@ -690,10 +688,13 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 	return result
 }
 
-// NodeStatus folds the attribute results opts enables into one status for a
-// file present on both sides.
+// NodeStatus is the one rule for whether a file is equal on both sides: the
+// panel's colors, the equal and different counts, next difference and the
+// copy all ask it (F22). It folds the attributes opts enables; a checksum
+// known to differ makes the file different with checksum compare off too,
+// since the bytes are not the same.
 func NodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
-	if node.Compare.Presence != PresenceBoth {
+	if node.Compare.Presence != PresenceBoth || node.Compare.Checksum == AttrDifferent {
 		return AttrDifferent
 	}
 	if opts == nil {
@@ -911,7 +912,7 @@ func WalkCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool, visit fu
 		case PresenceBoth:
 			collision := dst != nil && src != nil && src.IsDir != dst.IsDir
 			switch status := NodeStatus(node, opts); {
-			case collision || status == AttrDifferent || node.Compare.Checksum == AttrDifferent:
+			case collision || status == AttrDifferent:
 				visit(node, false)
 			case status == AttrUnknown:
 				visit(node, true)

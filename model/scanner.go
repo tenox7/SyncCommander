@@ -33,19 +33,15 @@ const (
 )
 
 type ScanProgress struct {
-	TotalFiles     int64
-	TotalDirs      int64
-	DirsListed     int64
-	DirsTotal      int64
-	FilesEqual     int64
-	FilesDifferent int64
-	FilesLeftOnly  int64
-	FilesRightOnly int64
-	ChecksumFiles  int64
-	ChecksumDone   int64
-	Phase          string
-	LeftActive     bool
-	RightActive    bool
+	TotalFiles    int64
+	TotalDirs     int64
+	DirsListed    int64
+	DirsTotal     int64
+	ChecksumFiles int64
+	ChecksumDone  int64
+	Phase         string
+	LeftActive    bool
+	RightActive   bool
 }
 
 // phaseProgress is the minimal progress for phase, both sides shown active
@@ -184,10 +180,9 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 
 	var preloadOnce sync.Once
 	var stats struct {
-		totalFiles, totalDirs                        atomic.Int64
-		dirsListed, dirsTotal                        atomic.Int64
-		filesEqual, filesDiff, filesLeft, filesRight atomic.Int64
-		leftPending, rightPending                    atomic.Int64
+		totalFiles, totalDirs     atomic.Int64
+		dirsListed, dirsTotal     atomic.Int64
+		leftPending, rightPending atomic.Int64
 	}
 	stats.dirsTotal.Store(1)
 	stats.leftPending.Store(1)
@@ -195,17 +190,13 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 
 	progress := func(phase string) ScanProgress {
 		return ScanProgress{
-			Phase:          phase,
-			TotalFiles:     stats.totalFiles.Load(),
-			TotalDirs:      stats.totalDirs.Load(),
-			DirsListed:     stats.dirsListed.Load(),
-			DirsTotal:      stats.dirsTotal.Load(),
-			FilesEqual:     stats.filesEqual.Load(),
-			FilesDifferent: stats.filesDiff.Load(),
-			FilesLeftOnly:  stats.filesLeft.Load(),
-			FilesRightOnly: stats.filesRight.Load(),
-			LeftActive:     stats.leftPending.Load() > 0,
-			RightActive:    stats.rightPending.Load() > 0,
+			Phase:       phase,
+			TotalFiles:  stats.totalFiles.Load(),
+			TotalDirs:   stats.totalDirs.Load(),
+			DirsListed:  stats.dirsListed.Load(),
+			DirsTotal:   stats.dirsTotal.Load(),
+			LeftActive:  stats.leftPending.Load() > 0,
+			RightActive: stats.rightPending.Load() > 0,
 		}
 	}
 	s.setProgress(progress(PhaseScanning))
@@ -253,18 +244,6 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 					continue
 				}
 				stats.totalFiles.Add(1)
-				switch child.Compare.Presence {
-				case PresenceLeftOnly:
-					stats.filesLeft.Add(1)
-				case PresenceRightOnly:
-					stats.filesRight.Add(1)
-				case PresenceBoth:
-					if child.Compare.Size == AttrEqual && child.Compare.ModTime == AttrEqual {
-						stats.filesEqual.Add(1)
-					} else {
-						stats.filesDiff.Add(1)
-					}
-				}
 			}
 
 			var next []dirJob

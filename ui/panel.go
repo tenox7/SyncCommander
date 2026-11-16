@@ -427,9 +427,6 @@ func (p *Panel) dirStyle(node *model.TreeNode) lipgloss.Style {
 }
 
 func (p *Panel) nodeStyle(node *model.TreeNode) lipgloss.Style {
-	if node.Compare.Presence != model.PresenceBoth || node.Compare.Checksum == model.AttrDifferent {
-		return styleDifferent
-	}
 	switch model.NodeStatus(node, p.cmpOpts) {
 	case model.AttrDifferent:
 		return styleDifferent
