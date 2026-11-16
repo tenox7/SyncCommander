@@ -37,6 +37,11 @@ a connection per file to match. A batch rsync+ssh transfer is one session, so
 
 ## Copy safety
 
+A folder copy deletes nothing that is only on the destination unless you
+choose it. When the destination folder holds files the source does not, `>`
+and `<` ask: `c` copies and keeps them, `d` copies and deletes them (a
+mirror), `Esc` cancels.
+
 Mirror copy only deletes destination-only files when every copy in the run
 succeeded; a copy also lists any unscanned subtree first so nothing is skipped
 or under-deleted. Resumed (appended) copies are checksum-verified and recopied

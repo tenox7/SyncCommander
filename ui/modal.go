@@ -148,7 +148,8 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // handleConfirmKey commits or drops the pending delete or copy. A both-side
-// delete asks which side: a=left, l=right, enter=both.
+// delete asks which side: a=left, l=right, enter=both. A copy onto a folder
+// that holds more asks whether to delete that: c=keep, d=delete.
 func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	k := msg.String()
 	if m.confirm.choiceMode && m.pendingDelete != nil {
@@ -160,6 +161,17 @@ func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 		case "enter":
 			return m.confirmDelete(model.PresenceBoth)
 		case "esc", "q":
+			m.cancelConfirm()
+		}
+		return nil
+	}
+	if pc := m.pendingCopy; pc != nil && pc.askMirror {
+		switch k {
+		case "c", "C":
+			return m.chooseMirror(false)
+		case "d", "D":
+			return m.chooseMirror(true)
+		case "esc", "n", "N", "q":
 			m.cancelConfirm()
 		}
 		return nil
