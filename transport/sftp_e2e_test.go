@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -142,5 +143,58 @@ func TestSFTPBackendE2E(t *testing.T) {
 	defer CloseBackend(sb)
 	if _, ok := sb.(*SFTPBackend); !ok {
 		t.Fatalf("ssh:// opened %T, want *SFTPBackend", sb)
+	}
+}
+
+// + and - over a real sshd: raising the limit dials working extra
+// connections, lowering it leaves open readers alone and closes their
+// connections as they are released.
+func TestSFTPSetParallelResizesPool(t *testing.T) {
+	addr := startSFTPServer(t)
+	root := t.TempDir()
+	b, err := NewSFTPBackend("sftp://x:pw@"+addr+root, true, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	extras := func() int {
+		b.pool.mu.Lock()
+		defer b.pool.mu.Unlock()
+		return b.pool.size
+	}
+	for i := range 4 {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%d", i)), []byte(fmt.Sprint("file ", i)), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	b.SetParallel(4)
+	var readers []io.ReadCloser
+	for i := range 4 {
+		rc, err := b.Open(context.Background(), fmt.Sprintf("f%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		readers = append(readers, rc)
+	}
+	if got := extras(); got != 3 {
+		t.Fatalf("4 open readers at parallel 4 hold %d extra connections, want 3", got)
+	}
+	for i, rc := range readers {
+		got, err := io.ReadAll(rc)
+		if err != nil || string(got) != fmt.Sprint("file ", i) {
+			t.Fatalf("f%d over its own connection: %q, %v", i, got, err)
+		}
+	}
+
+	b.SetParallel(1)
+	if got := extras(); got != 3 {
+		t.Fatalf("lowering closed busy connections: %d extras left, want 3", got)
+	}
+	for _, rc := range readers {
+		rc.Close()
+	}
+	if got := extras(); got != 0 {
+		t.Fatalf("%d extra connections still open at parallel 1", got)
 	}
 }

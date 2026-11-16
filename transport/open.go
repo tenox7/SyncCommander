@@ -185,3 +185,17 @@ func CloseBackend(b model.Backend) {
 		c.Close()
 	}
 }
+
+// ParallelSetter is a backend that keeps one connection per parallel copy
+// and can resize that pool while copies run.
+type ParallelSetter interface {
+	SetParallel(n int)
+}
+
+// SetParallel tells b that up to n copies may now run at once. Backends
+// without a per-transfer connection pool ignore it.
+func SetParallel(b model.Backend, n int) {
+	if s, ok := b.(ParallelSetter); ok {
+		s.SetParallel(max(n, 1))
+	}
+}

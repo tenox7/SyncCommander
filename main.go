@@ -42,7 +42,7 @@ func main() {
 	bwLimit := flag.String("bwlimit", "0", "bandwidth limit per direction, e.g. 512k, 4M (0 = unlimited)")
 	bwLimitIn := flag.String("bwlimit-in", "", "inbound bandwidth limit (overrides -bwlimit)")
 	bwLimitOut := flag.String("bwlimit-out", "", "outbound bandwidth limit (overrides -bwlimit)")
-	parallel := flag.Int("parallel", 4, "max concurrent file transfers during copy")
+	parallel := flag.Int("parallel", 4, "concurrent file transfers during copy; +/- changes it while copying (up to 64)")
 	scanParallel := flag.Int("scan-parallel", 8, "max directories listed concurrently during a scan")
 	batch := flag.Bool("batch", true, "batch rsync+ssh dir transfers in a single session (off: per-file parallel)")
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")

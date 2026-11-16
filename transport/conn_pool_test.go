@@ -3,6 +3,7 @@ package transport
 import (
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The FTP backend builds its pool with a nil primary and treats a nil acquire
@@ -48,5 +49,72 @@ func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
 			t.Fatal("maxExtras=0 (parallel=1) must always return nil primary")
 		}
 		r()
+	}
+}
+
+// + and - resize the pool mid-copy: raising lets the next acquires dial,
+// lowering leaves busy extras alone and closes them as they come back.
+func TestConnPoolResizeWhileInUse(t *testing.T) {
+	var dialed, closed atomic.Int64
+	dial := func() (*int64, error) { n := dialed.Add(1); return &n, nil }
+	p := newConnPool[*int64](nil, 1, dial, func(*int64) { closed.Add(1) })
+
+	c1, r1 := p.acquire()
+	if c, _ := p.acquire(); c1 == nil || c != nil {
+		t.Fatal("with one extra the second acquire must fall back to primary")
+	}
+	p.resize(3)
+	c2, r2 := p.acquire()
+	c3, r3 := p.acquire()
+	if c2 == nil || c3 == nil {
+		t.Fatal("raising the limit must let the next acquires dial")
+	}
+
+	p.resize(1)
+	if closed.Load() != 0 {
+		t.Fatal("lowering the limit closed an extra that was still in use")
+	}
+	r1()
+	r2()
+	if got := closed.Load(); got != 2 {
+		t.Fatalf("the first two extras back above the limit should close, %d closed", got)
+	}
+	r3()
+	if got := closed.Load(); got != 2 {
+		t.Fatalf("the extra within the limit should stay pooled, %d closed", got)
+	}
+	if c, _ := p.acquire(); c != c3 {
+		t.Fatal("the extra kept after lowering the limit should be reused")
+	}
+	if got := dialed.Load(); got != 3 {
+		t.Fatalf("want 3 dials, got %d", got)
+	}
+}
+
+// Lowering the limit between copies closes the idle surplus right away rather
+// than keeping it until the backend closes.
+func TestConnPoolShrinkClosesIdleExtras(t *testing.T) {
+	var closed atomic.Int64
+	dial := func() (*int, error) { v := 0; return &v, nil }
+	p := newConnPool[*int](nil, 3, dial, func(*int) { closed.Add(1) })
+	var releases []func()
+	for range 3 {
+		_, r := p.acquire()
+		releases = append(releases, r)
+	}
+	for _, r := range releases {
+		r()
+	}
+	p.resize(1)
+	deadline := time.Now().Add(5 * time.Second)
+	for closed.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := closed.Load(); got != 2 {
+		t.Fatalf("shrinking 3 idle extras to 1 closed %d, want 2", got)
+	}
+	p.close()
+	if got := closed.Load(); got != 3 {
+		t.Fatalf("close left %d of 3 extras open", 3-got)
 	}
 }

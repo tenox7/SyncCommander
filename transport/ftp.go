@@ -179,6 +179,10 @@ func (b *FTPBackend) abortOnCancel(ctx context.Context) func() {
 
 func (b *FTPBackend) BasePath() string { return b.display }
 
+// SetParallel keeps n-1 extra connections; the n-th transfer shares the
+// primary under b.mu.
+func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
 func (b *FTPBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

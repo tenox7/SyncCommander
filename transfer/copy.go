@@ -25,8 +25,7 @@ type Request struct {
 	LeftToRight  bool
 	Mirror       bool // delete destination-only files once every copy landed
 	Opts         model.CompareOpts
-	Parallel     int
-	ParallelMax  int
+	Parallel     int  // start value; Progress.Parallel holds the live one
 	Batch        bool // one rsync session for a local subtree when Dst supports it
 	VerifyResume bool
 	Progress     *Progress
@@ -230,15 +229,25 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 }
 
 // runParallel copies files with up to Parallel workers; the semaphore is
-// published so the UI can resize it mid-copy.
+// published so the UI can resize it mid-copy. Lowering it never stops a
+// running file: the first ones to finish are just not replaced.
 func (c *copier) runParallel(files []item) {
 	parallel := max(c.req.Parallel, 1)
+	sem := NewDynSem(parallel)
+	// A +/- pressed while the subtree was being listed only reached
+	// p.Parallel. Under parallelMu a press either lands before this and is
+	// read here, or after and finds sem to resize.
+	c.p.parallelMu.Lock()
+	if n := int(c.p.Parallel.Load()); n > 0 && n != parallel {
+		parallel = n
+		sem.Resize(n)
+	}
+	c.p.Sem.Store(sem)
+	c.p.parallelMu.Unlock()
+	defer c.p.Sem.Store(nil)
 	if parallel > 1 {
 		transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("parallel=%d", parallel))
 	}
-	sem := NewDynSem(parallel)
-	c.p.Sem.Store(sem)
-	defer c.p.Sem.Store(nil)
 	var wg sync.WaitGroup
 	for _, f := range files {
 		if sem.Acquire(c.ctx) != nil {
@@ -288,13 +297,10 @@ func (c *copier) copyOne(f item) {
 	}
 	slot := p.claimSlot()
 	defer p.releaseSlot(slot)
-	slotBytes, slotBase := &p.Bytes, &p.BaseBytes
-	if slot != nil {
-		slot.File.Store(f.relPath)
-		slot.Size.Store(srcEntry.Size)
-		slot.Start.Store(time.Now().UnixNano())
-		slotBytes, slotBase = &slot.Bytes, &slot.BaseBytes
-	}
+	slot.File.Store(f.relPath)
+	slot.Size.Store(srcEntry.Size)
+	slot.Start.Store(time.Now().UnixNano())
+	slotBytes, slotBase := &slot.Bytes, &slot.BaseBytes
 	p.File.Store(f.relPath)
 	p.beginFile(srcEntry.Size)
 	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("COPY %s (%s)", f.relPath, model.FormatSize(srcEntry.Size)))

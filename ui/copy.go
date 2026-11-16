@@ -109,7 +109,9 @@ func (m *Model) tickSlotSpins() {
 	m.slotSpins = next
 }
 
-// adjustCopyParallel retunes the running copy's worker count.
+// adjustCopyParallel is + and - during a copy: one more or one fewer file in
+// flight. Raising starts a file at once; lowering waits, since the semaphore
+// never stops a running file, it just does not refill the next one to finish.
 func (m *Model) adjustCopyParallel(delta int) {
 	if !m.copying || m.copyProgress.Batched.Load() {
 		return
@@ -118,12 +120,18 @@ func (m *Model) adjustCopyParallel(delta int) {
 	if next == m.copyParallel {
 		return
 	}
-	m.copyParallel = next
-	m.copyProgress.Parallel.Store(int64(next))
-	if s := m.copyProgress.Sem.Load(); s != nil {
-		s.Resize(next)
-	}
+	m.setCopyParallel(next)
+	m.copyProgress.SetParallel(next)
 	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("parallel=%d", next))
+}
+
+// setCopyParallel sets the copy worker count and sizes both sides' connection
+// pools to match. It runs before the semaphore grows, so a new worker finds
+// its connection allowed.
+func (m *Model) setCopyParallel(n int) {
+	m.copyParallel = n
+	transport.SetParallel(m.left, n)
+	transport.SetParallel(m.right, n)
 }
 
 // copyNode hands the transfer engine a snapshot of what it needs and reports
@@ -136,15 +144,16 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd
 		src, dst = m.right, m.left
 	}
 	parallel := max(m.copyParallel, 1)
+	// The settings dialog may have moved the value since the pools were sized.
+	m.setCopyParallel(parallel)
 	req := transfer.Request{
 		Src: src, Dst: dst, Scanner: m.scanner, Node: node, RelPath: relPath,
-		LeftToRight: leftToRight, Mirror: mirror, Opts: *m.cmpOpts,
-		Parallel: parallel, ParallelMax: max(m.parallelMax, parallel),
+		LeftToRight: leftToRight, Mirror: mirror, Opts: *m.cmpOpts, Parallel: parallel,
 		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = transport.ContextWithFatalCancel(ctx, cancel)
-	m.copyProgress.Reset(parallel, req.ParallelMax, leftToRight)
+	m.copyProgress.Reset(parallel, leftToRight)
 	m.copyProgress.Cancel.Store(&cancel)
 	return func() tea.Msg {
 		res := transfer.Copy(ctx, req)

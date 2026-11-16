@@ -75,6 +75,11 @@ func (m *Model) setPanelSpinners(spinner string, progress model.ScanProgress) {
 	m.leftPanel.spinner, m.rightPanel.spinner = left, right
 }
 
+// copyPopupFixedRows is what the copy popup and the screen need besides the
+// per-file rows: the border, header, total, bar, speed and key lines, plus
+// the top bar and status bar it should leave visible.
+const copyPopupFixedRows = 2 + 5 + 2
+
 func (m *Model) copyPopup() string {
 	p := m.copyProgress
 	file, _ := p.File.Load().(string)
@@ -102,6 +107,7 @@ func (m *Model) copyPopup() string {
 		BatchFileBaseBytes: baseBytes - p.FileStartBaseBytes.Load(),
 		BatchFileElapsed:   elapsedSince(p.FileStart.Load()),
 		Slots:              slots,
+		MaxSlotRows:        max(m.height-copyPopupFixedRows, 1),
 		BytesCopied:        bytes,
 		TotalBytes:         p.TotalBytes.Load(),
 		BaseBytes:          baseBytes,

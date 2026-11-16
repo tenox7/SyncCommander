@@ -21,9 +21,19 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 ## Bandwidth limit
 
 `-bwlimit 4M` caps both directions (`-bwlimit-in` / `-bwlimit-out` to differ);
-0 is unlimited and it is also adjustable live in the settings dialog (`s`).
+0 is unlimited and it is also adjustable live in the settings dialog (`=`).
 It is applied at the socket for network protocols and at the file for local
 and `fake://` trees, so every protocol shares one budget.
+
+## Parallel copies
+
+A copy moves 4 files at once. Start with another number with `-parallel 8`,
+or set it in the settings dialog (`=`). While a copy runs, `+` adds one more
+file in flight and `-` takes one away, up to 64. `-` never stops a file
+mid-way: the next file to finish is simply not replaced, and the popup shows
+`[5→3 in flight]` until it settles. sftp, scp, rsync+ssh and ftp open or close
+a connection per file to match. A batch rsync+ssh transfer is one session, so
+`+` and `-` do nothing there.
 
 ## Copy safety
 

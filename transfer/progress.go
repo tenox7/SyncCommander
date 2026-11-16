@@ -36,13 +36,27 @@ type Progress struct {
 	Cancel             atomic.Pointer[context.CancelFunc]
 	Sem                atomic.Pointer[DynSem]
 
-	slotsMu sync.RWMutex
-	slots   []*Slot
+	parallelMu sync.Mutex // orders SetParallel against runParallel publishing Sem
+	slotsMu    sync.RWMutex
+	slots      []*Slot
+}
+
+// SetParallel is + and - mid-copy: from now on up to n files are in flight.
+// Before the workers start (while the subtree is listed) there is no Sem yet;
+// runParallel picks the value up when it publishes one.
+func (p *Progress) SetParallel(n int) {
+	p.parallelMu.Lock()
+	defer p.parallelMu.Unlock()
+	p.Parallel.Store(int64(n))
+	if s := p.Sem.Load(); s != nil {
+		s.Resize(n)
+	}
 }
 
 // Slot tracks one in-flight file for the multi-slot popup. Each parallel
 // worker claims a slot at start and releases it at the end; the transport
-// writes byte deltas into Bytes via the context counter.
+// writes byte deltas into Bytes via the context counter. Slots are added as
+// workers need them, since + can raise the worker count mid-copy.
 type Slot struct {
 	File      atomic.Value
 	Size      atomic.Int64
@@ -62,7 +76,7 @@ type SlotSnapshot struct {
 
 // Reset rearms every counter for a new transfer, so the popup never shows the
 // previous copy's numbers while the subtree is still being listed.
-func (p *Progress) Reset(parallel, slots int, leftToRight bool) {
+func (p *Progress) Reset(parallel int, leftToRight bool) {
 	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.InFlight, &p.Bytes, &p.BaseBytes,
 		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStart, &p.FileStartBytes, &p.FileStartBaseBytes} {
 		c.Store(0)
@@ -73,38 +87,44 @@ func (p *Progress) Reset(parallel, slots int, leftToRight bool) {
 	p.LeftToRight.Store(leftToRight)
 	p.File.Store("")
 	p.Start.Store(time.Now().UnixNano())
-	p.resetSlots(slots)
+	p.resetSlots(parallel)
 }
 
 func (p *Progress) resetSlots(n int) {
 	p.slotsMu.Lock()
 	defer p.slotsMu.Unlock()
-	p.slots = make([]*Slot, n)
+	p.slots = make([]*Slot, max(n, 0))
 	for i := range p.slots {
 		p.slots[i] = &Slot{}
 	}
 }
 
+// claimSlot hands the worker the first free slot, adding one when every slot
+// is busy. It runs once per file, so the write lock costs nothing.
 func (p *Progress) claimSlot() *Slot {
-	p.slotsMu.RLock()
-	defer p.slotsMu.RUnlock()
-	for _, s := range p.slots {
-		if s.Active.CompareAndSwap(false, true) {
-			s.File.Store("")
-			s.Size.Store(0)
-			s.Bytes.Store(0)
-			s.BaseBytes.Store(0)
-			s.Start.Store(0)
-			return s
+	p.slotsMu.Lock()
+	defer p.slotsMu.Unlock()
+	var s *Slot
+	for _, free := range p.slots {
+		if !free.Active.Load() {
+			s = free
+			break
 		}
 	}
-	return nil
+	if s == nil {
+		s = &Slot{}
+		p.slots = append(p.slots, s)
+	}
+	s.File.Store("")
+	s.Size.Store(0)
+	s.Bytes.Store(0)
+	s.BaseBytes.Store(0)
+	s.Start.Store(0)
+	s.Active.Store(true)
+	return s
 }
 
 func (p *Progress) releaseSlot(s *Slot) {
-	if s == nil {
-		return
-	}
 	p.CompletedBytes.Add(s.Bytes.Load())
 	p.CompletedBaseBytes.Add(s.BaseBytes.Load())
 	s.Active.Store(false)

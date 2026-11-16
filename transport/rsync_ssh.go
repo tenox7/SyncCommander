@@ -50,6 +50,9 @@ func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBa
 
 func (b *RsyncSSHBackend) OwnsCopyProgress() bool { return true }
 
+// SetParallel keeps n-1 extra connections, the primary being the n-th.
+func (b *RsyncSSHBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
 func (b *RsyncSSHBackend) Close() error {
 	b.pool.close()
 	return b.client.Close()

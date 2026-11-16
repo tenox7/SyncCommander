@@ -52,6 +52,7 @@ var helpOperations = []helpEntry{
 	{">", "Copy left → right"},
 	{"<", "Copy right → left"},
 	{"x", "Cancel in-progress copy"},
+	{"+/-", "More/fewer parallel copies"},
 }
 
 func renderHelpSection(title string, entries []helpEntry) string {

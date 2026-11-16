@@ -16,6 +16,10 @@ type tickMsg time.Time
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// maxCopyParallel caps + and the settings dialog, unless -parallel started
+// higher.
+const maxCopyParallel = 64
+
 type Model struct {
 	left, right       model.Backend
 	leftArg, rightArg string // what the backends were opened with; BasePath is display only
@@ -87,7 +91,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		cmpOpts:        cmpOpts,
 		deepScan:       deepScan,
 		copyParallel:   copyParallel,
-		parallelMax:    copyParallel,
+		parallelMax:    max(copyParallel, maxCopyParallel),
 		scanParallel:   scanParallel,
 		batchTransfer:  batchTransfer,
 		verifyResume:   verifyResume,

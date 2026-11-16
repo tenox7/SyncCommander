@@ -93,6 +93,9 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 	return b, nil
 }
 
+// SetParallel keeps n-1 extra connections, the primary being the n-th.
+func (b *SFTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
 func (b *SFTPBackend) Close() error {
 	b.pool.close()
 	b.sftp.Close()

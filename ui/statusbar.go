@@ -88,6 +88,7 @@ type CopyPopupData struct {
 	BatchFileBaseBytes int64
 	BatchFileElapsed   time.Duration
 	Slots              []CopySlotView
+	MaxSlotRows        int // rows the slots may take before "… N more"; 0 = no limit
 	BytesCopied        int64
 	TotalBytes         int64
 	BaseBytes          int64
@@ -145,7 +146,10 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	switch {
 	case d.Batched:
 		header += "  [BATCH]"
-	case d.Parallel > 1:
+	case d.InFlight > d.Parallel:
+		// Lowered with -: the running files finish, then it settles.
+		header += fmt.Sprintf("  [%d→%d in flight]", d.InFlight, d.Parallel)
+	default:
 		header += fmt.Sprintf("  [%d/%d in flight]", d.InFlight, d.Parallel)
 	}
 
@@ -189,7 +193,12 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		if len(d.Slots) == 0 && !d.Listing {
 			rows = append(rows, "  (waiting…)")
 		}
-		for _, s := range d.Slots {
+		slots, hidden := d.Slots, 0
+		if d.MaxSlotRows > 0 && len(slots) > d.MaxSlotRows {
+			keep := d.MaxSlotRows - 1 // the last row says how many are hidden
+			slots, hidden = slots[:keep], len(slots)-keep
+		}
+		for _, s := range slots {
 			pct := 0
 			if s.Size > 0 {
 				pct = int(min(s.Bytes, s.Size) * 100 / s.Size)
@@ -207,15 +216,23 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			name := truncateName(s.File, nameW)
 			rows = append(rows, head+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
 		}
+		if hidden > 0 {
+			rows = append(rows, fmt.Sprintf("  … %d more", hidden))
+		}
 	}
 
+	// A batch is one session, so + and - have nothing to change there.
+	keys := "X=cancel"
+	if !d.Batched {
+		keys += "  +/-=more/fewer in flight"
+	}
 	rows = append(rows,
 		fmt.Sprintf("Total: %s/%s  %s  ETA %s",
 			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes),
 			formatRateOrDash(totalRate), formatETA(d.TotalBytes-d.BytesCopied, totalRate)),
 		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(d.BytesCopied, d.TotalBytes, totalBarWidth), totalPct),
 		speedRow(d.Speed, d.SpeedPeak, inner),
-		"X=cancel",
+		keys,
 	)
 
 	return styleCopyPopup.Width(width).Render(padRows(rows, inner))

@@ -12,29 +12,20 @@ import "sync"
 // extra if one is idle, dials a new one if capacity remains, or falls back
 // to primary when at capacity. With maxExtras=0 the pool is a no-op and
 // every acquire returns primary — matching the pre-pool single-conn
-// behavior for --parallel=1.
+// behavior for --parallel=1. resize moves the limit while copies run.
 type connPool[T any] struct {
 	primary   T
-	avail     chan T
+	idle      []T // released extras, oldest first
 	dial      func() (T, error)
 	closeFn   func(T)
 	mu        sync.Mutex
-	size      int
+	size      int // extras alive: idle, lent out or being dialed
 	maxExtras int
 	closed    bool
 }
 
 func newConnPool[T any](primary T, maxExtras int, dial func() (T, error), closeFn func(T)) *connPool[T] {
-	if maxExtras < 0 {
-		maxExtras = 0
-	}
-	return &connPool[T]{
-		primary:   primary,
-		avail:     make(chan T, maxExtras),
-		dial:      dial,
-		closeFn:   closeFn,
-		maxExtras: maxExtras,
-	}
+	return &connPool[T]{primary: primary, dial: dial, closeFn: closeFn, maxExtras: max(maxExtras, 0)}
 }
 
 // acquire returns a connection and a release function. The release MUST be
@@ -45,16 +36,14 @@ func (p *connPool[T]) acquire() (T, func()) {
 		var zero T
 		return zero, func() {}
 	}
-	select {
-	case c := <-p.avail:
-		return c, func() { p.release(c) }
-	default:
-	}
 	p.mu.Lock()
 	if p.closed {
-		primary := p.primary
 		p.mu.Unlock()
-		return primary, func() {}
+		return p.primary, func() {}
+	}
+	if c, ok := p.popIdle(); ok {
+		p.mu.Unlock()
+		return c, func() { p.release(c) }
 	}
 	if p.size < p.maxExtras {
 		p.size++
@@ -72,18 +61,62 @@ func (p *connPool[T]) acquire() (T, func()) {
 	return p.primary, func() {}
 }
 
-// release returns conn c to the pool. If close has already run, closes c
-// inline instead — this prevents conns acquired before close from leaking
-// into the abandoned channel.
+// popIdle takes the oldest idle extra; the caller holds mu.
+func (p *connPool[T]) popIdle() (T, bool) {
+	var zero T
+	if len(p.idle) == 0 {
+		return zero, false
+	}
+	c := p.idle[0]
+	p.idle[0] = zero
+	p.idle = p.idle[1:]
+	return c, true
+}
+
+// release returns conn c to the pool. If close has already run, or the pool
+// was shrunk below the extras it holds, closes c inline instead: that is how
+// a lowered limit takes effect as transfers finish, and it keeps conns
+// acquired before close out of the abandoned idle list.
 func (p *connPool[T]) release(c T) {
 	p.mu.Lock()
-	if p.closed {
+	if p.closed || p.size > p.maxExtras {
+		p.size--
 		p.mu.Unlock()
 		p.closeFn(c)
 		return
 	}
-	p.avail <- c
+	p.idle = append(p.idle, c)
 	p.mu.Unlock()
+}
+
+// resize sets how many extras the pool may hold. Raising it lets the next
+// acquires dial. Lowering it never takes a connection away from a running
+// transfer: idle surplus closes now, busy surplus when it is released.
+func (p *connPool[T]) resize(maxExtras int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.maxExtras = max(maxExtras, 0)
+	var surplus []T
+	for !p.closed && p.size > p.maxExtras {
+		c, ok := p.popIdle()
+		if !ok {
+			break
+		}
+		surplus = append(surplus, c)
+		p.size--
+	}
+	p.mu.Unlock()
+	// Closing talks to the server (FTP sends QUIT) and the caller is the UI's
+	// key handler, so it must not wait for that.
+	if len(surplus) > 0 {
+		go func() {
+			for _, c := range surplus {
+				p.closeFn(c)
+			}
+		}()
+	}
 }
 
 // close marks the pool closed and closes every idle extra. Subsequent
@@ -99,13 +132,10 @@ func (p *connPool[T]) close() {
 		return
 	}
 	p.closed = true
+	idle := p.idle
+	p.idle = nil
 	p.mu.Unlock()
-	for {
-		select {
-		case c := <-p.avail:
-			p.closeFn(c)
-		default:
-			return
-		}
+	for _, c := range idle {
+		p.closeFn(c)
 	}
 }

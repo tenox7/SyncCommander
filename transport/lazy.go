@@ -62,13 +62,14 @@ func protoManagesLiveness(proto string) bool {
 // dialMu serializes dial attempts so parallel callers share one, while mu
 // only guards the pointer: Close never waits behind a dial.
 type lazyBackend struct {
-	factory func() (model.Backend, error)
-	display string
-	proto   string
-	mu      sync.Mutex
-	inner   model.Backend
-	closed  bool
-	dialMu  sync.Mutex
+	factory  func() (model.Backend, error)
+	display  string
+	proto    string
+	mu       sync.Mutex
+	inner    model.Backend
+	closed   bool
+	parallel int // last SetParallel, reapplied to every redialed inner; 0 = never set
+	dialMu   sync.Mutex
 }
 
 func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
@@ -106,6 +107,11 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	closed := b.closed
 	if !closed {
 		b.inner = inner
+		// The factory sized the pool for the start value; +/- may have
+		// moved it since.
+		if b.parallel > 0 {
+			SetParallel(inner, b.parallel)
+		}
 	}
 	b.mu.Unlock()
 	if closed {
@@ -267,6 +273,17 @@ func (b *lazyBackend) Close() error {
 		return c.Close()
 	}
 	return nil
+}
+
+// SetParallel resizes the connected backend's pool and remembers n for the
+// next redial. It holds mu so a redial can't apply an older value after it.
+func (b *lazyBackend) SetParallel(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.parallel = n
+	if b.inner != nil {
+		SetParallel(b.inner, n)
+	}
 }
 
 func (b *lazyBackend) ProbeChecksums() []string {
