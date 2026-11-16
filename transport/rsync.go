@@ -49,6 +49,9 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 		return nil, errors.New("rsync: module name required in URL")
 	}
 	base = strings.Trim(base, "/")
+	if strings.ContainsAny(remotePath, "\r\n") {
+		return nil, errors.New("rsync: a daemon takes no module or folder name with a line break")
+	}
 
 	displayHost := host
 	if port != "873" {
@@ -74,26 +77,123 @@ func (b *RsyncBackend) BasePath() string { return b.display }
 func (b *RsyncBackend) OwnsCopyProgress() bool { return true }
 
 // modulePath is the daemon-protocol path module/base/rel, with a trailing
-// slash when the contents of a directory are wanted.
-func (b *RsyncBackend) modulePath(relPath string, dir bool) string {
-	p := b.module
-	if b.base != "" {
-		p += "/" + b.base
+// slash when the contents of a directory are wanted, written so that a
+// stock daemon reads back this one path (see daemonPath).
+func (b *RsyncBackend) modulePath(relPath string, dir bool) (string, error) {
+	p := b.baseRel(relPath)
+	arg, err := daemonPath(b.module, p)
+	if err != nil {
+		return "", err
 	}
-	if relPath != "" {
-		p += "/" + relPath
+	full := b.module
+	if arg != "" {
+		full += "/" + arg
 	}
 	if dir {
-		p += "/"
+		full += "/"
 	}
-	return p
+	if arg != p && len(full) > maxDaemonPattern {
+		return "", fmt.Errorf("rsync: %s: the name is too long to send to a daemon as a pattern (%d bytes, at most %d)", relPath, len(full), maxDaemonPattern)
+	}
+	return full, nil
+}
+
+// baseRel is relPath below the module: the base joined with relPath.
+func (b *RsyncBackend) baseRel(relPath string) string {
+	switch {
+	case b.base == "":
+		return relPath
+	case relPath == "":
+		return b.base
+	}
+	return b.base + "/" + relPath
+}
+
+// pushTarget is the rsync:// URL of relDir for a push into it; the folder
+// must be there. A path sent as a pattern (see daemonPath) that matches
+// nothing is used as a plain name: the receiver creates a folder named with
+// the backslashes and reports success. gorsyncd reads every name that way.
+// So for such a path the daemon is asked for the folder's own entry first
+// (-d, no trailing slash: not its contents).
+func (b *RsyncBackend) pushTarget(ctx context.Context, relDir string) (string, error) {
+	url, err := b.remoteURL(relDir)
+	if err != nil {
+		return "", err
+	}
+	p := b.baseRel(relDir)
+	if arg, _ := daemonPath(b.module, p); arg == p {
+		return url, nil
+	}
+	remote, err := b.modulePath(relDir, false)
+	if err != nil {
+		return "", err
+	}
+	res, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d"}, remote)
+	if err != nil {
+		return "", err
+	}
+	if len(res.FileList) != 1 || !rsyncModeToFileMode(res.FileList[0].Mode).IsDir() {
+		return "", fmt.Errorf("rsync: %s: no such folder on the daemon", relDir)
+	}
+	return url, nil
+}
+
+// maxDaemonPattern is the longest argument sc sends with a pattern in it. A
+// daemon reads each argument into MAXPATHLEN+1024 bytes and drops the rest:
+// 2047 bytes on BSD and macOS. A pattern cut short can match another name;
+// a plain path that long cannot name anything there.
+const maxDaemonPattern = 2047
+
+// daemonPath writes p, a path below the module, so that a stock rsync daemon
+// reads back this one path. The daemon splits each argument at
+// " <module>/", and matches each part that holds *, ? or [ as a pattern
+// against the names in its folder (rsync util1.c glob_expand_module and
+// glob_match): "d[1]" lists d1 when that exists, and "old <module>/x" names
+// two paths, "old" and "x". Such a part goes as a pattern that only its own
+// name matches: a backslash before each of \ * ? [ ], and a space as [ ], so
+// no " <module>/" is left to split at. The daemon takes other parts as they
+// are, backslashes too. A line break ends the argument, so a name holding
+// one is refused.
+func daemonPath(module, p string) (string, error) {
+	if strings.ContainsAny(p, "\r\n") {
+		return "", fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", p)
+	}
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		if strings.ContainsAny(part, "*?[") || strings.HasSuffix(part, " "+module) {
+			parts[i] = daemonPattern(part)
+		}
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+// daemonPattern is the rsync wildcard pattern that matches name and nothing
+// else, holding no space.
+func daemonPattern(name string) string {
+	var sb strings.Builder
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; c {
+		case '\\', '*', '?', '[', ']':
+			sb.WriteByte('\\')
+			sb.WriteByte(c)
+		case ' ':
+			sb.WriteString("[ ]")
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	return sb.String()
 }
 
 // remoteURL is the rsync:// form for transfers. gorsync parses it with
 // net/url, so every path segment is percent-encoded or a name holding '#',
 // '?' or '%' would cut or corrupt the path.
-func (b *RsyncBackend) remoteURL(relPath string) string {
-	segs := strings.Split(b.modulePath(relPath, false), "/")
+func (b *RsyncBackend) remoteURL(relPath string) (string, error) {
+	mp, err := b.modulePath(relPath, false)
+	if err != nil {
+		return "", err
+	}
+	segs := strings.Split(mp, "/")
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
@@ -105,7 +205,7 @@ func (b *RsyncBackend) remoteURL(relPath string) string {
 		}
 		hostPart = userinfo + "@" + b.host
 	}
-	return "rsync://" + hostPart + "/" + strings.Join(segs, "/")
+	return "rsync://" + hostPart + "/" + strings.Join(segs, "/"), nil
 }
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
@@ -233,7 +333,10 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 // directory's children, without it the sender skips a directory argument and
 // hangs up after an empty list.
 func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	remote := b.modulePath(relDir, true)
+	remote, err := b.modulePath(relDir, true)
+	if err != nil {
+		return nil, err
+	}
 	label := "LIST " + remote
 	peer := &peerMsgs{}
 	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d"}, remote, rsyncclient.WithStderr(peer))
@@ -262,7 +365,10 @@ func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error
 }
 
 func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
-	remote := b.modulePath(scope, true)
+	remote, err := b.modulePath(scope, true)
+	if err != nil {
+		return err
+	}
 	l := newRsyncListing(scope, emit, complete, b.msgRelPath)
 	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, remote, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
@@ -309,7 +415,11 @@ func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope string, recu
 }
 
 func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
-	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), b.modulePath(scope, recursive))
+	remote, err := b.modulePath(scope, recursive)
+	if err != nil {
+		return nil, err
+	}
+	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), remote)
 	if err != nil {
 		return nil, err
 	}
@@ -391,10 +501,14 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	}
 	defer os.RemoveAll(tmpDir)
 	parentRel := parentDir(relPath)
-	src, dest := srcPath, b.remoteURL(parentRel)+"/"
+	src, destRel := srcPath, parentRel
 	if stageTop, link, perr := stageUploadPath(tmpDir, relPath); perr == nil && os.Link(srcPath, link) == nil {
-		src, dest = stageTop, b.remoteURL("")+"/"
+		src, destRel = stageTop, ""
 	} else if err := b.Mkdir(ctx, parentRel, 0o755); err != nil {
+		return err
+	}
+	dest, err := b.pushTarget(ctx, destRel)
+	if err != nil {
 		return err
 	}
 	var adder *CappedAdder
@@ -402,7 +516,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	if counter := progressFromContext(ctx); counter != nil && fileSize > 0 {
 		adder = NewCappedAdder(counter, fileSize)
 	}
-	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest, adder, fileSize, 0, "-r")
+	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest+"/", adder, fileSize, 0, "-r")
 	if err == nil {
 		b.noteSent(relPath, srcPath)
 	}
@@ -414,8 +528,12 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 // RecvToLocalFile downloads directly to dstPath; --inplace reuses an existing
 // prefix there for resume.
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
+	src, err := b.remoteURL(relPath)
+	if err != nil {
+		return err
+	}
 	return rsyncRecvToLocal(ctx, "rsync", relPath, dstPath, func(dstDir string) error {
-		args := b.transferArgs(b.remoteURL(relPath), dstDir)
+		args := b.transferArgs(src, dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath+" -> "+dstPath)
 		_, err := b.rsyncRun(ctx, args...)
 		if err != nil {
@@ -435,11 +553,15 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err != nil {
 		return err
 	}
+	dest, err := b.pushTarget(ctx, "")
+	if err != nil {
+		return err
+	}
 	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, mode)
 	if err != nil {
 		return err
 	}
-	err = b.push(ctx, "SEND "+relPath, stageTop, b.remoteURL("")+"/", pushAdder, pushBudget, 0, "-r")
+	err = b.push(ctx, "SEND "+relPath, stageTop, dest+"/", pushAdder, pushBudget, 0, "-r")
 	if err == nil {
 		b.noteSent(relPath, tmpFile)
 	}
@@ -456,6 +578,10 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 // its own path, anything else is hardlinked or spooled under that name first.
 // Progress covers the tail only; the engine has credited the prefix.
 func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+	dest, err := b.pushTarget(ctx, parentDir(relPath))
+	if err != nil {
+		return err
+	}
 	name := path.Base(relPath)
 	srcPath := src.LocalPath()
 	if srcPath == "" || filepath.Base(srcPath) != name {
@@ -478,7 +604,7 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 		adder = NewCappedAdder(counter, tailSize)
 	}
 	label := fmt.Sprintf("APPEND %s @%d/%d", relPath, offset, src.Size())
-	err := b.push(ctx, label, srcPath, b.remoteURL(parentDir(relPath))+"/", adder, tailSize, offset, "--append-verify")
+	err = b.push(ctx, label, srcPath, dest+"/", adder, tailSize, offset, "--append-verify")
 	if err == nil {
 		b.noteSent(relPath, srcPath)
 	}
@@ -497,6 +623,10 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
+	dest, err := b.pushTarget(ctx, "")
+	if err != nil {
+		return err
+	}
 	dirMode := mode.Perm()
 	if dirMode == 0 {
 		dirMode = 0755
@@ -506,7 +636,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	}
 	stageTop := filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0])
 	Log.Add("rsync", DirOut, "MKDIR "+clean)
-	_, err = b.rsyncRun(ctx, "-r", "-t", stageTop, b.remoteURL("")+"/")
+	_, err = b.rsyncRun(ctx, "-r", "-t", stageTop, dest+"/")
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
@@ -540,6 +670,13 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 		return errors.New("rsync: refusing to remove module root")
 	}
 	clean := strings.Trim(path.Clean(relPath), "/")
+	if strings.ContainsAny(clean, "\r\n") {
+		return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", clean)
+	}
+	dest, err := b.pushTarget(ctx, parentDir(clean))
+	if err != nil {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "rsync-remove-*")
 	if err != nil {
 		return err
@@ -553,7 +690,7 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 		args = append(args, "--include=/"+esc+"/***")
 		op = "REMOVEALL"
 	}
-	args = append(args, "--exclude=*", tmpDir+"/", b.remoteURL(parentDir(clean))+"/")
+	args = append(args, "--exclude=*", tmpDir+"/", dest+"/")
 	Log.Add("rsync", DirOut, op+" "+clean)
 	_, err = b.rsyncRun(ctx, args...)
 	if recursive {
@@ -584,9 +721,17 @@ func (b *RsyncBackend) OpenAt(ctx context.Context, relPath string, offset int64)
 }
 
 func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	remote, err := b.modulePath(relPath, false)
+	if err != nil {
+		return nil, err
+	}
+	src, err := b.remoteURL(relPath)
+	if err != nil {
+		return nil, err
+	}
 	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
 		if offset > 0 {
-			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), b.modulePath(relPath, false), dstDir, rsyncclient.WithUnverifiedAppend())
+			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, rsyncclient.WithUnverifiedAppend())
 			if err != nil {
 				return err
 			}
@@ -606,7 +751,7 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 			}
 			return nil
 		}
-		args := b.transferArgs(b.remoteURL(relPath), dstDir)
+		args := b.transferArgs(src, dstDir)
 		Log.Add("rsync", DirOut, "RECV "+relPath)
 		_, err := b.rsyncRun(ctx, args...)
 		if err != nil {
