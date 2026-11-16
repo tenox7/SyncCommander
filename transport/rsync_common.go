@@ -51,9 +51,13 @@ func md4ListFlags(recursive bool) []string {
 }
 
 // newRsyncClient builds an in-process rsync client with its console output
-// silenced; the library would otherwise write into the TUI.
+// silenced; the library would otherwise write into the TUI. It never
+// restricts the process: on Linux gorsync otherwise puts the whole process
+// in a Landlock sandbox allowing only the folders of that one run, which
+// cannot be lifted, so after the first download sc could not make a temp
+// folder or read any other folder.
 func newRsyncClient(flags []string, opts ...rsyncclient.Option) (*rsyncclient.Client, error) {
-	base := []rsyncclient.Option{rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(nopWriteCloser{io.Discard})}
+	base := []rsyncclient.Option{rsyncclient.WithStdout(io.Discard), rsyncclient.WithStderr(nopWriteCloser{io.Discard}), rsyncclient.DontRestrict()}
 	return rsyncclient.New(flags, append(base, opts...)...)
 }
 

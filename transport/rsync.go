@@ -259,7 +259,7 @@ func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []st
 // daemonHandshake) and runs one client run between remotePath and the
 // local paths.
 func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remotePath string, local []string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
-	client, err := newRsyncClient(flags, append([]rsyncclient.Option{rsyncclient.WithoutNegotiate(), rsyncclient.DontRestrict()}, opts...)...)
+	client, err := newRsyncClient(flags, append([]rsyncclient.Option{rsyncclient.WithoutNegotiate()}, opts...)...)
 	if err != nil {
 		return nil, err
 	}

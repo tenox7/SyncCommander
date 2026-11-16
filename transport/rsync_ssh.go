@@ -71,7 +71,7 @@ func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) er
 func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	// rsync quotes paths in its messages as absolute paths.
 	l := newRsyncListing(scope, emit, complete, func(p string) (string, bool) { return relUnder(b.base, p) })
-	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict(), rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
+	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
-	client, err := newRsyncClient(md4ListFlags(recursive), rsyncclient.DontRestrict())
+	client, err := newRsyncClient(md4ListFlags(recursive))
 	if err != nil {
 		return nil, err
 	}

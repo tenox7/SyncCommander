@@ -84,7 +84,9 @@ func TestRsyncDaemonPasswordStaysSecret(t *testing.T) {
 // An upload to a read-only module stops the whole operation: every other
 // upload would fail the same way. The daemon says so in a message to the
 // client, which sc now reads from the server's messages, not from all of
-// gorsync's stderr.
+// gorsync's stderr. rsync 3.1.3 on Linux resets the connection before that
+// message gets out, for its own client too ("read error: Connection reset
+// by peer"); then the upload only fails.
 func TestRsyncReadOnlyModuleAbortsOperation(t *testing.T) {
 	port, _ := startRsyncDaemonConf(t, func(root string) string {
 		return "[ro]\n  path = " + filepath.Join(root, "ro") + "\n  read only = yes\n"
@@ -103,10 +105,16 @@ func TestRsyncReadOnlyModuleAbortsOperation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		ctx = ContextWithFatalCancel(ctx, cancel)
 		err := b.CopyFrom(ctx, "x.txt", strings.NewReader("x"), 0o644)
-		if err == nil || !strings.Contains(err.Error(), "module is read only") {
-			t.Errorf("%s: CopyFrom to a read-only module: %v; want an error saying the module is read only", name, err)
-		}
-		if ctx.Err() == nil {
+		switch {
+		case err == nil:
+			t.Errorf("%s: CopyFrom to a read-only module: no error", name)
+		case !strings.Contains(err.Error(), "module is read only"):
+			if name == "gorsyncd" {
+				t.Errorf("%s: CopyFrom to a read-only module: %v; want an error saying the module is read only", name, err)
+			} else {
+				t.Logf("%s: the daemon's message did not arrive: %v", name, err)
+			}
+		case ctx.Err() == nil:
 			t.Errorf("%s: a read-only module did not abort the operation", name)
 		}
 		cancel()
