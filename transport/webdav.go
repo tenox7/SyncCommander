@@ -299,9 +299,12 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	}
 
 	// Multistatus ordering is not guaranteed grouped by parent; the grouper
-	// appends, so interleaving only costs extra flushes.
+	// appends, so interleaving only costs extra flushes. A 207 does not say
+	// how deep the server went: sabre/dav answers Depth: infinity with one
+	// level by default and Tomcat stops at depth 3. So a folder with no
+	// children in the answer is listed again on its own (childlessUnknown).
 	self := strings.Trim(scope, "/")
-	g := &emitGrouper{emit: emit, complete: complete}
+	g := &emitGrouper{emit: emit, complete: complete, childlessUnknown: true}
 	dec := xml.NewDecoder(resp.Body)
 	n := 0
 	for {

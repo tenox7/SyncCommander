@@ -241,23 +241,33 @@ func parentDir(relPath string) string {
 // finish, so an empty leaf is a cache hit rather than a live list. While hold
 // reports true, a dir the stream leaves is not completed then but at finish:
 // the run has reported a problem, and only its end tells which listings are
-// whole.
+// whole. With childlessUnknown a dir no child arrived for is never
+// completed or registered, so List lists it live: the stream cannot tell an
+// empty dir from one the server did not descend into.
 type emitGrouper struct {
-	emit         func(string, []model.FileEntry)
-	complete     func(string)
-	hold         func() bool
-	skip         map[string]bool // never completed, see finishExcept
-	lateChildren bool
-	current      string
-	have         bool
-	batch        []model.FileEntry
-	dirs         map[string]struct{}
-	open         []string
+	emit             func(string, []model.FileEntry)
+	complete         func(string)
+	hold             func() bool
+	skip             map[string]bool // never completed, see finishExcept
+	lateChildren     bool
+	childlessUnknown bool
+	withChildren     map[string]struct{}
+	current          string
+	have             bool
+	batch            []model.FileEntry
+	dirs             map[string]struct{}
+	open             []string
 }
 
 func (g *emitGrouper) add(e model.FileEntry) {
 	g.closeOutside(e.RelPath, g.hold == nil || !g.hold())
 	parent := parentDir(e.RelPath)
+	if g.childlessUnknown {
+		if g.withChildren == nil {
+			g.withChildren = make(map[string]struct{})
+		}
+		g.withChildren[parent] = struct{}{}
+	}
 	if g.lateChildren && parent != "" && (len(g.open) == 0 || g.open[len(g.open)-1] != parent) {
 		g.push(parent)
 	}
@@ -295,9 +305,25 @@ func (g *emitGrouper) closeOutside(rel string, release bool) {
 			g.addDir(d)
 			continue
 		}
-		g.complete(d)
+		g.done(d)
 		delete(g.dirs, d)
 	}
+}
+
+// done completes d, unless the stream cannot vouch for it (childlessUnknown).
+func (g *emitGrouper) done(d string) {
+	if g.unknown(d) {
+		return
+	}
+	g.complete(d)
+}
+
+func (g *emitGrouper) unknown(d string) bool {
+	if !g.childlessUnknown {
+		return false
+	}
+	_, ok := g.withChildren[d]
+	return !ok
 }
 
 func (g *emitGrouper) addDir(d string) {
@@ -324,7 +350,7 @@ func (g *emitGrouper) finishExcept(skip map[string]bool) {
 	g.flush()
 	g.closeOutside("", true)
 	for d := range g.dirs {
-		if skip[d] {
+		if skip[d] || g.unknown(d) {
 			continue
 		}
 		if g.complete != nil {
