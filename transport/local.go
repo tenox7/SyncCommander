@@ -173,6 +173,9 @@ func (b *LocalBackend) ProbeChecksums() []string {
 
 func (b *LocalBackend) SetChecksumAlgo(algo string) { b.cksumAlgo.Store(algo) }
 
+// Close does nothing: a local folder holds no connection.
+func (b *LocalBackend) Close() error { return nil }
+
 func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime, btime time.Time) error {
 	if atime.IsZero() {
 		atime = mtime

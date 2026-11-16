@@ -50,6 +50,7 @@ type RcloneBackend struct {
 	objs      *rcObjCache
 	dirs      sync.Map // directories known to exist
 	putMtime  sync.Map // mtime stamped at Put, so SetTimes can skip a redundant round trip
+	closeOnce sync.Once
 }
 
 var rcloneInit sync.Once
@@ -139,6 +140,21 @@ func NewRcloneBackend(rawURL string, insecure bool) (*RcloneBackend, error) {
 }
 
 func (b *RcloneBackend) BasePath() string { return b.url }
+
+// Close shuts the remote down when rclone gives it a Shutdown: smb closes
+// its sessions, dropbox commits the uploads it batched, crypt passes it on
+// to what it wraps. rclone's own cache of remotes calls it when it lets one
+// go; sc makes its remotes without that cache, so nothing else does. Only
+// the first Close shuts it down.
+func (b *RcloneBackend) Close() error {
+	var err error
+	b.closeOnce.Do(func() {
+		if s, ok := b.f.(fs.Shutdowner); ok {
+			err = s.Shutdown(context.Background())
+		}
+	})
+	return err
+}
 
 // rcloneHashOrder is sc's preference order intersected with what rclone can
 // compute. Cheap-and-wide first: xxh3 is fastest locally, md5 is what most

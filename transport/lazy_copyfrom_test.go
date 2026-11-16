@@ -20,6 +20,7 @@ type copyStub struct {
 }
 
 func (s *copyStub) BasePath() string                                        { return "/stub" }
+func (s *copyStub) Close() error                                            { return nil }
 func (s *copyStub) List(context.Context, string) ([]model.FileEntry, error) { return nil, nil }
 func (s *copyStub) Stat(context.Context, string) (model.FileEntry, error) {
 	return model.FileEntry{}, fs.ErrNotExist

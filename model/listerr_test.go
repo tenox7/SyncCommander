@@ -17,6 +17,7 @@ type stubBackend struct {
 }
 
 func (b *stubBackend) BasePath() string { return "/stub" }
+func (b *stubBackend) Close() error     { return nil }
 
 func (b *stubBackend) List(_ context.Context, relDir string) ([]FileEntry, error) {
 	if b.fail[relDir] {

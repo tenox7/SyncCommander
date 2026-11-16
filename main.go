@@ -142,7 +142,11 @@ func main() {
 	if *mouse {
 		progOpts = append(progOpts, tea.WithMouseCellMotion())
 	}
-	if _, err := tea.NewProgram(mdl, progOpts...).Run(); err != nil {
+	final, err := tea.NewProgram(mdl, progOpts...).Run()
+	if m, ok := final.(*ui.Model); ok {
+		m.Close()
+	}
+	if err != nil {
 		fail(err)
 	}
 }

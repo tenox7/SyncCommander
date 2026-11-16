@@ -207,9 +207,11 @@ func ParentPath(p string) string {
 	return parent
 }
 
+// CloseBackend closes b, if any, for a defer or a goroutine that has no one
+// to tell about an error.
 func CloseBackend(b model.Backend) {
-	if c, ok := b.(interface{ Close() error }); ok {
-		c.Close()
+	if b != nil {
+		b.Close()
 	}
 }
 

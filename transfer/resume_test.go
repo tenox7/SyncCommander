@@ -26,6 +26,7 @@ type resumeStub struct {
 }
 
 func (s *resumeStub) BasePath() string { return "/stub" }
+func (s *resumeStub) Close() error     { return nil }
 
 func (s *resumeStub) List(_ context.Context, _ string) ([]model.FileEntry, error) {
 	return []model.FileEntry{{Name: "f.bin", RelPath: "f.bin", Size: s.dstSize}}, nil

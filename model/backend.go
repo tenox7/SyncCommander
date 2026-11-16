@@ -74,6 +74,13 @@ func KindName(m os.FileMode) string {
 // fs.ErrNotExist. A part file is not the file: Stat looks at the final name
 // only (D1, F18: one file's size used to cost a listing of its folder, and
 // came from a cache that could be hours old).
+//
+// Close lets go of what the backend holds: its connections, sessions and
+// pools, and work the server keeps for it until then (an rclone remote's
+// Shutdown). Nothing else is called on the backend after it. A second
+// Close does no harm: a pane closes the backends it replaces, and the
+// program closes the ones it started with on exit. It was found by type
+// assertion, which a wrapper that embeds Backend hid (D1).
 type Backend interface {
 	BasePath() string
 	List(ctx context.Context, relDir string) ([]FileEntry, error)
@@ -86,6 +93,7 @@ type Backend interface {
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
+	Close() error
 }
 
 // PutParams is what a backend is told about a file it takes. Size and

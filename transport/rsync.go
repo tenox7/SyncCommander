@@ -73,6 +73,9 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 
 func (b *RsyncBackend) BasePath() string { return b.display }
 
+// Close does nothing: every call dials the daemon and hangs up after.
+func (b *RsyncBackend) Close() error { return nil }
+
 func (b *RsyncBackend) OwnsCopyProgress() bool { return true }
 
 // modulePath is the daemon-protocol path module/base/rel, with a trailing

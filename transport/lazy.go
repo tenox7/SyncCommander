@@ -144,7 +144,7 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	}
 	b.mu.Unlock()
 	if closed {
-		CloseBackend(inner)
+		inner.Close()
 		return nil, net.ErrClosed
 	}
 	Log.Add(b.proto, DirIn, "connected to "+b.display)
@@ -167,7 +167,7 @@ func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 	b.mu.Unlock()
 	if current {
 		Log.Add(b.proto, DirErr, "connection lost, reconnecting on next op: "+err.Error())
-		CloseBackend(inner)
+		inner.Close()
 	}
 	return err
 }
@@ -445,10 +445,10 @@ func (b *lazyBackend) Close() error {
 	inner := b.inner
 	b.inner, b.closed = nil, true
 	b.mu.Unlock()
-	if c, ok := inner.(io.Closer); ok {
-		return c.Close()
+	if inner == nil {
+		return nil
 	}
-	return nil
+	return inner.Close()
 }
 
 // SetParallel resizes the connected backend's pool and remembers n for the

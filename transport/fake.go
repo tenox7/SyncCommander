@@ -573,6 +573,9 @@ func fillBlock(buf *[4096]byte, seed, idx uint64) {
 	}
 }
 
+// Close does nothing: the tree is generated.
+func (b *FakeBackend) Close() error { return nil }
+
 func (b *FakeBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
 	e, ok := b.lookup(relPath)
 	if !ok {

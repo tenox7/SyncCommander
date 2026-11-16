@@ -18,6 +18,7 @@ type listStub struct {
 }
 
 func (b *listStub) BasePath() string { return "/stub" }
+func (b *listStub) Close() error     { return nil }
 
 func (b *listStub) List(_ context.Context, relDir string) ([]model.FileEntry, error) {
 	if b.fail[relDir] {

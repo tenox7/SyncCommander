@@ -49,6 +49,14 @@ func (m *Model) descendCursor() tea.Cmd {
 	return m.reopenOrExplain(leftPath, rightPath)
 }
 
+// Close closes the backends the panes hold now. A reopen may have replaced
+// the ones the program started with, and an rclone remote finishes its work
+// (dropbox's batched uploads) only when it is closed.
+func (m *Model) Close() {
+	transport.CloseBackend(m.left)
+	transport.CloseBackend(m.right)
+}
+
 // reopenOrExplain reopens both sides or, when one cannot be opened, shows the
 // attempted locations in the URL dialog with the error, so a failed parent or
 // descend key is never silent.
