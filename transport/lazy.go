@@ -189,6 +189,11 @@ func doAs[T any](b *lazyBackend, ctx context.Context, what string, op func(T) er
 	})
 }
 
+// Location names the remote this backend opens, password masked. Two backends
+// at one location are one object store: a copy between them reads the file it
+// truncates.
+func (b *lazyBackend) Location() string { return strings.TrimRight(b.display, "/") }
+
 func (b *lazyBackend) BasePath() string {
 	if inner := b.current(); inner != nil {
 		return inner.BasePath()

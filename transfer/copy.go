@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -61,12 +62,46 @@ type copier struct {
 	dstChanged map[string]bool
 }
 
+// locator is a remote backend that can name the place it opens.
+type locator interface{ Location() string }
+
+// sameObject reports whether relPath is one object on both sides: one folder
+// opened on both sides (sc with no arguments), a symlinked or bind-mounted
+// base, a hard link, or one remote URL on both sides. Writing the destination
+// would truncate the source it reads from.
+func sameObject(src, dst model.Backend, relPath string) bool {
+	sl, sok := src.(model.LocalFS)
+	dl, dok := dst.(model.LocalFS)
+	if sok && dok {
+		si, serr := os.Stat(sl.LocalPath(relPath))
+		di, derr := os.Stat(dl.LocalPath(relPath))
+		return serr == nil && derr == nil && os.SameFile(si, di)
+	}
+	sloc, sok := src.(locator)
+	dloc, dok := dst.(locator)
+	return sok && dok && sloc.Location() == dloc.Location()
+}
+
+// displayPath names relPath in the log; the top row is "/".
+func displayPath(relPath string) string {
+	if relPath == "" {
+		return "/"
+	}
+	return relPath
+}
+
 // Copy runs the whole transfer and returns once every file has been tried.
 func Copy(ctx context.Context, req Request) Result {
 	p := req.Progress
 	ctx = transport.ContextWithProgress(ctx, &p.Bytes)
 	ctx = transport.ContextWithBaseProgress(ctx, &p.BaseBytes)
 	isDir := req.Node.IsDir
+
+	if sameObject(req.Src, req.Dst, req.RelPath) {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+displayPath(req.RelPath)+": refused, source and destination are the same "+map[bool]string{true: "folder", false: "file"}[isDir])
+		return Result{}
+	}
 
 	// Copy and mirror-delete enumerate the in-memory tree, which shows an
 	// unlisted dir as empty. List the whole subtree first or the copy
@@ -288,6 +323,13 @@ func (c *copier) copyOne(f item) {
 			return
 		}
 		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
+		return
+	}
+	// A file can be one object on both sides even when its folders are not:
+	// a hard link, or a destination folder that links into the source.
+	if sameObject(c.src, c.dst, f.relPath) {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, source and destination are the same file")
 		return
 	}
 	if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
