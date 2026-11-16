@@ -22,10 +22,15 @@ import (
 )
 
 // rsyncTransferFlags are passed to every rsync invocation that moves file
-// data. -t preserves mtime; --inplace writes directly to the destination
-// (resume keeps the partial body in place); --partial keeps interrupted
-// files for the next run; -W disables the delta-sync algorithm so the sender
-// streams the whole file. -W is intentional: gokrazy/rsync's hashSearch path
+// data. -t preserves mtime. With neither --inplace nor --partial the
+// receiver writes a temp file next to the destination, renames it over the
+// destination once complete and removes it when the transfer fails (R12):
+// an overwrite cut off half way leaves the old version, not the new start
+// on the old end, and a file with other hard links (a snapshot backup)
+// gets a new inode instead of changing theirs. --partial would rename the
+// cut-off temp file over the destination. The resume path adds
+// --append-verify, which writes in place by itself. -W disables the
+// delta-sync algorithm so the sender streams the whole file. -W is intentional: gokrazy/rsync's hashSearch path
 // (internal/sender/fileio.go) misclassifies read errors as "file has changed
 // mid-transfer", and on this workload delta-sync saves no bandwidth anyway
 // (mostly immutable archives). --ignore-times bypasses rsync's quick-check
@@ -35,7 +40,7 @@ import (
 // times of folders alone: sc stages uploads in a temp tree whose folder
 // times mean nothing, and a server may not let it set the time of a folder
 // it does not own, which rsync reports as an error.
-var rsyncTransferFlags = []string{"-t", "-O", "--inplace", "--partial", "-W", "--ignore-times"}
+var rsyncTransferFlags = []string{"-t", "-O", "-W", "--ignore-times"}
 
 func transferFlags() []string { return slices.Clone(rsyncTransferFlags) }
 
@@ -423,10 +428,11 @@ func (l *rsyncListing) unreadBy(msg string) ([]string, bool) {
 	return dirs, len(dirs) > 0
 }
 
-// tailProgress credits growth of dir/base beyond skip to the context's
-// progress counter until the returned stop runs. Without a counter it is a
-// no-op.
-func tailProgress(ctx context.Context, dir, base string, skip int64) func() {
+// tailProgress credits what rsync receives as dir/base to the context's
+// progress counter until the returned stop runs: the growth beyond skip of
+// the file itself for a receive in place (--append), else of rsync's temp
+// file (see tailDirSize). Without a counter it is a no-op.
+func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int64) func() {
 	counter := progressFromContext(ctx)
 	if counter == nil {
 		return func() {}
@@ -441,7 +447,7 @@ func tailProgress(ctx context.Context, dir, base string, skip int64) func() {
 		baseAdder = NewCappedAdder(bp, size)
 	}
 	stop := make(chan struct{})
-	go tailDirSize(stop, dir, base, NewCappedAdder(counter, size), baseAdder, skip)
+	go tailDirSize(stop, dir, base, inplace, NewCappedAdder(counter, size), baseAdder, skip)
 	return func() { close(stop) }
 }
 
@@ -467,7 +473,7 @@ func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv fu
 		}
 	}
 	if err == nil {
-		stop := tailProgress(ctx, tmpDir, filepath.Base(relPath), offset)
+		stop := tailProgress(ctx, tmpDir, filepath.Base(relPath), offset > 0, offset)
 		err = recv(tmpDir + "/")
 		stop()
 	}
@@ -518,7 +524,7 @@ func rsyncRecvToLocal(ctx context.Context, proto, relPath, dstPath string, recv 
 	if fi, err := os.Stat(dstPath); err == nil && fi.IsDir() {
 		return fmt.Errorf("%s: refuse to receive into existing directory %s", proto, dstPath)
 	}
-	stop := tailProgress(ctx, parent, filepath.Base(dstPath), 0)
+	stop := tailProgress(ctx, parent, filepath.Base(dstPath), false, 0)
 	err := recv(parent + "/")
 	stop()
 	if err != nil {

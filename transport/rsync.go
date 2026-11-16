@@ -508,8 +508,8 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	return err
 }
 
-// RecvToLocalFile downloads directly to dstPath; --inplace reuses an existing
-// prefix there for resume.
+// RecvToLocalFile downloads directly to dstPath, through rsync's temp file
+// next to it, renamed over it at the end (see rsyncTransferFlags).
 func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
 	remote, err := b.modulePath(relPath, false)
 	if err != nil {

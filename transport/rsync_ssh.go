@@ -283,8 +283,8 @@ func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int
 	return b.stream(ctx, conn, b.tailCmd(relPath, offset), release)
 }
 
-// RecvToLocalFile downloads straight to dstPath; an existing prefix there is
-// reused by rsync's resume.
+// RecvToLocalFile downloads straight to dstPath, through rsync's temp file
+// next to it, renamed over it at the end (see rsyncTransferFlags).
 func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {
 	return rsyncRecvToLocal(ctx, b.proto, relPath, dstPath, func(dstDir string) error {
 		client, err := newRsyncClient(transferFlags())
@@ -300,14 +300,15 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 // session. -c stands in for --ignore-times: rsync then skips only files whose
 // size, mtime and checksum all match, so a content-different file is never
 // dropped while a mostly identical tree is not resent. --progress makes the
-// sender print each filename as it starts, which feeds onFile.
+// sender print each filename as it starts, which feeds onFile. Each file
+// goes through a temp file renamed into place, as rsyncTransferFlags says.
 func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
 	srcPath := filepath.Join(srcRoot, relPath) + string(filepath.Separator)
 	remoteDest := b.abs(relPath) + "/"
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(remoteDest)); err != nil {
 		return err
 	}
-	client, err := newRsyncClient([]string{"-t", "-O", "--inplace", "--partial", "-W", "-r", "-c", "--progress"},
+	client, err := newRsyncClient([]string{"-t", "-O", "-W", "-r", "-c", "--progress"},
 		rsyncclient.WithSender(), rsyncclient.WithStdout(&filenameLineParser{onFile: onFile}))
 	if err != nil {
 		return err

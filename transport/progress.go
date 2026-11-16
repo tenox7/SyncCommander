@@ -5,8 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"sc/model"
 )
 
 type progressKey struct{}
@@ -146,48 +149,40 @@ func (c *CappedAdder) Used() int64 {
 	return c.used.Load()
 }
 
-// tailDirSize polls dir for the largest in-progress file size matching the
-// final basename, gorsync's renameio temp prefix (".<basename><random>"), or
-// gorsync's Windows pattern ("temp-rsync-*"), and pushes incremental size
-// deltas to adder. If the destination already has a partial file at start
-// (rsync --inplace --partial resume), its initial size beyond skip is
-// credited to both adder and base so it shows up in display totals without
-// inflating the transfer-rate calculation; skip covers bytes the caller has
-// already accounted for, such as a sparse placeholder prefix. Stop the
-// goroutine by closing stop.
-func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *CappedAdder, skip int64) {
+// tailDirSize polls dir for the size of the file rsync is receiving there
+// and pushes its growth to adder until stop is closed. A receive in place
+// (--append) grows the file under its own name from skip: the caller already
+// credited the bytes before skip (a sparse placeholder), and anything there
+// beyond skip at the start is credited to base too, so it shows in the
+// totals without inflating the rate. Any other receive writes a temp file
+// next to the name and renames it at the end (R12): until then the file
+// under the name is the old version and counts for nothing.
+func tailDirSize(stop <-chan struct{}, dir, basename string, inplace bool, adder, base *CappedAdder, skip int64) {
 	if adder == nil {
 		return
 	}
 	finalPath := filepath.Join(dir, basename)
-	patterns := []string{
-		filepath.Join(dir, "."+basename+"*"),
-		filepath.Join(dir, "temp-rsync-*"),
+	size := func() int64 {
+		if !inplace {
+			return rsyncTempSize(dir, basename)
+		}
+		if fi, err := os.Stat(finalPath); err == nil {
+			return fi.Size()
+		}
+		return 0
 	}
 	last := skip
-	if fi, err := os.Stat(finalPath); err == nil && fi.Size() > last {
-		adder.Add(fi.Size() - last)
+	if n := size(); inplace && n > last {
+		adder.Add(n - last)
 		if base != nil {
-			base.Add(fi.Size() - last)
+			base.Add(n - last)
 		}
-		last = fi.Size()
+		last = n
 	}
 	update := func() {
-		var size int64
-		if fi, err := os.Stat(finalPath); err == nil {
-			size = fi.Size()
-		}
-		for _, p := range patterns {
-			matches, _ := filepath.Glob(p)
-			for _, m := range matches {
-				if fi, err := os.Stat(m); err == nil && fi.Size() > size {
-					size = fi.Size()
-				}
-			}
-		}
-		if delta := size - last; delta > 0 {
+		if delta := size() - last; delta > 0 {
 			adder.Add(delta)
-			last = size
+			last += delta
 		}
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -201,6 +196,30 @@ func tailDirSize(stop <-chan struct{}, dir, basename string, adder, base *Capped
 			update()
 		}
 	}
+}
+
+// rsyncTempSize is the size of the largest temp file rsync may be receiving
+// basename into in dir: gorsync's ".<basename>.<random>", or "temp-rsync-*"
+// on Windows. The names are compared, not globbed, so a name with * ? [ in
+// it still matches. sc's own part file is not rsync's.
+func rsyncTempSize(dir, basename string) int64 {
+	d, err := os.Open(dir)
+	if err != nil {
+		return 0
+	}
+	names, _ := d.Readdirnames(-1)
+	d.Close()
+	prefix := "." + basename + "."
+	var n int64
+	for _, name := range names {
+		if !strings.HasPrefix(name, prefix) && !strings.HasPrefix(name, "temp-rsync-") || model.IsPartName(name) {
+			continue
+		}
+		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() && fi.Size() > n {
+			n = fi.Size()
+		}
+	}
+	return n
 }
 
 // CountingWriter wraps a writer and pushes byte deltas through a CappedAdder.
