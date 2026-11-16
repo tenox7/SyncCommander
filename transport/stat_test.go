@@ -226,9 +226,10 @@ func TestStatRestic(t *testing.T) {
 	resticPut(t, b, "config", []byte("config v1"))
 	pack := []byte("a small pack")
 	hash := sha256hex(pack)
-	resticPut(t, b, "data/"+hash, pack)
+	obj := resticPath("data", hash)
+	resticPut(t, b, obj, pack)
 
-	for _, dir := range []string{"", "data"} {
+	for _, dir := range []string{"", "data", "data/" + hash[:2]} {
 		entries, err := b.List(model.WithFreshListing(ctx), dir)
 		if err != nil {
 			t.Fatal(err)
@@ -240,15 +241,21 @@ func TestStatRestic(t *testing.T) {
 			}
 		}
 	}
-	if e, err := b.Stat(ctx, "data/"+hash); err != nil || e.Size != int64(len(pack)) || e.IsDir {
-		t.Errorf("Stat of an object = %+v, %v; want %d bytes", e, err, len(pack))
+	if e, err := b.Stat(ctx, obj); err != nil || e.Size != int64(len(pack)) || e.IsDir || e.RelPath != obj {
+		t.Errorf("Stat of an object = %+v, %v; want %d bytes at %s", e, err, len(pack), obj)
 	}
-	for _, p := range []string{"", "data", "keys"} {
+	for _, p := range []string{"", "data", "keys", "data/" + hash[:2]} {
 		if e, err := b.Stat(ctx, p); err != nil || !e.IsDir {
 			t.Errorf("Stat %q = %+v, %v; want a folder", p, e, err)
 		}
 	}
-	for _, p := range []string{"nope", "data/" + sha256hex([]byte("other")), "data/a/b"} {
+	otherShard := "00"
+	if hash[:2] == otherShard {
+		otherShard = "01"
+	}
+	// A missing object, and the same object under the names it does not
+	// have: flat, as the REST API calls it, and in another shard folder.
+	for _, p := range []string{"nope", resticPath("data", sha256hex([]byte("other"))), "data/a/b", "data/" + hash, "data/" + otherShard + "/" + hash} {
 		if e, err := b.Stat(ctx, p); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("Stat %s = %+v, %v; want fs.ErrNotExist", p, e, err)
 		}

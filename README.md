@@ -42,6 +42,12 @@ succeeded; a copy also lists any unscanned subtree first so nothing is skipped
 or under-deleted. Resumed (appended) copies are checksum-verified and recopied
 in full on mismatch — disable with `--verify-resume=false`.
 
+A restic repository is a backup: sc deletes nothing in one over restic://,
+a mirror's deletes included, unless started with `-restic-delete`. Its
+`data/` shows as restic stores it on disk, `data/<first two characters>/<name>`,
+so a repository folder and the same repository over restic:// compare name
+for name.
+
 ## Supported protocols and checksums
 
 | Protocol | Checksum |

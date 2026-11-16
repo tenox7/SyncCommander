@@ -56,6 +56,35 @@ func sha256hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// resticData lists data the way a scan does, its shard folders and then
+// each of them, and returns each object's size by name; every object must
+// sit at its one path.
+func resticData(t *testing.T, b *ResticBackend) map[string]int64 {
+	t.Helper()
+	ctx := context.Background()
+	shards, err := b.List(ctx, "data")
+	if err != nil {
+		t.Fatalf("List data: %v", err)
+	}
+	sizes := map[string]int64{}
+	for _, s := range shards {
+		if !s.IsDir || s.RelPath != "data/"+s.Name || len(s.Name) != 2 {
+			t.Fatalf("data holds %+v; want shard folders only", s)
+		}
+		objs, err := b.List(ctx, s.RelPath)
+		if err != nil {
+			t.Fatalf("List %s: %v", s.RelPath, err)
+		}
+		for _, o := range objs {
+			if o.IsDir || o.RelPath != s.RelPath+"/"+o.Name || o.Name[:2] != s.Name {
+				t.Fatalf("%s holds %+v", s.RelPath, o)
+			}
+			sizes[o.Name] = o.Size
+		}
+	}
+	return sizes
+}
+
 func resticPut(t *testing.T, b *ResticBackend, relPath string, content []byte) {
 	t.Helper()
 	if err := b.CopyFrom(context.Background(), relPath, bytes.NewReader(content), model.PutParams{Size: int64(len(content)), Mode: 0o644}); err != nil {
@@ -70,6 +99,8 @@ func resticPut(t *testing.T, b *ResticBackend, relPath string, content []byte) {
 // recursive preload cache — the cache is proven by killing the server and
 // re-listing every dir without any network.
 func TestResticRoundTrip(t *testing.T) {
+	SetResticDeletes(true)
+	defer SetResticDeletes(false)
 	root := t.TempDir()
 	port, stop := startRcloneRestic(t, root)
 
@@ -98,7 +129,7 @@ func TestResticRoundTrip(t *testing.T) {
 	dataHashes := make([]string, len(dataContents))
 	for i, c := range dataContents {
 		dataHashes[i] = sha256hex(c)
-		resticPut(t, b, "data/"+dataHashes[i], c)
+		resticPut(t, b, resticPath("data", dataHashes[i]), c)
 	}
 	indexContent := []byte(`{"packs":[]}`)
 	indexHash := sha256hex(indexContent)
@@ -122,17 +153,11 @@ func TestResticRoundTrip(t *testing.T) {
 		}
 	}
 
-	// data/ lists every object flat with its real size (rclone shards on disk).
-	dataEntries, err := b.List(ctx, "data")
-	if err != nil {
-		t.Fatalf("List data: %v", err)
-	}
-	if len(dataEntries) != len(dataContents) {
-		t.Fatalf("data has %d objects, want %d", len(dataEntries), len(dataContents))
-	}
-	sizeByName := map[string]int64{}
-	for _, e := range dataEntries {
-		sizeByName[e.Name] = e.Size
+	// data/ holds shard folders, as restic keeps it on disk, each object
+	// with its real size.
+	sizeByName := resticData(t, b)
+	if len(sizeByName) != len(dataContents) {
+		t.Fatalf("data has %d objects, want %d", len(sizeByName), len(dataContents))
 	}
 	for i, h := range dataHashes {
 		if sizeByName[h] != int64(len(dataContents[i])) {
@@ -142,7 +167,7 @@ func TestResticRoundTrip(t *testing.T) {
 
 	// Checksum is the object name (== sha256 of content), with no download.
 	for i, h := range dataHashes {
-		sum, err := b.Checksum(ctx, "data/"+h, "sha256")
+		sum, err := b.Checksum(ctx, resticPath("data", h), "sha256")
 		if err != nil {
 			t.Fatalf("Checksum data/%s: %v", h, err)
 		}
@@ -152,7 +177,7 @@ func TestResticRoundTrip(t *testing.T) {
 	}
 
 	// Whole-object read, then a ranged read from an offset (the resume path).
-	rc, err := b.Open(ctx, "data/"+dataHashes[0])
+	rc, err := b.Open(ctx, resticPath("data", dataHashes[0]))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -162,7 +187,7 @@ func TestResticRoundTrip(t *testing.T) {
 		t.Fatalf("Open data/%s content mismatch (%d bytes)", dataHashes[0], len(got))
 	}
 	offset := int64(len(dataContents[0]) / 3)
-	rc, err = b.OpenAt(ctx, "data/"+dataHashes[0], offset)
+	rc, err = b.OpenAt(ctx, resticPath("data", dataHashes[0]), offset)
 	if err != nil {
 		t.Fatalf("OpenAt: %v", err)
 	}
@@ -173,20 +198,15 @@ func TestResticRoundTrip(t *testing.T) {
 	}
 
 	// Delete one object; it must disappear from a live listing.
-	if err := b.Remove(ctx, "data/"+dataHashes[2]); err != nil {
+	if err := b.Remove(ctx, resticPath("data", dataHashes[2])); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	dataEntries, err = b.List(ctx, "data")
-	if err != nil {
-		t.Fatalf("List data after delete: %v", err)
+	sizeByName = resticData(t, b)
+	if len(sizeByName) != len(dataContents)-1 {
+		t.Fatalf("data has %d objects after delete, want %d", len(sizeByName), len(dataContents)-1)
 	}
-	if len(dataEntries) != len(dataContents)-1 {
-		t.Fatalf("data has %d objects after delete, want %d", len(dataEntries), len(dataContents)-1)
-	}
-	for _, e := range dataEntries {
-		if e.Name == dataHashes[2] {
-			t.Fatalf("deleted object data/%s still listed", dataHashes[2])
-		}
+	if _, ok := sizeByName[dataHashes[2]]; ok {
+		t.Fatalf("deleted object data/%s still listed", dataHashes[2])
 	}
 
 	// Recursive preload: one GET per type into the cache. Await it via List(""),
@@ -215,11 +235,7 @@ func TestResticRoundTrip(t *testing.T) {
 			t.Fatalf("cached dir %q:\n got=%v\nwant=%v", dir, got, want)
 		}
 	}
-	cachedData, err := b.List(ctx, "data")
-	if err != nil {
-		t.Fatalf("List data after shutdown: %v", err)
-	}
-	if len(cachedData) != len(dataContents)-1 {
-		t.Fatalf("cached data has %d objects, want %d", len(cachedData), len(dataContents)-1)
+	if cached := resticData(t, b); len(cached) != len(dataContents)-1 {
+		t.Fatalf("cached data has %d objects, want %d", len(cached), len(dataContents)-1)
 	}
 }

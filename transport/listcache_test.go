@@ -262,3 +262,24 @@ func TestListCacheFreshPreloadReplacesARunInFlight(t *testing.T) {
 		t.Errorf("d is served as %q, want the fresh run's [new]", names)
 	}
 }
+
+// invalidateAncestors walks up to the base. A path that starts with "/"
+// ended at "/", whose folder is "/": the walk never ended, and held the
+// cache locked, so every List of the backend hung behind it. A restic
+// RemoveAll("/") did that.
+func TestInvalidateAncestorsEnds(t *testing.T) {
+	for _, p := range []string{"/", "/a/b", ".", "a/b", ""} {
+		c := newListCache()
+		c.fill("", nil)
+		done := make(chan struct{})
+		go func() { c.invalidateAncestors(p); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("invalidateAncestors(%q) did not end", p)
+		}
+		if _, hit, _, _ := c.lookup(""); hit {
+			t.Errorf("invalidateAncestors(%q) kept the base's listing", p)
+		}
+	}
+}

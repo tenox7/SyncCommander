@@ -151,6 +151,20 @@ func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
 	c.entries[parent] = append(c.entries[parent], entries...)
 }
 
+// fill keeps the whole listing of dir that a live call got while it listed
+// something else (restic lists a whole type at once), so a later List of
+// dir is a hit until a write or a fresh listing drops it. While a recursive
+// listing runs the cache is that run's, and nothing is filled.
+func (c *listCache) fill(dir string, entries []model.FileEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active && !c.done {
+		return
+	}
+	c.entries[dir] = entries
+	c.markCompleteLocked(dir)
+}
+
 // markComplete releases awaiters of dir and registers it even when nothing
 // was emitted, so an empty dir is a hit rather than a live call.
 func (c *listCache) markComplete(dir string) {
@@ -266,9 +280,12 @@ func (c *listCache) invalidateTree(prefix string) {
 	}
 }
 
+// parentDir is the folder of relPath, "" for the base. A path that starts
+// with "/" ends at "/", which is its own folder: taken for one more level,
+// invalidateAncestors went round it forever with the cache locked.
 func parentDir(relPath string) string {
 	p := path.Dir(relPath)
-	if p == "." {
+	if p == "." || p == "/" {
 		return ""
 	}
 	return p

@@ -170,7 +170,7 @@ func TestPutSendsTheSizeItIsTold(t *testing.T) {
 			t.Fatalf("NewResticBackend: %v", err)
 		}
 		hash := sha256hex([]byte(body))
-		if err := b.CopyFrom(context.Background(), "data/"+hash, hidden{strings.NewReader(body)}, p); err != nil {
+		if err := b.CopyFrom(context.Background(), resticPath("data", hash), hidden{strings.NewReader(body)}, p); err != nil {
 			t.Fatal(err)
 		}
 		if n, ok := l.of("/data/" + hash); !ok || n != int64(len(body)) {
