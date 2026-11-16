@@ -79,7 +79,7 @@ func TestBandwidthOverWebDAV(t *testing.T) {
 		t.Fatal(err)
 	}
 	port, _ := startRcloneWebDAV(t, root)
-	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), true, 4)
+	b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), true, 4)
 	if err != nil {
 		t.Fatal(err)
 	}

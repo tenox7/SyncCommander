@@ -76,7 +76,7 @@ func TestResticRoundTrip(t *testing.T) {
 	var b *ResticBackend
 	var err error
 	for i := 0; i < 20; i++ {
-		b, err = NewResticBackend(fmt.Sprintf("restic://u:p@127.0.0.1:%d/", port), false, 8)
+		b, err = NewResticBackend(context.Background(), fmt.Sprintf("restic://u:p@127.0.0.1:%d/", port), false, 8)
 		if err == nil {
 			break
 		}

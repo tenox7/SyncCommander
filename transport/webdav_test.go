@@ -54,7 +54,7 @@ func newWDDeleteBackend(t *testing.T, s *wdDeleteServer) *WebDAVBackend {
 	t.Helper()
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	b, err := NewWebDAVBackend("webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 1)
+	b, err := NewWebDAVBackend(context.Background(), "webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestWebDAVEnsureDirOnceUnderRace(t *testing.T) {
 	s := &wdMkcolServer{inflight: map[string]bool{}, mkcols: map[string]int{}}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	b, err := NewWebDAVBackend("webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 8)
+	b, err := NewWebDAVBackend(context.Background(), "webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

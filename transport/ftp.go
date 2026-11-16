@@ -68,19 +68,29 @@ func (c *ftpConn) close() {
 // connections before its TLS branch, so ftps would speak plaintext to port
 // 990 and ftpes data channels would ignore PROT P. The returned net.Conn is
 // the raw control socket, closed on ctx cancel to abort blocked transfers.
-func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, net.Conn, error) {
+// dialFTPConn opens and logs in a control connection. Until the login is
+// done a cancel of ctx closes its socket, which ends a dial, a greeting or
+// a login that waits on a server that does not answer (D1). The data
+// connections it opens later are dialled under the call that needs them.
+func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	var rawConn net.Conn
 	var dials atomic.Int32
+	stopWatch := func() bool { return true }
 	dialFunc := func(network, address string) (net.Conn, error) {
-		c, err := dialer.Dial(network, address)
+		n := dials.Add(1)
+		dialCtx := context.Background()
+		if n == 1 {
+			dialCtx = ctx
+		}
+		c, err := dialer.DialContext(dialCtx, network, address)
 		if err != nil {
 			return nil, err
 		}
 		c = LimitConn(c)
-		n := dials.Add(1)
 		if n == 1 {
 			rawConn = c
+			stopWatch = context.AfterFunc(ctx, func() { c.Close() })
 		}
 		// Explicit TLS upgrades the control connection itself after AUTH TLS
 		// and leaves only the data sockets to us.
@@ -102,9 +112,25 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCa
 	case "ftpes":
 		opts = append(opts, ftp.DialWithExplicitTLS(tlsCfg))
 	}
+	conn, err := loginFTP(addr, user, pass, opts)
+	if !stopWatch() && err == nil {
+		conn.Quit() // ctx ended as the login finished: the watcher closed it
+		err = ctx.Err()
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, fmt.Errorf("ftp %s: %w", addr, ctx.Err())
+		}
+		return nil, nil, err
+	}
+	return conn, rawConn, nil
+}
+
+// loginFTP dials addr, logs in and switches to binary mode.
+func loginFTP(addr, user, pass string, opts []ftp.DialOption) (*ftp.ServerConn, error) {
 	conn, err := ftp.Dial(addr, opts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ftp dial %s: %w", addr, err)
+		return nil, fmt.Errorf("ftp dial %s: %w", addr, err)
 	}
 	if err := conn.Login(user, pass); err != nil {
 		conn.Quit()
@@ -113,16 +139,17 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCa
 		if tp := (*textproto.Error)(nil); errors.As(err, &tp) && tp.Code == ftp.StatusNotLoggedIn {
 			err = model.WithKind(model.ErrAuth, err)
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	if err := conn.Type(ftp.TransferTypeBinary); err != nil {
 		conn.Quit()
-		return nil, nil, fmt.Errorf("ftp binary mode: %w", err)
+		return nil, fmt.Errorf("ftp binary mode: %w", err)
 	}
-	return conn, rawConn, nil
+	return conn, nil
 }
 
-func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, error) {
+// NewFTPBackend connects to rawURL; a cancel of ctx stops the connect.
+func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*FTPBackend, error) {
 	scheme, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	if user == "" {
 		user = "anonymous"
@@ -140,7 +167,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 	addr := host + ":" + port
 
 	capture := &listCapture{}
-	conn, rawConn, err := dialFTPConn(addr, scheme, user, pass, tlsCfg, capture)
+	conn, rawConn, err := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, capture)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +176,16 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 			remotePath = path.Join(wd, strings.TrimPrefix(remotePath, "/~"))
 		}
 	}
-	hasher, _ := newFTPHasher(host, port, user, pass, scheme, tlsCfg)
+	hasher, _ := newFTPHasher(ctx, host, port, user, pass, scheme, tlsCfg)
+	if err := ctx.Err(); err != nil {
+		// Cancelled while the hash connection was set up: a backend
+		// without it would quietly have no checksums.
+		if hasher != nil {
+			hasher.close()
+		}
+		conn.Quit()
+		return nil, fmt.Errorf("ftp %s: %w", addr, err)
+	}
 
 	displayHost := host
 	if port != "21" && port != "990" {
@@ -175,8 +211,8 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 	// is at capacity acquireExtra returns false and the caller serializes on
 	// the primary conn under b.mu. maxExtras=0 (parallel<=1) means every
 	// transfer takes the primary path.
-	dial := func(context.Context) (*ftpConn, error) {
-		c, raw, derr := dialFTPConn(addr, scheme, user, pass, tlsCfg, nil)
+	dial := func(ctx context.Context) (*ftpConn, error) {
+		c, raw, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, nil)
 		if derr != nil {
 			return nil, derr
 		}
@@ -235,7 +271,7 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 		poolRelease()
 	}
 	if time.Since(c.lastUsed) > 60*time.Second && c.conn.NoOp() != nil {
-		conn, raw, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
+		conn, raw, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
 		if err != nil {
 			Log.Add("ftp", DirErr, "extra reconnect failed: "+err.Error())
 			c.lastUsed = time.Time{} // still dead: keep the probe armed
@@ -249,9 +285,9 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 	return c, release, true
 }
 
-func (b *FTPBackend) reconnectLocked() error {
+func (b *FTPBackend) reconnectLocked(ctx context.Context) error {
 	b.conn.Quit()
-	conn, rawConn, err := dialFTPConn(b.addr, b.scheme, b.user, b.pass, b.tlsCfg, b.capture)
+	conn, rawConn, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, b.capture)
 	if err != nil {
 		b.rawConn = nil
 		return err
@@ -260,7 +296,7 @@ func (b *FTPBackend) reconnectLocked() error {
 	if b.hasher != nil {
 		algo := b.hasher.algo
 		b.hasher.close()
-		if b.hasher, _ = newFTPHasher(b.host, b.port, b.user, b.pass, b.scheme, b.tlsCfg); b.hasher != nil {
+		if b.hasher, _ = newFTPHasher(ctx, b.host, b.port, b.user, b.pass, b.scheme, b.tlsCfg); b.hasher != nil {
 			b.hasher.algo = algo
 		}
 	}
@@ -280,7 +316,7 @@ func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
 		return err
 	}
 	Log.Add("ftp", DirErr, "connection lost, reconnecting...")
-	if rerr := b.reconnectLocked(); rerr != nil {
+	if rerr := b.reconnectLocked(ctx); rerr != nil {
 		Log.Add("ftp", DirErr, "reconnect failed: "+rerr.Error())
 		return err
 	}
@@ -985,11 +1021,28 @@ type ftpHasher struct {
 	algo   string
 }
 
-func newFTPHasher(host, port, user, pass, scheme string, tlsCfg *tls.Config) (*ftpHasher, error) {
-	rawTCP, err := net.DialTimeout("tcp", host+":"+port, 10*time.Second)
+// newFTPHasher opens the connection that asks for checksums. Until it is
+// logged in a cancel of ctx closes its socket.
+func newFTPHasher(ctx context.Context, host, port, user, pass, scheme string, tlsCfg *tls.Config) (*ftpHasher, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	rawTCP, err := dialer.DialContext(ctx, "tcp", host+":"+port)
 	if err != nil {
 		return nil, err
 	}
+	stopWatch := context.AfterFunc(ctx, func() { rawTCP.Close() })
+	h, err := startFTPHasher(rawTCP, user, pass, scheme, tlsCfg)
+	if !stopWatch() {
+		if err == nil {
+			h.conn.Close()
+		}
+		return nil, ctx.Err()
+	}
+	return h, err
+}
+
+// startFTPHasher logs in on rawTCP and reads which hash commands the
+// server has.
+func startFTPHasher(rawTCP net.Conn, user, pass, scheme string, tlsCfg *tls.Config) (*ftpHasher, error) {
 	rawConn := LimitConn(rawTCP)
 	var conn io.ReadWriteCloser = rawConn
 	if scheme == "ftps" {

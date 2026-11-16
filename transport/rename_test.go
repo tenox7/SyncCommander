@@ -127,7 +127,7 @@ func TestWebDAVRenameRefusesTakenName(t *testing.T) {
 	writeT(t, filepath.Join(root, "b.txt"), "BBB")
 	writeT(t, filepath.Join(root, "d", "keep.txt"), "in a folder")
 	port, _ := startRcloneWebDAV(t, root)
-	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
+	b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

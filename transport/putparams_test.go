@@ -71,7 +71,7 @@ func TestPutStoresTheMtimeItIsTold(t *testing.T) {
 	})
 	t.Run("rsync+ssh", func(t *testing.T) {
 		mod := t.TempDir()
-		b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
+		b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,7 +80,7 @@ func TestPutStoresTheMtimeItIsTold(t *testing.T) {
 	})
 	t.Run("rclone", func(t *testing.T) {
 		root := t.TempDir()
-		b, err := NewRcloneBackend("rclone://"+root, false)
+		b, err := NewRcloneBackend(context.Background(), "rclone://"+root, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func TestPutStoresTheMtimeItIsTold(t *testing.T) {
 	t.Run("webdav", func(t *testing.T) {
 		root := t.TempDir()
 		port, _ := startRcloneWebDAV(t, root)
-		b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 4)
+		b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -143,7 +143,7 @@ func TestPutSendsTheSizeItIsTold(t *testing.T) {
 	t.Run("webdav", func(t *testing.T) {
 		port, _ := startRcloneWebDAV(t, t.TempDir())
 		l, addr := startLengths(t, port)
-		b, err := NewWebDAVBackend("webdav://u:p@"+addr+"/", false, 4)
+		b, err := NewWebDAVBackend(context.Background(), "webdav://u:p@"+addr+"/", false, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -161,7 +161,7 @@ func TestPutSendsTheSizeItIsTold(t *testing.T) {
 		var b *ResticBackend
 		var err error
 		for range 20 {
-			if b, err = NewResticBackend("restic://u:p@"+addr+"/", false, 8); err == nil {
+			if b, err = NewResticBackend(context.Background(), "restic://u:p@"+addr+"/", false, 8); err == nil {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)

@@ -20,7 +20,7 @@ func TestRcloneLocalE2E(t *testing.T) {
 	os.WriteFile(filepath.Join(src, "sub/b.txt"), []byte("bbbb"), 0644)
 	os.MkdirAll(filepath.Join(src, "empty"), 0755)
 
-	b, err := NewRcloneBackend("rclone://"+src, false)
+	b, err := NewRcloneBackend(context.Background(), "rclone://"+src, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestRcloneLocalE2E(t *testing.T) {
 
 	// Copy into a second rclone backend, with and without a known size.
 	dstDir := t.TempDir()
-	d, err := NewRcloneBackend("rclone://"+dstDir, false)
+	d, err := NewRcloneBackend(context.Background(), "rclone://"+dstDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestRcloneLocalE2E(t *testing.T) {
 
 // Memory backend is bucket-based with ListR, exercising the preload path.
 func TestRclonePreloadRecursive(t *testing.T) {
-	b, err := NewRcloneBackend("rclone://:memory:bkt", false)
+	b, err := NewRcloneBackend(context.Background(), "rclone://:memory:bkt", false)
 	if err != nil {
 		t.Fatal(err)
 	}

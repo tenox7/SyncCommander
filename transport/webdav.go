@@ -71,7 +71,9 @@ type WebDAVBackend struct {
 	noInfinity atomic.Bool
 }
 
-func NewWebDAVBackend(rawURL string, insecure bool, parallel int) (*WebDAVBackend, error) {
+// NewWebDAVBackend connects to rawURL and checks its base is a folder; a
+// cancel of ctx stops the check.
+func NewWebDAVBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*WebDAVBackend, error) {
 	scheme, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	hb, err := newHTTPBase("webdav", scheme == "webdavs", host, port, remotePath, user, pass, insecure, parallel, webdavIdle.get())
 	if err != nil {
@@ -83,7 +85,7 @@ func NewWebDAVBackend(rawURL string, insecure bool, parallel int) (*WebDAVBacken
 		sums:      newWDSumCache(),
 		listCache: newListCache(),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	ms, err := b.propfind(ctx, "", "0")
 	if err != nil {

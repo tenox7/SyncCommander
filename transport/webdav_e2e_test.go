@@ -156,7 +156,7 @@ func TestWebDAVRecursivePreload(t *testing.T) {
 	var b *WebDAVBackend
 	var err error
 	for i := 0; i < 20; i++ {
-		b, err = NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
+		b, err = NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
 		if err == nil {
 			break
 		}
@@ -269,7 +269,7 @@ func TestWebDAVDepthInfinityFallback(t *testing.T) {
 	defer srv.Close()
 
 	addr := strings.TrimPrefix(srv.URL, "http://")
-	b, err := NewWebDAVBackend("webdav://"+addr+"/", false, 8)
+	b, err := NewWebDAVBackend(context.Background(), "webdav://"+addr+"/", false, 8)
 	if err != nil {
 		t.Fatalf("NewWebDAVBackend: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestWebDAVIncrementalRelease(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := NewWebDAVBackend("webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 8)
+	b, err := NewWebDAVBackend(context.Background(), "webdav://"+strings.TrimPrefix(srv.URL, "http://")+"/", false, 8)
 	if err != nil {
 		t.Fatalf("NewWebDAVBackend: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestWebDAVDelete(t *testing.T) {
 		}
 	}
 	port, _ := startRcloneWebDAV(t, root)
-	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
+	b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 8)
 	if err != nil {
 		t.Fatal(err)
 	}

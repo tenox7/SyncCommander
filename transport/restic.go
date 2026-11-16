@@ -43,7 +43,9 @@ type ResticBackend struct {
 	listCache *listCache
 }
 
-func NewResticBackend(rawURL string, insecure bool, parallel int) (*ResticBackend, error) {
+// NewResticBackend connects to rawURL and checks it speaks the restic REST
+// API; a cancel of ctx stops the check.
+func NewResticBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*ResticBackend, error) {
 	scheme, user, pass, host, port, remotePath := parseRemoteURL(rawURL)
 	hb, err := newHTTPBase("restic", scheme == "restics", host, port, remotePath, user, pass, insecure, parallel, resticIdle.get())
 	if err != nil {
@@ -51,7 +53,7 @@ func NewResticBackend(rawURL string, insecure bool, parallel int) (*ResticBacken
 	}
 	hb.accept = resticAPIV2
 	b := &ResticBackend{httpBase: hb, display: hb.displayURL(scheme), listCache: newListCache()}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := b.validate(ctx); err != nil {
 		return nil, err

@@ -40,7 +40,7 @@ func TestRsyncRunsLeaveProcessUnrestricted(t *testing.T) {
 
 	mod := t.TempDir()
 	writeTestFile(t, mod, "f.txt", "data")
-	sb, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
+	sb, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

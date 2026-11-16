@@ -61,7 +61,7 @@ func TestRsyncSSHRefusedTransfersFail(t *testing.T) {
 		t.Skip("no rsync binary")
 	}
 	mod := t.TempDir()
-	b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
+	b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestRsyncSSHRemoteExitStatusFails(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	mod := t.TempDir()
 	writeTestFile(t, mod, "f.txt", "data")
-	b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
+	b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+startExecSSHServer(t)+mod, true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

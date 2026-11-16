@@ -92,7 +92,7 @@ func serveSFTPSession(c ssh.Channel, reqs <-chan *ssh.Request) {
 func TestSFTPBackendE2E(t *testing.T) {
 	addr := startSFTPServer(t)
 	root := t.TempDir()
-	b, err := NewSFTPBackend("sftp://x:pw@"+addr+root, true, 2)
+	b, err := NewSFTPBackend(context.Background(), "sftp://x:pw@"+addr+root, true, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestSFTPBackendE2E(t *testing.T) {
 func TestSFTPSetParallelResizesPool(t *testing.T) {
 	addr := startSFTPServer(t)
 	root := t.TempDir()
-	b, err := NewSFTPBackend("sftp://x:pw@"+addr+root, true, 2)
+	b, err := NewSFTPBackend(context.Background(), "sftp://x:pw@"+addr+root, true, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

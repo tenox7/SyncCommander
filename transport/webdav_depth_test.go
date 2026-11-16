@@ -74,7 +74,7 @@ func TestWebDAVPreloadListsChildlessFoldersAgain(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pp, depth1 := depthProxy(t, port, tc.oneLevel)
-			b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", pp), false, 4)
+			b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", pp), false, 4)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +166,7 @@ func TestWebDAVWalkAbortIsNotAListing(t *testing.T) {
 
 	t.Run("deep listing", func(t *testing.T) {
 		// "/", "/top/", "/top/big/" and f00000 to f00004: the walk failed in big/.
-		b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", walkAbortProxy(t, port, "infinity", 8)), false, 4)
+		b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", walkAbortProxy(t, port, "infinity", 8)), false, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -187,7 +187,7 @@ func TestWebDAVWalkAbortIsNotAListing(t *testing.T) {
 	})
 	t.Run("one level", func(t *testing.T) {
 		// "/top/" itself and "/top/big/" only.
-		b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", walkAbortProxy(t, port, "1", 2)), false, 4)
+		b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", walkAbortProxy(t, port, "1", 2)), false, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +220,7 @@ func TestWebDAVProxyRewriteFailsToConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	port, _ := startRcloneWebDAV(t, root)
-	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/dav/", rewriteProxy(t, port, "/dav")), false, 4)
+	b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/dav/", rewriteProxy(t, port, "/dav")), false, 4)
 	if err == nil {
 		names, err := listNames(context.Background(), b, "")
 		t.Fatalf("connected; List = %q, %v", names, err)
@@ -284,7 +284,7 @@ func TestWebDAVListingNeverDropsAnEntry(t *testing.T) {
 				path += tc.dir + "/"
 			}
 			addr := cannedDAV(t, map[string]string{"0 /dav/": self, "1 " + path: tc.body})
-			b, err := NewWebDAVBackend("webdav://"+addr+"/dav/", false, 1)
+			b, err := NewWebDAVBackend(context.Background(), "webdav://"+addr+"/dav/", false, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -308,7 +308,7 @@ func TestWebDAVConnectChecksTheBase(t *testing.T) {
 		"the answer is empty":                       "",
 	} {
 		addr := cannedDAV(t, map[string]string{"0 /dav/": self})
-		if _, err := NewWebDAVBackend("webdav://"+addr+"/dav/", false, 1); err == nil {
+		if _, err := NewWebDAVBackend(context.Background(), "webdav://"+addr+"/dav/", false, 1); err == nil {
 			t.Errorf("%s: connected", name)
 		}
 	}

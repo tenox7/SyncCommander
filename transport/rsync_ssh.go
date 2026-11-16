@@ -23,14 +23,10 @@ type RsyncSSHBackend struct {
 	pool *connPool[*ssh.Client]
 }
 
-// NewRsyncSSHBackend dials rawURL; up to parallel-1 extra connections are
-// dialed lazily so parallel transfers do not share one TCP stream.
-func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
-	return dialRsyncSSHBackend(context.Background(), rawURL, insecure, parallel)
-}
-
-// dialRsyncSSHBackend is NewRsyncSSHBackend with ctx bounding the connect.
-func dialRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
+// NewRsyncSSHBackend dials rawURL; a cancel of ctx stops the connect. Up to
+// parallel-1 extra connections are dialed lazily so parallel transfers do
+// not share one TCP stream.
+func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
 	conn, err := dialSSH(ctx, rawURL, insecure)
 	if err != nil {
 		return nil, err

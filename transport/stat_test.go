@@ -187,7 +187,7 @@ func TestStatWebDAV(t *testing.T) {
 	root := t.TempDir()
 	statTree(t, root, false)
 	port, _ := startRcloneWebDAV(t, root)
-	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 4)
+	b, err := NewWebDAVBackend(context.Background(), fmt.Sprintf("webdav://u:p@127.0.0.1:%d/", port), false, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestStatWebDAV(t *testing.T) {
 func TestStatRclone(t *testing.T) {
 	root := t.TempDir()
 	statTree(t, root, false)
-	b, err := NewRcloneBackend("rclone://"+root, false)
+	b, err := NewRcloneBackend(context.Background(), "rclone://"+root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestStatRestic(t *testing.T) {
 		var b *ResticBackend
 		var err error
 		for range 20 {
-			if b, err = NewResticBackend(fmt.Sprintf("restic://u:p@127.0.0.1:%d/", port), false, 8); err == nil {
+			if b, err = NewResticBackend(context.Background(), fmt.Sprintf("restic://u:p@127.0.0.1:%d/", port), false, 8); err == nil {
 				return b
 			}
 			time.Sleep(100 * time.Millisecond)

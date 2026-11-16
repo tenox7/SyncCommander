@@ -40,26 +40,29 @@ var schemes = []struct {
 	{fakeScheme, openFake},
 }
 
+// Every opener that connects stops when ctx is cancelled (D1).
 func openSFTP(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
-	return dialSFTPBackend(ctx, a, i, p)
+	return NewSFTPBackend(ctx, a, i, p)
 }
-func openFTP(_ context.Context, a string, i bool, p int) (model.Backend, error) {
-	return NewFTPBackend(a, i, p)
+func openFTP(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewFTPBackend(ctx, a, i, p)
 }
 func openRsyncSSH(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
-	return dialRsyncSSHBackend(ctx, a, i, p)
+	return NewRsyncSSHBackend(ctx, a, i, p)
 }
+
+// openRsync makes no connection: every call dials the daemon itself.
 func openRsync(_ context.Context, a string, _ bool, _ int) (model.Backend, error) {
 	return NewRsyncBackend(a)
 }
-func openWebDAV(_ context.Context, a string, i bool, p int) (model.Backend, error) {
-	return NewWebDAVBackend(a, i, p)
+func openWebDAV(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewWebDAVBackend(ctx, a, i, p)
 }
-func openRestic(_ context.Context, a string, i bool, p int) (model.Backend, error) {
-	return NewResticBackend(a, i, p)
+func openRestic(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewResticBackend(ctx, a, i, p)
 }
-func openRclone(_ context.Context, a string, i bool, _ int) (model.Backend, error) {
-	return NewRcloneBackend(a, i)
+func openRclone(ctx context.Context, a string, i bool, _ int) (model.Backend, error) {
+	return NewRcloneBackend(ctx, a, i)
 }
 func openFake(_ context.Context, a string, _ bool, _ int) (model.Backend, error) {
 	return NewFakeBackend(a)

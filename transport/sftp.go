@@ -56,12 +56,8 @@ type SFTPBackend struct {
 	pool *connPool[*sftpConn]
 }
 
-func NewSFTPBackend(rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
-	return dialSFTPBackend(context.Background(), rawURL, insecure, parallel)
-}
-
-// dialSFTPBackend is NewSFTPBackend with ctx bounding the connect.
-func dialSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
+// NewSFTPBackend connects to rawURL; a cancel of ctx stops the connect.
+func NewSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
 	conn, err := dialSSH(ctx, rawURL, insecure)
 	if err != nil {
 		return nil, err

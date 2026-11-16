@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func TestSSHHomeLookupFailureFailsConnect(t *testing.T) {
 	}
 	t.Setenv("HOME", "")
 	addr := startExecSSHServer(t)
-	if b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+addr+"/", true, 1); err == nil {
+	if b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+addr+"/", true, 1); err == nil {
 		t.Errorf("rsync+ssh with no home folder: connected with base %q", b.base)
 		b.Close()
 	} else if !strings.Contains(err.Error(), "full remote path") {
@@ -35,7 +36,7 @@ func TestSSHHomeLookupFailureFailsConnect(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "full remote path") {
 		t.Errorf("ssh (shell) with no home folder: %v; want it to say to write the full path", err)
 	}
-	if b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+addr+"/srv/data", true, 1); err != nil {
+	if b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+addr+"/srv/data", true, 1); err != nil {
 		t.Errorf("rsync+ssh with a full path needs no home folder: %v", err)
 	} else {
 		b.Close()

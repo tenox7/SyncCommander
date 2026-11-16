@@ -202,7 +202,7 @@ func TestShellListingSymlinkBase(t *testing.T) {
 		if _, err := exec.LookPath("rsync"); err != nil {
 			t.Skip("no rsync binary")
 		}
-		b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+addr+link, true, 1)
+		b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+addr+link, true, 1)
 		if err != nil {
 			t.Fatal(err)
 		}

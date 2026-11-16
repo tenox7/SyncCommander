@@ -114,7 +114,7 @@ func TestRsyncSSHListingUnreadableFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(filepath.Join(root, "photos"), 0o755) })
-	b, err := NewRsyncSSHBackend("rsync+ssh://x:pw@"+startExecSSHServer(t)+root, true, 1)
+	b, err := NewRsyncSSHBackend(context.Background(), "rsync+ssh://x:pw@"+startExecSSHServer(t)+root, true, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

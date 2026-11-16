@@ -30,6 +30,7 @@ type fakeFTPD struct {
 	dashAIsName  bool
 	mu           sync.Mutex
 	lists        []string // LIST arguments, in order
+	logins       int      // PASS commands answered
 }
 
 // fakeFTPFile is what RETR of a path sends: the body, then the final reply.
@@ -63,6 +64,12 @@ func (f *fakeFTPD) start(t *testing.T) string {
 	return l.Addr().String()
 }
 
+func (f *fakeFTPD) loginCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logins
+}
+
 func (f *fakeFTPD) listed() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -92,6 +99,9 @@ func (f *fakeFTPD) serve(c net.Conn) {
 		case "USER":
 			reply("331 Please specify the password.")
 		case "PASS":
+			f.mu.Lock()
+			f.logins++
+			f.mu.Unlock()
 			reply("230 Login successful.")
 		case "FEAT":
 			if f.mlsd != nil {
@@ -297,7 +307,7 @@ func (f *fakeFTPD) list(arg string) []string {
 
 func openFakeFTP(t *testing.T, f *fakeFTPD, base string) *FTPBackend {
 	t.Helper()
-	b, err := NewFTPBackend("ftp://u:p@"+f.start(t)+base, false, 1)
+	b, err := NewFTPBackend(context.Background(), "ftp://u:p@"+f.start(t)+base, false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

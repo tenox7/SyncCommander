@@ -98,13 +98,20 @@ func parseRcloneSpec(rawURL string) (string, error) {
 	return name + ":" + rest, nil
 }
 
-func NewRcloneBackend(rawURL string, insecure bool) (*RcloneBackend, error) {
+// NewRcloneBackend makes the remote rawURL names; a cancel of ctx stops it
+// while it is being made.
+func NewRcloneBackend(ctx context.Context, rawURL string, insecure bool) (*RcloneBackend, error) {
 	rcloneSetup()
 	spec, err := parseRcloneSpec(rawURL)
 	if err != nil {
 		return nil, err
 	}
-	ctx, ci := fs.AddConfig(context.Background())
+	// A remote may keep the context it is made with for later work (s3
+	// makes new connections with it, smb keeps it): it gets one that a
+	// cancel of ctx ends only while the remote is being made.
+	makeCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopWatch := context.AfterFunc(ctx, cancel)
+	makeCtx, ci := fs.AddConfig(makeCtx)
 	ci.InsecureSkipVerify = insecure
 	// Object stores keep the real mtime in per-object metadata, so an exact
 	// mtime costs one HEAD per file — unusable at a million objects. Default
@@ -112,7 +119,15 @@ func NewRcloneBackend(rawURL string, insecure bool) (*RcloneBackend, error) {
 	// let RCLONE_USE_SERVER_MODTIME=false buy exactness at that price.
 	ci.UseServerModTime = !isFalse(os.Getenv("RCLONE_USE_SERVER_MODTIME"))
 
-	f, err := fs.NewFs(ctx, spec)
+	f, err := fs.NewFs(makeCtx, spec)
+	if !stopWatch() {
+		// ctx ended while the remote was made: it holds a cancelled
+		// context now, so it is not used.
+		if s, ok := f.(fs.Shutdowner); ok {
+			_ = s.Shutdown(context.Background())
+		}
+		return nil, fmt.Errorf("rclone: %w", ctx.Err())
+	}
 	if errors.Is(err, fs.ErrorIsFile) {
 		return nil, fmt.Errorf("rclone: %s is a file, point at a directory", MaskURLPassword(rawURL))
 	}

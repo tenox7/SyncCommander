@@ -143,7 +143,7 @@ func TestGoneServerConnectsAreBounded(t *testing.T) {
 	var dials atomic.Int64
 	b := NewLazyBackend(url, func(ctx context.Context) (model.Backend, error) {
 		dials.Add(1)
-		return dialSFTPBackend(ctx, url, true, 1)
+		return NewSFTPBackend(ctx, url, true, 1)
 	})
 	defer CloseBackend(b)
 	ctx := context.Background()

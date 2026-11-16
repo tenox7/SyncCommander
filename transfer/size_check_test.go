@@ -109,7 +109,7 @@ func TestFTPShortDownloadFails(t *testing.T) {
 				go serveShortFTP(c, 1_000_000, 400_000, verdict)
 			}
 		}()
-		src, err := transport.NewFTPBackend("ftp://user:pw@"+ln.Addr().String()+"/", false, 1)
+		src, err := transport.NewFTPBackend(context.Background(), "ftp://user:pw@"+ln.Addr().String()+"/", false, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
