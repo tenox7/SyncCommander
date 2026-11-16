@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"sc/model"
 )
 
 // CancelCloser starts a watcher that closes c when ctx is canceled. The
@@ -167,11 +169,18 @@ func SizeMismatch(got, want int64) error {
 	return fmt.Errorf("%w: %d bytes, the source listed %d (it ended early or changed since the scan)", ErrSizeMismatch, got, want)
 }
 
+// isPermanentError reports an error another try cannot fix. The kinds are
+// read by type (D3): a refused login, a full disk, a backend that stopped
+// connecting (F7). The words below are what servers send as text, kept
+// for the backends that do not mark their errors yet.
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) {
+		return true
+	}
+	if errors.Is(err, model.ErrAuth) || errors.Is(err, errNotConnecting) || cannotWrite(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -198,17 +207,29 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+type retryOwnerKey struct{}
+
 // Retry runs op up to MaxRetries+1 times with exponential backoff. Returns
 // immediately if ctx is canceled. Each retry is logged to the global Log;
 // a missing capability is reported to the caller without a FAIL line.
-func Retry(ctx context.Context, proto, what string, op func() error) error {
+//
+// The first Retry on a call path owns the tries (D4): op gets a ctx that
+// says so, and a Retry under it, as a backend call inside a copy that is
+// tried as a whole, runs its op once and leaves the next try to the owner.
+// Nested tries used to multiply: 6 copy tries of 6 calls of 6 connects
+// each (F7).
+func Retry(ctx context.Context, proto, what string, op func(ctx context.Context) error) error {
+	if ctx.Value(retryOwnerKey{}) != nil {
+		return op(ctx)
+	}
+	ctx = context.WithValue(ctx, retryOwnerKey{}, true)
 	max := MaxRetries()
 	var err error
 	for attempt := 0; attempt <= max; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		err = op()
+		err = op(ctx)
 		if err == nil {
 			if attempt > 0 {
 				Log.Add(proto, DirRec, fmt.Sprintf("%s: recovered after %d %s", what, attempt, pluralRetries(attempt)))
@@ -239,11 +260,11 @@ func Retry(ctx context.Context, proto, what string, op func() error) error {
 	return err
 }
 
-func RetryVal[T any](ctx context.Context, proto, what string, op func() (T, error)) (T, error) {
+func RetryVal[T any](ctx context.Context, proto, what string, op func(ctx context.Context) (T, error)) (T, error) {
 	var v T
-	err := Retry(ctx, proto, what, func() error {
+	err := Retry(ctx, proto, what, func(ctx context.Context) error {
 		var e error
-		v, e = op()
+		v, e = op(ctx)
 		return e
 	})
 	return v, err

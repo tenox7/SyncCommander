@@ -68,6 +68,8 @@ type entry struct {
 type copier struct {
 	req        Request
 	ctx        context.Context
+	stop       context.CancelFunc // ends the whole copy
+	stopped    atomic.Bool
 	p          *Progress
 	src, dst   model.Backend
 	mu         sync.Mutex
@@ -140,7 +142,9 @@ func Copy(ctx context.Context, req Request) Result {
 		return Result{}
 	}
 
-	c := &copier{req: req, ctx: ctx, p: p, src: req.Src, dst: req.Dst, dstChanged: map[string]bool{}}
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	c := &copier{req: req, ctx: ctx, stop: stop, p: p, src: req.Src, dst: req.Dst, dstChanged: map[string]bool{}}
 	collisions, files, totalBytes, leftOut := req.enumerate()
 	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
@@ -164,7 +168,9 @@ func Copy(ctx context.Context, req Request) Result {
 	} else {
 		res.RescanRoot = req.Scanner.FindNearestDestNode(model.DirOf(req.RelPath), req.LeftToRight)
 	}
-	if failed := p.Failed.Load(); failed > 0 {
+	if failed := p.Failed.Load(); c.stopped.Load() {
+		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY stopped: %d of %d tried, %d of them failed", p.Done.Load(), p.Total.Load(), failed))
+	} else if failed > 0 {
 		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
 	}
 	// Batch rewrites every file in the subtree, not just the diff set, so the
@@ -418,6 +424,20 @@ func (c *copier) runParallel(files []item) {
 	wg.Wait()
 }
 
+// failed counts one failure and logs it. A failure after which no other file
+// can get through stops the whole copy: a refused login, a side that
+// stopped connecting after its connects failed in a row, a destination
+// that is full (transport.GivesUp). The other files would each fail the
+// same way after their own tries (F7).
+func (c *copier) failed(what string, err error) {
+	c.p.Failed.Add(1)
+	transport.Log.Add("copy", transport.DirErr, what+": "+err.Error())
+	if transport.GivesUp(err) && c.stopped.CompareAndSwap(false, true) {
+		transport.Log.Add("copy", transport.DirFail, "COPY stopped: no file can get through: "+err.Error())
+		c.stop()
+	}
+}
+
 // copyOne moves one item: directories are created, type mismatches on the
 // destination cleared, and files go through resume, direct transfer and
 // finally a retried streaming copy.
@@ -451,16 +471,14 @@ func (c *copier) copyOne(f item) {
 		return
 	}
 	if err := c.clearTwin(f.relPath); err != nil {
-		p.Failed.Add(1)
-		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+		c.failed("COPY "+f.relPath, err)
 		return
 	}
 	if srcEntry.IsDir {
 		p.File.Store(f.relPath)
 		p.beginFile(0)
 		if err := c.dst.Mkdir(ctx, f.relPath, srcEntry.Mode); err != nil {
-			p.Failed.Add(1)
-			transport.Log.Add("copy", transport.DirErr, "mkdir "+f.relPath+": "+err.Error())
+			c.failed("mkdir "+f.relPath, err)
 			return
 		}
 		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
@@ -501,8 +519,7 @@ func (c *copier) copyOne(f item) {
 	// renames it into place (L14). Others write the file itself.
 	pw, err := partWriter(fileCtx, c.dst)
 	if err != nil {
-		p.Failed.Add(1)
-		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+		c.failed("COPY "+f.relPath, err)
 		return
 	}
 	// Without parts, resume first when a partial dst body exists: append the
@@ -523,8 +540,7 @@ func (c *copier) copyOne(f item) {
 	if pw != nil {
 		resumed, err := c.copyIntoPart(fileCtx, f, pw, slotBytes, slotBase)
 		if err != nil {
-			p.Failed.Add(1)
-			transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+			c.failed("COPY "+f.relPath, err)
 			return
 		}
 		c.markChanged(f.relPath)
@@ -537,8 +553,8 @@ func (c *copier) copyOne(f item) {
 	}
 
 	attempt := 0
-	err = transport.Retry(fileCtx, "copy", "copy "+f.relPath, func() error {
-		return transport.WithStallGuard(fileCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
+	err = transport.Retry(fileCtx, "copy", "copy "+f.relPath, func(tryCtx context.Context) error {
+		return transport.WithStallGuard(tryCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 			attempt++
 			if attempt > 1 {
 				// A retry resumes whatever the failed attempt left behind.
@@ -553,8 +569,7 @@ func (c *copier) copyOne(f item) {
 		})
 	})
 	if err != nil {
-		p.Failed.Add(1)
-		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+		c.failed("COPY "+f.relPath, err)
 		return
 	}
 	finish("")
@@ -567,6 +582,9 @@ func (c *copier) mirrorDelete() {
 	failed := c.p.Failed.Load()
 	switch {
 	case !c.req.Mirror:
+		return
+	case c.stopped.Load():
+		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: the copy stopped")
 		return
 	case c.ctx.Err() != nil:
 		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: copy canceled")

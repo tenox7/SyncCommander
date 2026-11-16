@@ -63,8 +63,9 @@ func (m *Model) reopenOrExplain(leftPath, rightPath string) tea.Cmd {
 }
 
 // reopenBackends switches to new open arguments; an unchanged side keeps its
-// connection. The change dialog shows masked arguments, so a value equal to
-// the mask means "unchanged".
+// connection, unless it stopped connecting (a refused login, a server that
+// was gone): opening it again is how it tries again (F7). The change dialog
+// shows masked arguments, so a value equal to the mask means "unchanged".
 func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	if leftPath == transport.MaskURLPassword(m.leftArg) {
 		leftPath = m.leftArg
@@ -75,13 +76,13 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	var newLeft, newRight model.Backend
 	var err error
 
-	if leftPath != m.leftArg {
+	if leftPath != m.leftArg || transport.NotConnecting(m.left) {
 		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
-	if rightPath != m.rightArg {
+	if rightPath != m.rightArg || transport.NotConnecting(m.right) {
 		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
 		if err != nil {
 			if newLeft != nil {

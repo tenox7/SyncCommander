@@ -79,7 +79,7 @@ func dialSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel
 func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
 	client, err := sftp.NewClient(conn.client, sftpFastOpts()...)
 	if err != nil {
-		return nil, fmt.Errorf("sftp: %v", err)
+		return nil, fmt.Errorf("sftp: %w", err)
 	}
 	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, sftp: client}
 	if b.base, err = expandHome(conn.basePath, client.Getwd); err != nil {
@@ -95,7 +95,7 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 		sc, err := sftp.NewClient(c.client, sftpFastOpts()...)
 		if err != nil {
 			c.client.Close()
-			return nil, fmt.Errorf("sftp: %v", err)
+			return nil, fmt.Errorf("sftp: %w", err)
 		}
 		Log.Add("sftp", DirIn, "extra connection dialed")
 		return &sftpConn{sftp: sc, ssh: c.client}, nil

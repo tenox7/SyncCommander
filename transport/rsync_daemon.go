@@ -15,6 +15,8 @@ import (
 	rsyncpkg "github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/rsyncclient"
 	"github.com/mmcloughlin/md4"
+
+	"sc/model"
 )
 
 // daemonHandshake runs the text part of the rsync daemon protocol on conn up
@@ -67,6 +69,9 @@ func (b *RsyncBackend) daemonHandshake(ctx context.Context, conn io.ReadWriter, 
 		case line == "@RSYNCD: EXIT":
 			return true, nil
 		case strings.HasPrefix(line, "@ERROR"):
+			if strings.Contains(line, "auth failed") {
+				return false, model.WithKind(model.ErrAuth, errors.New(line))
+			}
 			return false, errors.New(line)
 		}
 		// Anything else is the message of the day.

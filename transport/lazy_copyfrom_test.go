@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"strings"
@@ -37,7 +36,7 @@ func (s *copyStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.Fil
 		if s.consume > 0 {
 			_, _ = io.CopyN(io.Discard, src, s.consume)
 		}
-		return errors.New("broken pipe")
+		return connReset("write")
 	}
 	b, err := io.ReadAll(src)
 	if err != nil {

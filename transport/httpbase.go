@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"sc/model"
 )
 
 // idleSetting is a configurable idle deadline: unset means def, a
@@ -185,6 +187,21 @@ func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
 	Log.Add(h.proto, DirOut, req.Method+" "+req.URL.Redacted())
 	resp, err := h.client.Do(req)
 	if err != nil {
+		Log.Add(h.proto, DirErr, err.Error())
+		return nil, err
+	}
+	// The answers no backend reads for itself, marked by kind (D3): the
+	// login refused, and the server full.
+	var kind error
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		kind = model.ErrAuth
+	case http.StatusInsufficientStorage:
+		kind = model.ErrNoSpace
+	}
+	if kind != nil {
+		drainClose(resp.Body)
+		err := model.WithKind(kind, fmt.Errorf("%s %s: %s", req.Method, req.URL.Redacted(), resp.Status))
 		Log.Add(h.proto, DirErr, err.Error())
 		return nil, err
 	}

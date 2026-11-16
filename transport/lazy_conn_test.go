@@ -2,9 +2,10 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,12 @@ import (
 
 	"sc/model"
 )
+
+// connReset is what a read or write returns on a connection the peer reset,
+// as the net package gives it on this system.
+func connReset(op string) error {
+	return &net.OpError{Op: op, Net: "tcp", Err: os.NewSyscallError(op, connLostErrnos[0])}
+}
 
 // connStub is one connection the lazy wrapper dials.
 type connStub struct {
@@ -55,7 +62,7 @@ func TestLateErrorLeavesTheNewConnectionAlone(t *testing.T) {
 		c := &connStub{}
 		if len(conns) == 0 {
 			c.sumGate, c.sumEnter = make(chan struct{}), make(chan struct{})
-			c.sumErr = errors.New("read tcp 10.0.0.2:50000->10.0.0.1:22: read: connection reset by peer")
+			c.sumErr = connReset("read")
 		}
 		conns = append(conns, c)
 		return c, nil

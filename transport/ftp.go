@@ -100,15 +100,20 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCa
 	}
 	conn, err := ftp.Dial(addr, opts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ftp dial %s: %v", addr, err)
+		return nil, nil, fmt.Errorf("ftp dial %s: %w", addr, err)
 	}
 	if err := conn.Login(user, pass); err != nil {
 		conn.Quit()
-		return nil, nil, fmt.Errorf("ftp login %s@%s: %v", user, addr, err)
+		err = fmt.Errorf("ftp login %s@%s: %w", user, addr, err)
+		// 530: not logged in, the server refused the user or the password.
+		if tp := (*textproto.Error)(nil); errors.As(err, &tp) && tp.Code == ftp.StatusNotLoggedIn {
+			err = model.WithKind(model.ErrAuth, err)
+		}
+		return nil, nil, err
 	}
 	if err := conn.Type(ftp.TransferTypeBinary); err != nil {
 		conn.Quit()
-		return nil, nil, fmt.Errorf("ftp binary mode: %v", err)
+		return nil, nil, fmt.Errorf("ftp binary mode: %w", err)
 	}
 	return conn, rawConn, nil
 }
@@ -606,6 +611,10 @@ func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, raw net.
 	}
 	if err != nil {
 		Log.Add("ftp", DirErr, err.Error())
+	}
+	// 552 and 452: the server has no room for the file (D3).
+	if tp := (*textproto.Error)(nil); errors.As(err, &tp) && (tp.Code == ftp.StatusExceededStorage || tp.Code == ftp.Status452) {
+		err = model.WithKind(model.ErrNoSpace, err)
 	}
 	return err
 }

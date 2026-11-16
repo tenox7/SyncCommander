@@ -36,7 +36,9 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 	src := f.src
 	part := model.PartPath(f.relPath)
 	attempt := 0
-	err = transport.Retry(ctx, "copy", "copy "+f.relPath, func() error {
+	// ctx from here on says this Retry owns the tries: a backend call under
+	// it runs once, and a failed one fails this try (D4).
+	err = transport.Retry(ctx, "copy", "copy "+f.relPath, func(ctx context.Context) error {
 		attempt++
 		bytes0, base0 := slotBytes.Load(), slotBase.Load()
 		var offset int64

@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -13,36 +14,6 @@ import (
 
 	"sc/model"
 )
-
-// isConnLost reports whether err looks like the transport underneath the
-// backend has died, so the next attempt must redial. Matching is
-// substring-based because the SSH/SFTP/net stack wraps these in
-// heterogeneous ways. An op-level EOF counts too: no backend method returns
-// io.EOF from a healthy connection (readers are not wrapped here), so it can
-// only mean the peer hung up.
-func isConnLost(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	msg := err.Error()
-	for _, sub := range []string{
-		"use of closed network connection",
-		"connection lost",
-		"broken pipe",
-		"connection reset",
-		"ssh: connection",
-		"ssh: handshake",
-		"ssh: disconnect",
-	} {
-		if strings.Contains(msg, sub) {
-			return true
-		}
-	}
-	return false
-}
 
 // ErrUnsupported is returned for an optional capability the connected backend
 // lacks (resume, direct local-path transfer, batch send).
@@ -57,6 +28,10 @@ func protoManagesLiveness(proto string) bool {
 	}
 	return false
 }
+
+// connectPause is how long a backend tries no connect once its connects
+// failed in a row for a whole retry budget (F7). A var for tests.
+var connectPause = 30 * time.Second
 
 // lazyBackend connects on first use and redials after a lost connection.
 // dialMu serializes dial attempts so parallel callers share one, while mu
@@ -75,7 +50,19 @@ type lazyBackend struct {
 	probed  bool
 	algo    string
 	algoSet bool
-	dialMu  sync.Mutex
+	// Connects that failed, shared by every call (F7). A refused login is
+	// kept and no connect is tried again: each would be one more failed
+	// login. Other failures in a row space the next connect out on the
+	// backoff one call's Retry uses, whatever call tries it; when they
+	// outlast that budget, none is tried before pausedUntil and every call
+	// fails at once, so a copy stops instead of trying each of its files.
+	authErr     error
+	through     bool // a call got through: the login is right
+	failed      int
+	lastErr     error
+	nextConnect time.Time
+	pausedUntil time.Time
+	dialMu      sync.Mutex
 }
 
 // NewLazyBackend connects through factory on first use. The factory gets
@@ -97,22 +84,40 @@ func (b *lazyBackend) current() model.Backend {
 	return b.inner
 }
 
+// connected returns the connection, nil when there is none yet, or why no
+// call may reach the server now (connectGateLocked).
+func (b *lazyBackend) connected() (model.Backend, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.connectGateLocked(); err != nil {
+		return nil, err
+	}
+	return b.inner, nil
+}
+
 func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error) {
-	if inner := b.current(); inner != nil {
-		return inner, nil
+	if inner, err := b.connected(); inner != nil || err != nil {
+		return inner, err
 	}
 	b.dialMu.Lock()
 	defer b.dialMu.Unlock()
-	if inner := b.current(); inner != nil {
-		return inner, nil
+	// A call that waited for another's connect sees how it went.
+	if inner, err := b.connected(); inner != nil || err != nil {
+		return inner, err
 	}
+	// One connect per try: the Retry this call runs under owns the tries
+	// (D4). It used to retry here too, 6 connects inside each of 6 tries.
 	Log.Add(b.proto, DirOut, "connecting to "+b.display)
-	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, func() (model.Backend, error) { return b.factory(ctx) })
+	inner, err := b.factory(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			err = b.connectFailed(connectFailure(err))
+		}
 		Log.Add(b.proto, DirErr, b.display+": "+err.Error())
 		return nil, err
 	}
 	b.mu.Lock()
+	b.failed = 0
 	probed := b.probed
 	b.mu.Unlock()
 	cp, hasSums := inner.(model.ChecksumProber)
@@ -162,14 +167,103 @@ func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 	return err
 }
 
+// connectGateLocked returns why no call may reach the server now, or nil: a
+// refused login; a pause after connects failed in a row; the backoff after
+// the last failure, which returns that failure for the call's Retry to try
+// again after its own wait. It holds for a connected HTTP backend too,
+// whose every call opens a connection. mu held.
+func (b *lazyBackend) connectGateLocked() error {
+	now := time.Now()
+	switch {
+	case b.authErr != nil:
+		return b.authErr
+	case b.failed == 0:
+		return nil
+	case now.Before(b.pausedUntil):
+		return b.pausedErr()
+	case now.Before(b.nextConnect):
+		return b.lastErr
+	}
+	return nil
+}
+
+// connectFailed records a connect that failed and returns err, or, once
+// failures in a row outlast the retry budget, the error that stops
+// connecting for connectPause (F7). A refused login is kept for good.
+func (b *lazyBackend) connectFailed(err error) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if errors.Is(err, model.ErrAuth) {
+		b.authErr = err
+		return err
+	}
+	b.failed++
+	b.lastErr = err
+	now := time.Now()
+	if b.failed > MaxRetries() {
+		b.pausedUntil = now.Add(connectPause)
+		return b.pausedErr()
+	}
+	b.nextConnect = now.Add(backoffDelay(b.failed - 1))
+	return err
+}
+
+// pausedErr says why no connect is tried; mu held.
+func (b *lazyBackend) pausedErr() error {
+	return fmt.Errorf("%w: %d connects in a row failed; the next try is at %s, or open the location again; the last: %w",
+		errNotConnecting, b.failed, b.pausedUntil.Format("15:04:05"), b.lastErr)
+}
+
+// noteResult tells the connect state what a call gave: one that got through
+// ends a run of failed connects; one that could not open its own connection
+// (an HTTP request to a server that is gone) is a failed connect; a login
+// refused before any call got through is kept. A call that was canceled
+// says nothing.
+func (b *lazyBackend) noteResult(ctx context.Context, err error) error {
+	switch {
+	case err == nil:
+		b.mu.Lock()
+		b.failed, b.through = 0, true
+		b.mu.Unlock()
+	case ctx.Err() != nil:
+	case errors.Is(err, model.ErrAuth):
+		// Once a call got through, a refusal is about its path alone, as
+		// on a WebDAV share whose folder asks for other credentials. It
+		// is not tried again either way.
+		b.mu.Lock()
+		through := b.through
+		b.mu.Unlock()
+		if !through {
+			return b.connectFailed(err)
+		}
+	case dialFailure(err):
+		return b.connectFailed(model.WithKind(model.ErrUnreachable, err))
+	}
+	return err
+}
+
+// NotConnecting reports a backend that tries no connect now: its login was
+// refused, or its connects failed in a row for a whole retry budget (F7).
+// Opening the location again makes a new one, which tries: after a fixed
+// password, an unlocked ssh agent, a server that is back.
+func NotConnecting(b model.Backend) bool {
+	l, ok := b.(*lazyBackend)
+	if !ok {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.authErr != nil || time.Now().Before(l.pausedUntil)
+}
+
 // do runs op against the connected backend under Retry.
 func (b *lazyBackend) do(ctx context.Context, what string, op func(model.Backend) error) error {
-	return Retry(ctx, b.proto, what, func() error {
+	return Retry(ctx, b.proto, what, func(context.Context) error {
 		inner, err := b.ensureConnected(ctx)
 		if err != nil {
 			return err
 		}
-		return b.markBrokenIf(inner, op(inner))
+		return b.markBrokenIf(inner, b.noteResult(ctx, op(inner)))
 	})
 }
 
@@ -183,10 +277,13 @@ func doVal[T any](b *lazyBackend, ctx context.Context, what string, op func(mode
 	return v, err
 }
 
-// capability returns the connected backend as T, or ErrUnsupported.
+// capability returns the connected backend as T, or ErrUnsupported. The
+// connect runs under Retry, like any call.
 func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
 	var zero T
-	inner, err := b.ensureConnected(ctx)
+	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, func(context.Context) (model.Backend, error) {
+		return b.ensureConnected(ctx)
+	})
 	if err != nil {
 		return zero, err
 	}
@@ -397,7 +494,7 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.
 	if !ok {
 		return ErrUnsupported
 	}
-	return b.markBrokenIf(inner, r.AppendFrom(ctx, relPath, src, mode, offset))
+	return b.markBrokenIf(inner, b.noteResult(ctx, r.AppendFrom(ctx, relPath, src, mode, offset)))
 }
 
 func (b *lazyBackend) PartSize(ctx context.Context, relPath string) (int64, error) {

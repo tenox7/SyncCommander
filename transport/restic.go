@@ -170,7 +170,7 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 	}
 	dec := json.NewDecoder(resp.Body)
 	if _, err := dec.Token(); err != nil { // consume the opening '['
-		return nil, fmt.Errorf("restic: list %s: %v", typeName, err)
+		return nil, fmt.Errorf("restic: list %s: %w", typeName, err)
 	}
 	var entries []model.FileEntry
 	for dec.More() {
@@ -179,7 +179,7 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 			Size int64  `json:"size"`
 		}
 		if err := dec.Decode(&it); err != nil {
-			return nil, fmt.Errorf("restic: list %s: %v", typeName, err)
+			return nil, fmt.Errorf("restic: list %s: %w", typeName, err)
 		}
 		if it.Name != "" {
 			entries = append(entries, objectEntry(typeName, it.Name, it.Size))
@@ -195,7 +195,7 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 func (b *ResticBackend) decodeListV1(resp *http.Response, typeName string) ([]model.FileEntry, error) {
 	var names []string
 	if err := json.NewDecoder(resp.Body).Decode(&names); err != nil {
-		return nil, fmt.Errorf("restic: list %s (v1): %v", typeName, err)
+		return nil, fmt.Errorf("restic: list %s (v1): %w", typeName, err)
 	}
 	Log.Add("restic", DirIn, fmt.Sprintf("v1 %s/: %d objects, HEAD per object for sizes", typeName, len(names)))
 	entries := make([]model.FileEntry, 0, len(names))

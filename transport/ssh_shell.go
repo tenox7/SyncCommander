@@ -54,13 +54,24 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, &stderr
 	if err := session.Run(cmd); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			err = errors.New(msg)
+			err = &remoteError{msg: msg, err: err}
 		}
 		Log.Add(s.proto, DirErr, err.Error())
 		return err
 	}
 	return nil
 }
+
+// remoteError is what a remote command wrote on stderr, which says more than
+// its exit status. The session's own error stays under it, so a connection
+// that died in the middle is still known by its type (D3).
+type remoteError struct {
+	msg string
+	err error
+}
+
+func (e *remoteError) Error() string { return e.msg }
+func (e *remoteError) Unwrap() error { return e.err }
 
 // run executes cmd on the primary connection and returns its stdout.
 func (s *sshShell) run(ctx context.Context, cmd string) (string, error) {
@@ -607,7 +618,7 @@ func (r *sshReadCloser) wait() error {
 	if err := r.session.Wait(); err != nil {
 		r.waitErr = err
 		if msg := strings.TrimSpace(r.stderr.String()); msg != "" {
-			r.waitErr = fmt.Errorf("%v: %s", err, msg)
+			r.waitErr = fmt.Errorf("%w: %s", err, msg)
 		}
 	}
 	return r.waitErr

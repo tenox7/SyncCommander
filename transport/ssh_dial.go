@@ -15,6 +15,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"sc/model"
 )
 
 // sshKeepaliveInterval is how often we send keepalive@openssh.com global
@@ -103,7 +105,7 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	}
 	hostKeys, err := hostKeyCallback(insecure)
 	if err != nil {
-		return nil, err
+		return nil, model.WithKind(model.ErrAuth, err)
 	}
 
 	var auths []ssh.AuthMethod
@@ -154,7 +156,7 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
+		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
 	rawConn.SetDeadline(time.Now().Add(sshHandshakeTimeout))
 	stopWatch := context.AfterFunc(ctx, func() { rawConn.Close() })
@@ -174,9 +176,9 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	if err != nil {
 		rawConn.Close()
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			return nil, fmt.Errorf("ssh handshake %s: %w", addr, ctx.Err())
 		}
-		return nil, fmt.Errorf("ssh handshake %s: %v", addr, hostKeyHint(err))
+		return nil, sshLoginFailure(fmt.Errorf("ssh handshake %s: %w", addr, hostKeyHint(err)), err)
 	}
 	rawConn.SetDeadline(time.Time{})
 	client := ssh.NewClient(c, chans, reqs)
@@ -227,6 +229,21 @@ func hostKeyCallback(insecure bool) (ssh.HostKeyCallback, error) {
 		return nil, errors.New("ssh: no ~/.ssh/known_hosts; connect with ssh once or pass -insecure")
 	}
 	return knownhosts.New(files...)
+}
+
+// sshLoginFailure marks a handshake error the server refused as model.ErrAuth:
+// a login it did not take, too many keys offered, or a host key that is
+// unknown or does not match. x/crypto/ssh gives a refused login no type of
+// its own, so its words are read here, where the error is the handshake's
+// alone and holds no file name.
+func sshLoginFailure(err, cause error) error {
+	var ke *knownhosts.KeyError
+	msg := strings.ToLower(cause.Error())
+	if errors.As(cause, &ke) || strings.Contains(msg, "ssh: unable to authenticate") ||
+		strings.Contains(msg, "too many authentication failures") {
+		return model.WithKind(model.ErrAuth, err)
+	}
+	return err
 }
 
 // hostKeyHint turns knownhosts' terse errors into the action to take.

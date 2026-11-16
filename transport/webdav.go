@@ -130,7 +130,7 @@ func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*w
 	}
 	var ms wdMultistatus
 	if err := readMultistatus(resp.Body, func(r wdResponse) error { ms.Response = append(ms.Response, r); return nil }); err != nil {
-		err = fmt.Errorf("PROPFIND %s: %v", relPath, err)
+		err = fmt.Errorf("PROPFIND %s: %w", relPath, err)
 		Log.Add("webdav", DirErr, err.Error())
 		return nil, err
 	}
@@ -154,19 +154,19 @@ func readMultistatus(body io.Reader, each func(wdResponse) error) error {
 	for {
 		tok, err := dec.Token() // the end of the body inside the root is a syntax error
 		if err != nil {
-			return fmt.Errorf("decode: %v", err)
+			return fmt.Errorf("decode: %w", err)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local != "response" {
 				if err := dec.Skip(); err != nil {
-					return fmt.Errorf("decode: %v", err)
+					return fmt.Errorf("decode: %w", err)
 				}
 				continue
 			}
 			var r wdResponse
 			if err := dec.DecodeElement(&r, &t); err != nil {
-				return fmt.Errorf("decode: %v", err)
+				return fmt.Errorf("decode: %w", err)
 			}
 			if err := each(r); err != nil {
 				return err
@@ -186,7 +186,7 @@ func wdRoot(dec *xml.Decoder) (xml.StartElement, error) {
 			return xml.StartElement{}, fmt.Errorf("the answer is empty, not a multistatus")
 		}
 		if err != nil {
-			return xml.StartElement{}, fmt.Errorf("decode: %v", err)
+			return xml.StartElement{}, fmt.Errorf("decode: %w", err)
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			return se, nil
@@ -203,7 +203,7 @@ func wdTrailer(dec *xml.Decoder) error {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("after the multistatus: %v", err)
+			return fmt.Errorf("after the multistatus: %w", err)
 		}
 		switch t := tok.(type) {
 		case xml.Comment, xml.ProcInst:
@@ -399,7 +399,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 			continue // deeper than asked; listed with its own folder
 		}
 		if err != nil {
-			err = fmt.Errorf("PROPFIND %s: %v", b.pathFor(relDir), err)
+			err = fmt.Errorf("PROPFIND %s: %w", b.pathFor(relDir), err)
 			Log.Add("webdav", DirErr, err.Error())
 			return nil, err
 		}
@@ -475,7 +475,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 		return nil
 	})
 	if err != nil {
-		err = fmt.Errorf("RPROPFIND %s: %v; listing each folder on its own", b.pathFor(scope), err)
+		err = fmt.Errorf("RPROPFIND %s: %w; listing each folder on its own", b.pathFor(scope), err)
 		Log.Add("webdav", DirWarn, err.Error())
 		return err
 	}
