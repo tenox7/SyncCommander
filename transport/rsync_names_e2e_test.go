@@ -5,11 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gokrazy/rsync/rsyncd"
 )
 
 // R1: a stock rsync daemon reads each part of a path argument that holds *,
@@ -18,7 +21,79 @@ import (
 // Each folder has a decoy that the name, read as a pattern, matches.
 func TestRsyncDaemonNamesAreNotPatterns(t *testing.T) {
 	port, mod := startRsyncDaemon(t)
-	url := fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port)
+	checkDaemonNames(t, fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port), mod)
+}
+
+// gorsyncd reads the paths a client asks for the way stock rsync does
+// (gorsync 5a8b1de); before, it took them literally, and the names R1
+// escapes were not found there.
+func TestGorsyncdNamesAreNotPatterns(t *testing.T) {
+	url, mod := startGorsyncd(t)
+	checkDaemonNames(t, url, mod)
+}
+
+// startGorsyncd serves a temp folder as module testmod with gorsync's own
+// daemon, in process.
+func startGorsyncd(t *testing.T) (url, mod string) {
+	t.Helper()
+	mod = t.TempDir()
+	srv, err := rsyncd.NewServer([]rsyncd.Module{{Name: "testmod", Path: mod, Writable: true}},
+		rsyncd.DontRestrict(), rsyncd.WithStderr(nopWriteCloser{io.Discard}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Serve(ctx, ln)
+	return fmt.Sprintf("rsync://127.0.0.1:%d/testmod", ln.Addr().(*net.TCPAddr).Port), mod
+}
+
+// N2: gorsyncd sent only "." for a one-folder listing (-n -d dir/), so
+// every folder of a gorsync daemon read as empty, with no error, and a
+// mirror from it deleted the files on the other side (gorsync f25517a).
+func TestGorsyncdListsOneFolder(t *testing.T) {
+	url, mod := startGorsyncd(t)
+	for _, rel := range []string{"plain/a.txt", "plain/sub/b.txt", "locked/c.txt"} {
+		full := filepath.Join(mod, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(rel), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := NewRsyncBackend(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for dir, want := range map[string][]string{
+		"":          {"locked", "plain"},
+		"plain":     {"a.txt", "sub"},
+		"plain/sub": {"b.txt"},
+	} {
+		if got, err := listNames(ctx, b, dir); err != nil || !slices.Equal(got, want) {
+			t.Errorf("List(%q) = %q, %v; want %q", dir, got, err, want)
+		}
+	}
+	if os.Getuid() == 0 {
+		return
+	}
+	locked := filepath.Join(mod, "locked")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+	if got, err := listNames(ctx, b, "locked"); err == nil {
+		t.Errorf("List(locked) of an unreadable folder = %q, no error", got)
+	}
+}
+
+func checkDaemonNames(t *testing.T, url, mod string) {
 	b, err := NewRsyncBackend(url)
 	if err != nil {
 		t.Fatal(err)
