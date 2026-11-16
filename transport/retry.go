@@ -7,13 +7,16 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // CancelCloser starts a watcher that closes c when ctx is canceled. The
 // returned stop func cancels the watcher; call it on normal completion
-// (e.g. via defer) so the goroutine doesn't leak after the close. Closing
+// (e.g. via defer) so the goroutine doesn't leak after the close. It may
+// run more than once: a reader's Close calls it, and a reader can be
+// closed twice. Closing
 // the destination handle is what actually unblocks an in-flight Write on
 // SFTP/SSH backends; ctx cancellation alone does not. c may be nil.
 func CancelCloser(ctx context.Context, c io.Closer) func() {
@@ -28,7 +31,8 @@ func CancelCloser(ctx context.Context, c io.Closer) func() {
 		case <-done:
 		}
 	}()
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // WithStallGuard runs op against a child of parent. If counter does not

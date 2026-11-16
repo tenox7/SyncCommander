@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -534,8 +535,15 @@ type sshReadCloser struct {
 	stderr  bytes.Buffer
 	stop    func()
 	release func()
+
+	// mu guards waited and waitErr: a cancel closes the reader from the
+	// watcher's goroutine while the copy may be reading.
+	mu      sync.Mutex
 	waited  bool
 	waitErr error
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (r *sshReadCloser) Read(p []byte) (int, error) {
@@ -550,6 +558,8 @@ func (r *sshReadCloser) Read(p []byte) (int, error) {
 }
 
 func (r *sshReadCloser) wait() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.waited {
 		return r.waitErr
 	}
@@ -563,14 +573,24 @@ func (r *sshReadCloser) wait() error {
 	return r.waitErr
 }
 
+// Close may run more than once, and on two goroutines at once: a copy
+// closes its reader, and a watcher closes it on a cancel or stall
+// (CancelCloser). Only the first Close does anything, so the pooled
+// connection goes back once. A second one used to close a closed channel,
+// a panic that took sc down.
 func (r *sshReadCloser) Close() error {
-	r.stop()
-	err := r.session.Close()
-	r.release()
-	if r.waited || err == io.EOF {
-		return nil
-	}
-	return err
+	r.closeOnce.Do(func() {
+		r.stop()
+		err := r.session.Close() // ends a session.Wait that wait() holds mu for
+		r.release()
+		r.mu.Lock()
+		waited := r.waited
+		r.mu.Unlock()
+		if !waited && err != io.EOF {
+			r.closeErr = err
+		}
+	})
+	return r.closeErr
 }
 
 func shellQuote(s string) string {
