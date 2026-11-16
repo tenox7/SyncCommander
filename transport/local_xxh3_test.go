@@ -20,8 +20,7 @@ func TestLocalChecksumXXH3(t *testing.T) {
 	}
 
 	b := NewLocalBackend(dir)
-	b.SetChecksumAlgo("xxh3")
-	got, err := b.Checksum(context.Background(), "f")
+	got, err := b.Checksum(context.Background(), "f", "xxh3")
 	if err != nil {
 		t.Fatal(err)
 	}

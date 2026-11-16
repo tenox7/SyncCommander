@@ -37,7 +37,7 @@ func (c *connStub) List(context.Context, string) ([]model.FileEntry, error) {
 	return nil, nil
 }
 
-func (c *connStub) Checksum(context.Context, string) (string, error) {
+func (c *connStub) Checksum(context.Context, string, string) (string, error) {
 	if c.sumGate != nil {
 		close(c.sumEnter)
 		<-c.sumGate
@@ -73,7 +73,7 @@ func TestLateErrorLeavesTheNewConnectionAlone(t *testing.T) {
 	}
 	slow := make(chan error, 1)
 	go func() { // a slow call on connection 1
-		_, err := b.Checksum(ctx, "big.bin")
+		_, err := b.Checksum(ctx, "big.bin", "md5")
 		slow <- err
 	}()
 	<-conns[0].sumEnter
@@ -107,35 +107,44 @@ func TestLateErrorLeavesTheNewConnectionAlone(t *testing.T) {
 	}
 }
 
-// sumStub checksums like an ssh remote: only after a probe found the
-// commands and the scanner set the algorithm.
+// sumStub checksums like an ssh remote: with the commands its own
+// connection's probe found, which runs when it first needs them.
 type sumStub struct {
 	connStub
+	mu      sync.Mutex
 	cmds    map[string]string
-	algo    string
 	dropSum atomic.Bool // the next Checksum finds the connection dead
 }
 
-func (s *sumStub) ProbeChecksums() []string {
-	s.cmds = map[string]string{"md5": "md5sum"}
-	return []string{"md5"}
+func (s *sumStub) probed() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmds == nil {
+		s.cmds = map[string]string{"md5": "md5sum"}
+	}
+	return s.cmds
 }
 
-func (s *sumStub) SetChecksumAlgo(algo string) { s.algo = algo }
+func (s *sumStub) ChecksumAlgos(context.Context) ([]string, error) {
+	s.probed()
+	return []string{"md5"}, nil
+}
 
-func (s *sumStub) Checksum(_ context.Context, relPath string) (string, error) {
+func (s *sumStub) Checksum(_ context.Context, relPath, algo string) (string, error) {
 	if s.dropSum.Swap(false) {
 		return "", io.ErrUnexpectedEOF
 	}
-	if s.cmds[s.algo] == "" {
-		return "", fmt.Errorf("sftp: no %q checksum command on the remote", s.algo)
+	if s.probed()[algo] == "" {
+		return "", fmt.Errorf("sftp: no %q checksum command on the remote", algo)
 	}
 	return "sum of " + relPath, nil
 }
 
 // F6: after one dropped connection, the wrapper dialed a new backend
 // object that knew neither the probed commands nor the algorithm: every
-// checksum failed from then on, each after its retries.
+// checksum failed from then on, each after its retries. Each call now says
+// which algorithm, and a new connection probes its server when it first
+// needs the commands (D2).
 func TestChecksumsWorkAfterAReconnect(t *testing.T) {
 	SetMaxRetries(1)
 	defer SetMaxRetries(5)
@@ -149,19 +158,17 @@ func TestChecksumsWorkAfterAReconnect(t *testing.T) {
 		return s, nil
 	})
 	ctx := context.Background()
-	p := b.(model.ChecksumProber)
-	if got := p.ProbeChecksums(); !slices.Equal(got, []string{"md5"}) {
-		t.Fatalf("probe = %q", got)
+	if got, err := b.ChecksumAlgos(ctx); err != nil || !slices.Equal(got, []string{"md5"}) {
+		t.Fatalf("checksum algorithms = %q, %v", got, err)
 	}
-	p.SetChecksumAlgo("md5")
-	if sum, err := b.Checksum(ctx, "a"); err != nil || sum != "sum of a" {
+	if sum, err := b.Checksum(ctx, "a", "md5"); err != nil || sum != "sum of a" {
 		t.Fatalf("checksum before the drop = %q, %v", sum, err)
 	}
 	mu.Lock()
 	conns[0].dropSum.Store(true)
 	mu.Unlock()
 	for _, f := range []string{"b", "c"} {
-		if sum, err := b.Checksum(ctx, f); err != nil || sum != "sum of "+f {
+		if sum, err := b.Checksum(ctx, f, "md5"); err != nil || sum != "sum of "+f {
 			t.Errorf("checksum of %s after the drop = %q, %v", f, sum, err)
 		}
 	}

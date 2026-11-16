@@ -178,14 +178,10 @@ func TestChecksumRangeSumsTheseBytes(t *testing.T) {
 	data := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4000)
 	writeFile(t, filepath.Join(dir, "f.bin"), string(data))
 	for name, b := range writeBackends(t, dir) {
-		if p, ok := b.(model.ChecksumProber); ok {
-			p.ProbeChecksums()
-			p.SetChecksumAlgo("sha256")
-		}
 		rc := b.(model.RegionChecksummer)
 		for _, r := range [][2]int64{{0, 1}, {0, 100000}, {1000, 5000}, {0, int64(len(data))}} {
 			sum := sha256.Sum256(data[r[0] : r[0]+r[1]])
-			got, err := rc.ChecksumRange(ctx, "f.bin", r[0], r[1])
+			got, err := rc.ChecksumRange(ctx, "f.bin", "sha256", r[0], r[1])
 			if err != nil || got != hex.EncodeToString(sum[:]) {
 				t.Errorf("%s: ChecksumRange(%d, %d) = %s, %v; want %x", name, r[0], r[1], got, err, sum)
 			}

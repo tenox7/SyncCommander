@@ -295,16 +295,19 @@ func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit
 	return nil
 }
 
-func (b *ResticBackend) ProbeChecksums() []string { return []string{"sha256"} }
-
-func (b *ResticBackend) SetChecksumAlgo(string) {}
+func (b *ResticBackend) ChecksumAlgos(context.Context) ([]string, error) {
+	return []string{"sha256"}, nil
+}
 
 // Checksum returns the object's SHA-256. For data/index/keys/locks/snapshots
 // the object name *is* the SHA-256 hex of its content (restic is content
 // addressed), so the checksum is free: no download, and the value is fixed by
 // the server's own naming. config and any non-hash name fall back to a
 // download + local hash.
-func (b *ResticBackend) Checksum(ctx context.Context, relPath string) (string, error) {
+func (b *ResticBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	if algo != "sha256" {
+		return "", fmt.Errorf("restic: no %q checksum, only sha256", algo)
+	}
 	name := path.Base(strings.Trim(relPath, "/"))
 	if isHexSHA256(name) {
 		return name, nil

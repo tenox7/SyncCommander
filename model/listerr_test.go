@@ -16,9 +16,10 @@ type stubBackend struct {
 	fail map[string]bool
 }
 
-func (b *stubBackend) BasePath() string                           { return "/stub" }
-func (b *stubBackend) Close() error                               { return nil }
-func (b *stubBackend) Capabilities(context.Context) (Caps, error) { return Caps{}, nil }
+func (b *stubBackend) BasePath() string                                { return "/stub" }
+func (b *stubBackend) Close() error                                    { return nil }
+func (b *stubBackend) Capabilities(context.Context) (Caps, error)      { return Caps{}, nil }
+func (b *stubBackend) ChecksumAlgos(context.Context) ([]string, error) { return nil, nil }
 
 func (b *stubBackend) List(_ context.Context, relDir string) ([]FileEntry, error) {
 	if b.fail[relDir] {
@@ -36,7 +37,7 @@ func (b *stubBackend) Stat(_ context.Context, relPath string) (FileEntry, error)
 	return FileEntry{}, fs.ErrNotExist
 }
 
-func (b *stubBackend) Checksum(context.Context, string) (string, error) { return "", nil }
+func (b *stubBackend) Checksum(context.Context, string, string) (string, error) { return "", nil }
 func (b *stubBackend) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }

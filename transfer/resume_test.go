@@ -20,7 +20,7 @@ type resumeStub struct {
 	body       string
 	dstSize    int64
 	sum        string
-	algos      []string // ProbeChecksums answer; xxh3 when nil
+	algos      []string // ChecksumAlgos answer; xxh3 when nil
 	appends    int
 	appendFrom int64
 }
@@ -39,14 +39,13 @@ func (s *resumeStub) Stat(ctx context.Context, relPath string) (model.FileEntry,
 	return statByListing(ctx, s, relPath)
 }
 
-func (s *resumeStub) Checksum(context.Context, string) (string, error) { return s.sum, nil }
-func (s *resumeStub) ProbeChecksums() []string {
+func (s *resumeStub) Checksum(context.Context, string, string) (string, error) { return s.sum, nil }
+func (s *resumeStub) ChecksumAlgos(context.Context) ([]string, error) {
 	if s.algos != nil {
-		return s.algos
+		return s.algos, nil
 	}
-	return []string{"xxh3"}
+	return []string{"xxh3"}, nil
 }
-func (s *resumeStub) SetChecksumAlgo(string) {}
 func (s *resumeStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }

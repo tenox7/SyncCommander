@@ -193,9 +193,8 @@ func checkDaemonNames(t *testing.T, url, mod string) {
 		t.Errorf("RecvToLocalFile(s2/d[1]/victim.txt) wrote %q", got)
 	}
 
-	b.SetChecksumAlgo("md4")
-	sum, err1 := b.Checksum(ctx, "s2/d[1]/victim.txt")
-	same, err2 := b.Checksum(ctx, "plain/victim.txt")
+	sum, err1 := b.Checksum(ctx, "s2/d[1]/victim.txt", "md4")
+	same, err2 := b.Checksum(ctx, "plain/victim.txt", "md4")
 	if err1 != nil || err2 != nil || sum != same {
 		t.Errorf("md4 of s2/d[1]/victim.txt = %q, %v; of the same bytes in plain/victim.txt %q, %v", sum, err1, same, err2)
 	}

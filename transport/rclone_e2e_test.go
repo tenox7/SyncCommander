@@ -42,14 +42,13 @@ func TestRcloneLocalE2E(t *testing.T) {
 		}
 	}
 
-	t.Logf("hashes: %v", b.ProbeChecksums())
-	b.SetChecksumAlgo("md5")
-	sum, err := b.Checksum(ctx, "a.txt")
+	algos, _ := b.ChecksumAlgos(ctx)
+	t.Logf("hashes: %v", algos)
+	sum, err := b.Checksum(ctx, "a.txt", "md5")
 	if err != nil || sum != "5eb63bbbe01eeed093cb22bb8f5acdc3" {
 		t.Fatalf("md5: %q %v", sum, err)
 	}
-	b.SetChecksumAlgo("xxh3")
-	if _, err := b.Checksum(ctx, "sub/b.txt"); err != nil {
+	if _, err := b.Checksum(ctx, "sub/b.txt", "xxh3"); err != nil {
 		t.Fatalf("xxh3: %v", err)
 	}
 

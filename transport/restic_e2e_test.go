@@ -142,7 +142,7 @@ func TestResticRoundTrip(t *testing.T) {
 
 	// Checksum is the object name (== sha256 of content), with no download.
 	for i, h := range dataHashes {
-		sum, err := b.Checksum(ctx, "data/"+h)
+		sum, err := b.Checksum(ctx, "data/"+h, "sha256")
 		if err != nil {
 			t.Fatalf("Checksum data/%s: %v", h, err)
 		}

@@ -33,7 +33,8 @@ func (b *listStub) Stat(ctx context.Context, relPath string) (model.FileEntry, e
 	return statByListing(ctx, b, relPath)
 }
 
-func (b *listStub) Checksum(context.Context, string) (string, error) { return "", nil }
+func (b *listStub) Checksum(context.Context, string, string) (string, error) { return "", nil }
+func (b *listStub) ChecksumAlgos(context.Context) ([]string, error)          { return nil, nil }
 func (b *listStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }

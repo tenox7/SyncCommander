@@ -25,17 +25,15 @@ import (
 // come from dry runs of the in-process client; transfers run through the
 // rsync URL form so the daemon can recreate leading directories with -r.
 type RsyncBackend struct {
-	host        string
-	user        string
-	pass        string
-	module      string
-	base        string
-	display     string
-	useChecksum bool
-	cksumAlgo   string
-	md4         md4Cache
-	listCache   *listCache
-	sentMtime   sync.Map // mtime each upload sent with -t, see SetTimes
+	host      string
+	user      string
+	pass      string
+	module    string
+	base      string
+	display   string
+	md4       md4Cache
+	listCache *listCache
+	sentMtime sync.Map // mtime each upload sent with -t, see SetTimes
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -446,25 +444,20 @@ func (b *RsyncBackend) msgRelPath(p string) (string, bool) {
 	return relUnder("/"+b.base, "/"+strings.TrimPrefix(p, "/"))
 }
 
-func (b *RsyncBackend) ProbeChecksums() []string { return []string{"md4", "rsync"} }
+// ChecksumAlgos: a daemon gives md4 in its file list (-c) and nothing
+// else. An "rsync" algorithm gave the same text for every file, so any two
+// files would have compared equal, and switched -c on for transfers.
+func (b *RsyncBackend) ChecksumAlgos(context.Context) ([]string, error) { return []string{"md4"}, nil }
 
-func (b *RsyncBackend) SetChecksumAlgo(algo string) {
-	b.cksumAlgo = algo
-	b.useChecksum = algo == "rsync" || algo == "md4"
-}
-
-func (b *RsyncBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	switch {
-	case b.cksumAlgo == "md4":
-		return b.md4.lookup(ctx, relPath, b.fetchMD4)
-	case !b.useChecksum:
-		return "", errors.New("rsync: checksum not enabled")
+func (b *RsyncBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	if algo != "md4" {
+		return "", fmt.Errorf("rsync: no %q checksum, only md4", algo)
 	}
-	return "rsync_internal", nil
+	return b.md4.lookup(ctx, relPath, b.fetchMD4)
 }
 
-func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
-	if b.cksumAlgo != "md4" {
+func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
+	if algo != "md4" {
 		return nil
 	}
 	_, err := b.fetchMD4(ctx, scope, recursive)
@@ -504,13 +497,13 @@ func (b *RsyncBackend) noteSent(relPath, localPath string) {
 	}
 }
 
-// transferArgs are the flags for one data-moving call plus extra.
+// transferArgs are the flags for one data-moving call plus extra. Never
+// -c: rsync checks it before --ignore-times and skips a file whose content
+// matches, after both sides read it whole with no byte moving, which the
+// stall guard takes for a hung transfer. It was on whenever a checksum
+// compare had picked md4 (D2); rsync+ssh never used it.
 func (b *RsyncBackend) transferArgs(extra ...string) []string {
-	args := transferFlags()
-	if b.useChecksum {
-		args = append(args, "-c")
-	}
-	return append(args, extra...)
+	return append(transferFlags(), extra...)
 }
 
 // stageUploadPath builds, under tmpDir, the full relPath directory chain with

@@ -86,11 +86,20 @@ func KindName(m os.FileMode) string {
 // remote's says what the server it connects to can do, so it may connect,
 // and it fails when it cannot: a caller must not guess, or a copy that
 // should go through a part file would write the real file directly.
+//
+// Checksum sums relPath with algo, one of the names ChecksumAlgos gives;
+// another name is an error. The caller says which algorithm on every call:
+// it used to be set inside the backend (SetChecksumAlgo), where a new
+// connection did not have it and a wrapper had to replay it (D2, F6).
+// ChecksumAlgos may ask the server (an ssh server's commands, a WebDAV
+// server's properties), so it is asked only when a checksum is wanted, and
+// a backend keeps the answer for its connection.
 type Backend interface {
 	BasePath() string
 	List(ctx context.Context, relDir string) ([]FileEntry, error)
 	Stat(ctx context.Context, relPath string) (FileEntry, error)
-	Checksum(ctx context.Context, relPath string) (string, error)
+	Checksum(ctx context.Context, relPath, algo string) (string, error)
+	ChecksumAlgos(ctx context.Context) ([]string, error)
 	SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error
 	CopyFrom(ctx context.Context, relPath string, src io.Reader, p PutParams) error
 	Mkdir(ctx context.Context, relPath string, mode os.FileMode) error
@@ -165,18 +174,14 @@ func WantsFreshListing(ctx context.Context) bool {
 	return fresh
 }
 
-// ChecksumProber is implemented by backends that support content checksums.
-type ChecksumProber interface {
-	ProbeChecksums() []string
-	SetChecksumAlgo(algo string)
-}
-
 // ChecksumPrefetcher is implemented by backends where a bulk fetch is cheaper
 // than per-file Checksum calls (e.g. rsync MD4 returns checksums via filelist).
 // scope is a relPath under the backend's base; "" means whole base.
-// recursive is true when scope refers to a directory subtree.
+// recursive is true when scope refers to a directory subtree. algo is the
+// algorithm the Checksum calls that follow ask for; one the backend cannot
+// fetch in bulk is no error, and nothing is fetched.
 type ChecksumPrefetcher interface {
-	PrefetchChecksums(ctx context.Context, scope string, recursive bool) error
+	PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error
 }
 
 // RangeOpener is a handle to a source file the destination can open from byte
@@ -220,11 +225,11 @@ type PartWriter interface {
 var ErrPartInTheWay = errors.New("not a part file")
 
 // RegionChecksummer is implemented by backends that can checksum n bytes of a
-// file from off, with the algorithm Checksum uses. Before resuming into a
-// part the engine compares its bytes with the same bytes of the source: a
-// part is never appended to on its size alone.
+// file from off with algo, as Checksum sums a whole file. Before resuming
+// into a part the engine compares its bytes with the same bytes of the
+// source: a part is never appended to on its size alone.
 type RegionChecksummer interface {
-	ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error)
+	ChecksumRange(ctx context.Context, relPath, algo string, off, n int64) (string, error)
 }
 
 // Resumer is implemented by backends that can resume an interrupted upload by

@@ -92,7 +92,6 @@ func TestFakeDiffAndDrop(t *testing.T) {
 
 func TestFakeChecksumMatchesContent(t *testing.T) {
 	b, _ := NewFakeBackend("fake://tiny")
-	b.SetChecksumAlgo("sha256")
 	entries, _ := b.List(context.Background(), "")
 	var rel string
 	for _, e := range entries {
@@ -114,7 +113,7 @@ func TestFakeChecksumMatchesContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum, err := b.Checksum(context.Background(), rel)
+	sum, err := b.Checksum(context.Background(), rel, "sha256")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -134,14 +134,14 @@ func resumeVerifier(enabled bool, scanner *model.Scanner, src, dst model.Backend
 			return fmt.Errorf("%w: %s (%d bytes at destination, source has %d)", errResumeMismatch, relPath, got, size)
 		}
 		why := "no checksum algorithm shared by both sides"
-		if scanner.NegotiateChecksum() {
+		if algo, ok := scanner.NegotiateChecksum(ctx); ok {
 			// Each side reads and hashes the whole file and reports
 			// nothing until it is done: the stall guard, which watches
 			// bytes move, is told to wait that long (F5).
 			transport.ExpectSilence(ctx, transport.HashTime(size))
-			srcSum, serr := src.Checksum(ctx, relPath)
+			srcSum, serr := src.Checksum(ctx, relPath, algo)
 			transport.ExpectSilence(ctx, transport.HashTime(size))
-			dstSum, derr := dst.Checksum(ctx, relPath)
+			dstSum, derr := dst.Checksum(ctx, relPath, algo)
 			if serr == nil && derr == nil && srcSum != "" && dstSum != "" {
 				if srcSum != dstSum {
 					return fmt.Errorf("%w: %s (src %s, dst %s)", errResumeMismatch, relPath, srcSum, dstSum)

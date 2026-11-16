@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,8 +25,7 @@ import (
 )
 
 type LocalBackend struct {
-	base      string
-	cksumAlgo atomic.Value // string; set by negotiation while checksum workers may already run
+	base string
 }
 
 func NewLocalBackend(base string) *LocalBackend {
@@ -99,18 +97,42 @@ func localEntry(relPath string, info fs.FileInfo) model.FileEntry {
 	return e
 }
 
-func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	return b.checksum(ctx, relPath, 0, -1)
+func (b *LocalBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	return b.checksum(ctx, relPath, algo, 0, -1)
 }
 
 // ChecksumRange sums n bytes of relPath from off (model.RegionChecksummer).
-func (b *LocalBackend) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
-	return b.checksum(ctx, relPath, off, n)
+func (b *LocalBackend) ChecksumRange(ctx context.Context, relPath, algo string, off, n int64) (string, error) {
+	return b.checksum(ctx, relPath, algo, off, n)
 }
 
-// checksum sums relPath from off: n bytes, or to the end when n < 0. A file
-// that ends before off+n is an error.
-func (b *LocalBackend) checksum(ctx context.Context, relPath string, off, n int64) (string, error) {
+// localAlgos are the algorithms sc computes itself, from a file's bytes.
+var localAlgos = []string{"xxh3", "sha256", "sha1", "md5", "md4"}
+
+// newHash returns a hash of algo, one of localAlgos.
+func newHash(algo string) (hash.Hash, error) {
+	switch algo {
+	case "xxh3":
+		return xxh3.New(), nil
+	case "sha256":
+		return sha256.New(), nil
+	case "sha1":
+		return sha1.New(), nil
+	case "md5":
+		return md5.New(), nil
+	case "md4":
+		return md4.New(), nil
+	}
+	return nil, fmt.Errorf("no %q checksum", algo)
+}
+
+// checksum sums relPath from off with algo: n bytes, or to the end when
+// n < 0. A file that ends before off+n is an error.
+func (b *LocalBackend) checksum(ctx context.Context, relPath, algo string, off, n int64) (string, error) {
+	h, err := newHash(algo)
+	if err != nil {
+		return "", err
+	}
 	f, err := openRegular(b.LocalPath(relPath))
 	if err != nil {
 		return "", err
@@ -122,19 +144,6 @@ func (b *LocalBackend) checksum(ctx context.Context, relPath string, off, n int6
 		}
 	}
 
-	var h hash.Hash
-	switch b.cksumAlgo.Load() {
-	case "xxh3":
-		h = xxh3.New()
-	case "sha1":
-		h = sha1.New()
-	case "md5":
-		h = md5.New()
-	case "md4":
-		h = md4.New()
-	default:
-		h = sha256.New()
-	}
 	buf := make([]byte, 256*1024)
 	for n != 0 {
 		if ctx.Err() != nil {
@@ -167,11 +176,7 @@ func (b *LocalBackend) checksum(ctx context.Context, relPath string, off, n int6
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (b *LocalBackend) ProbeChecksums() []string {
-	return []string{"xxh3", "sha256", "sha1", "md5", "md4"}
-}
-
-func (b *LocalBackend) SetChecksumAlgo(algo string) { b.cksumAlgo.Store(algo) }
+func (b *LocalBackend) ChecksumAlgos(context.Context) ([]string, error) { return localAlgos, nil }
 
 // Close does nothing: a local folder holds no connection.
 func (b *LocalBackend) Close() error { return nil }

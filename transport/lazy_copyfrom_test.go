@@ -26,7 +26,8 @@ func (s *copyStub) List(context.Context, string) ([]model.FileEntry, error) { re
 func (s *copyStub) Stat(context.Context, string) (model.FileEntry, error) {
 	return model.FileEntry{}, fs.ErrNotExist
 }
-func (s *copyStub) Checksum(context.Context, string) (string, error) { return "", nil }
+func (s *copyStub) Checksum(context.Context, string, string) (string, error) { return "", nil }
+func (s *copyStub) ChecksumAlgos(context.Context) ([]string, error)          { return nil, nil }
 func (s *copyStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }

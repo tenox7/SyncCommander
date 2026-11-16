@@ -25,11 +25,13 @@ import (
 // as remote commands and file bodies stream through cat and tail. SCP and
 // rsync+ssh embed it whole; SFTP uses it for the checksum commands only.
 type sshShell struct {
-	client    *ssh.Client
-	proto     string
-	base      string
-	display   string
-	cksumAlgo string
+	client  *ssh.Client
+	proto   string
+	base    string
+	display string
+	// The checksum command of each algorithm the server has, found on the
+	// first ask and kept for the connection; nil until then.
+	cksumMu   sync.Mutex
 	cksumCmds map[string]string
 	listCache *listCache // nil when the backend has no recursive preload
 	usePerl   atomic.Bool
@@ -479,39 +481,82 @@ var cksumProbes = []struct{ algo, test, cmd string }{
 var sshChecksumOrder = []string{"sha256", "sha1", "md5"}
 
 // probeSSHChecksums finds a working command per algorithm; the first probe
-// that succeeds wins.
-func probeSSHChecksums(run func(string) error) map[string]string {
+// that succeeds wins. A probe that exits with a status has no such command;
+// any other failure, a connection that died or ctx, ends the probe with it:
+// taken for a missing command, it left the connection without checksums.
+func probeSSHChecksums(run func(string) error) (map[string]string, error) {
 	cmds := make(map[string]string)
 	for _, p := range cksumProbes {
-		if cmds[p.algo] == "" && run(p.test) == nil {
+		if cmds[p.algo] != "" {
+			continue
+		}
+		var exit *ssh.ExitError
+		switch err := run(p.test); {
+		case err == nil:
 			cmds[p.algo] = p.cmd
+		case !errors.As(err, &exit):
+			return nil, err
 		}
 	}
-	return cmds
+	return cmds, nil
 }
 
-func (s *sshShell) ProbeChecksums() []string {
-	if s.cksumCmds == nil {
-		s.cksumCmds = probeSSHChecksums(func(cmd string) error {
-			_, err := s.run(context.Background(), cmd)
-			return err
-		})
+// checksumCmds returns the server's checksum command of each algorithm it
+// has, asking the server on the first call of the connection. An ask that
+// failed keeps nothing, so the next one asks again.
+func (s *sshShell) checksumCmds(ctx context.Context) (map[string]string, error) {
+	s.cksumMu.Lock()
+	defer s.cksumMu.Unlock()
+	if s.cksumCmds != nil {
+		return s.cksumCmds, nil
+	}
+	cmds, err := probeSSHChecksums(func(cmd string) error {
+		_, err := s.run(ctx, cmd)
+		return err
+	})
+	if ctx.Err() != nil {
+		// A command cut short can still end with an exit status, which
+		// reads as a missing command: what a stopped probe found is not
+		// kept, and the stop is known as one, so it is not logged.
+		err = ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: asking for checksum commands: %w", s.proto, err)
+	}
+	s.cksumCmds = cmds
+	return cmds, nil
+}
+
+// checksumCmd returns the server's command for algo.
+func (s *sshShell) checksumCmd(ctx context.Context, algo string) (string, error) {
+	cmds, err := s.checksumCmds(ctx)
+	if err != nil {
+		return "", err
+	}
+	if cmd := cmds[algo]; cmd != "" {
+		return cmd, nil
+	}
+	return "", fmt.Errorf("%s: no %q checksum command on the remote", s.proto, algo)
+}
+
+func (s *sshShell) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	cmds, err := s.checksumCmds(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var algos []string
 	for _, a := range sshChecksumOrder {
-		if s.cksumCmds[a] != "" {
+		if cmds[a] != "" {
 			algos = append(algos, a)
 		}
 	}
-	return algos
+	return algos, nil
 }
 
-func (s *sshShell) SetChecksumAlgo(algo string) { s.cksumAlgo = algo }
-
-func (s *sshShell) Checksum(ctx context.Context, relPath string) (string, error) {
-	cmd := s.cksumCmds[s.cksumAlgo]
-	if cmd == "" {
-		return "", fmt.Errorf("%s: no %q checksum command on the remote", s.proto, s.cksumAlgo)
+func (s *sshShell) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	cmd, err := s.checksumCmd(ctx, algo)
+	if err != nil {
+		return "", err
 	}
 	out, err := s.run(ctx, cmd+" "+shellQuote(s.abs(relPath)))
 	if err != nil {
@@ -527,10 +572,10 @@ func (s *sshShell) Checksum(ctx context.Context, relPath string) (string, error)
 // ChecksumRange sums n bytes of relPath from off on the server, the
 // negotiated command reading them from a pipe (model.RegionChecksummer). A
 // file that ends early gives another sum, never a match.
-func (s *sshShell) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
-	cmd := s.cksumCmds[s.cksumAlgo]
-	if cmd == "" {
-		return "", fmt.Errorf("%s: no %q checksum command on the remote", s.proto, s.cksumAlgo)
+func (s *sshShell) ChecksumRange(ctx context.Context, relPath, algo string, off, n int64) (string, error) {
+	cmd, err := s.checksumCmd(ctx, algo)
+	if err != nil {
+		return "", err
 	}
 	fp := shellQuote(s.abs(relPath))
 	read := fmt.Sprintf("head -c %d %s", n, fp)

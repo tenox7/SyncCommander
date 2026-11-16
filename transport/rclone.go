@@ -44,7 +44,6 @@ type RcloneBackend struct {
 	url       string
 	f         fs.Fs
 	feat      *fs.Features
-	ht        hash.Type
 	avail     []string
 	listCache *listCache
 	objs      *rcObjCache
@@ -142,9 +141,6 @@ func NewRcloneBackend(ctx context.Context, rawURL string, insecure bool) (*Rclon
 		listCache: newListCache(),
 	}
 	b.avail = rcloneHashNames(f.Hashes())
-	if len(b.avail) > 0 {
-		_ = b.ht.Set(b.avail[0])
-	}
 	Log.Add("rclone", DirIn, fmt.Sprintf("%s: %s hashes=%v listR=%v move=%v dirmove=%v",
 		b.url, f.String(), b.avail, b.canListRecursive(), b.feat.Move != nil, b.feat.DirMove != nil))
 	if b.feat.SlowModTime && ci.UseServerModTime {
@@ -194,15 +190,16 @@ func rcloneHashNames(set hash.Set) []string {
 	return out
 }
 
-func (b *RcloneBackend) ProbeChecksums() []string { return b.avail }
+func (b *RcloneBackend) ChecksumAlgos(context.Context) ([]string, error) { return b.avail, nil }
 
-func (b *RcloneBackend) SetChecksumAlgo(algo string) {
+// hashType is rclone's type for algo, when the remote has it.
+func (b *RcloneBackend) hashType(algo string) (hash.Type, error) {
 	for _, h := range rcloneHashOrder {
 		if h.name == algo && b.f.Hashes().Contains(h.t) {
-			b.ht = h.t
-			return
+			return h.t, nil
 		}
 	}
+	return hash.None, fmt.Errorf("rclone: %s has no %q checksum", b.f.Name(), algo)
 }
 
 // object resolves relPath to an fs.Object, preferring the listing cache so
@@ -292,20 +289,21 @@ func (b *RcloneBackend) convert(ctx context.Context, dirEntries fs.DirEntries) [
 	return entries
 }
 
-func (b *RcloneBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	if b.ht == hash.None {
-		return "", fmt.Errorf("rclone: %s has no usable checksum", b.f.Name())
+func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	ht, err := b.hashType(algo)
+	if err != nil {
+		return "", err
 	}
 	o, err := b.object(ctx, relPath)
 	if err != nil {
 		return "", err
 	}
-	sum, err := o.Hash(ctx, b.ht)
+	sum, err := o.Hash(ctx, ht)
 	if err != nil {
 		return "", err
 	}
 	if sum == "" {
-		return "", fmt.Errorf("rclone: no %s for %s", b.ht, relPath)
+		return "", fmt.Errorf("rclone: no %s for %s", ht, relPath)
 	}
 	return sum, nil
 }

@@ -100,11 +100,10 @@ func TestRcloneS3E2E(t *testing.T) {
 		}
 	}
 
-	if got := b.(model.ChecksumProber).ProbeChecksums(); len(got) == 0 || got[0] != "md5" {
+	if got, _ := b.ChecksumAlgos(ctx); len(got) == 0 || got[0] != "md5" {
 		t.Errorf("checksums: %v", got)
 	}
-	b.(model.ChecksumProber).SetChecksumAlgo("md5")
-	sum, err := b.Checksum(ctx, "a.txt")
+	sum, err := b.Checksum(ctx, "a.txt", "md5")
 	if err != nil || sum != "6f5902ac237024bdd0c176cb93063dc4" {
 		t.Errorf("md5: %q %v", sum, err)
 	}

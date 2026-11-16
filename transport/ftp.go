@@ -294,11 +294,8 @@ func (b *FTPBackend) reconnectLocked(ctx context.Context) error {
 	}
 	b.conn, b.rawConn = conn, rawConn
 	if b.hasher != nil {
-		algo := b.hasher.algo
 		b.hasher.close()
-		if b.hasher, _ = newFTPHasher(ctx, b.host, b.port, b.user, b.pass, b.scheme, b.tlsCfg); b.hasher != nil {
-			b.hasher.algo = algo
-		}
+		b.hasher, _ = newFTPHasher(ctx, b.host, b.port, b.user, b.pass, b.scheme, b.tlsCfg)
 	}
 	Log.Add("ftp", DirIn, "reconnected")
 	return nil
@@ -684,20 +681,22 @@ func (b *FTPBackend) currentHasher() *ftpHasher {
 	return b.hasher
 }
 
-func (b *FTPBackend) Checksum(_ context.Context, relPath string) (string, error) {
+func (b *FTPBackend) Checksum(_ context.Context, relPath, algo string) (string, error) {
 	h := b.currentHasher()
 	if h == nil {
 		return "", errors.New("no checksum support on this FTP server")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.hash(path.Join(b.base, relPath))
+	return h.hash(path.Join(b.base, relPath), algo)
 }
 
-func (b *FTPBackend) ProbeChecksums() []string {
+// ChecksumAlgos are the hash commands the server named in its FEAT answer
+// when the checksum connection logged in.
+func (b *FTPBackend) ChecksumAlgos(context.Context) ([]string, error) {
 	h := b.currentHasher()
 	if h == nil {
-		return nil
+		return nil, nil
 	}
 	var algos []string
 	for _, a := range []string{"sha256", "sha1", "md5"} {
@@ -705,15 +704,7 @@ func (b *FTPBackend) ProbeChecksums() []string {
 			algos = append(algos, a)
 		}
 	}
-	return algos
-}
-
-func (b *FTPBackend) SetChecksumAlgo(algo string) {
-	if h := b.currentHasher(); h != nil {
-		h.mu.Lock()
-		h.algo = algo
-		h.mu.Unlock()
-	}
+	return algos, nil
 }
 
 func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
@@ -1018,7 +1009,6 @@ type ftpHasher struct {
 	reader *textproto.Reader
 	writer *textproto.Writer
 	cmds   map[string]string
-	algo   string
 }
 
 // newFTPHasher opens the connection that asks for checksums. Until it is
@@ -1163,13 +1153,13 @@ func (h *ftpHasher) parseFeat(msg string) {
 	}
 }
 
-func (h *ftpHasher) hash(fullPath string) (string, error) {
-	cmd := h.cmds[h.algo]
+func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
+	cmd := h.cmds[algo]
 	if cmd == "" {
-		return "", fmt.Errorf("no hash command for %q", h.algo)
+		return "", fmt.Errorf("no hash command for %q", algo)
 	}
 	if cmd == "HASH" {
-		if name := ftpAlgoName[h.algo]; name != "" {
+		if name := ftpAlgoName[algo]; name != "" {
 			h.sendCmd("OPTS HASH %s", name)
 		}
 		code, msg, err := h.sendCmd("HASH %s", fullPath)

@@ -62,8 +62,8 @@ type wdProp struct {
 type WebDAVBackend struct {
 	*httpBase
 	display    string
-	cksumAlgo  string
-	availAlgos []string
+	algosMu    sync.Mutex
+	availAlgos []string // the checksums the server gives; nil until asked
 	sums       *wdSumCache
 	listCache  *listCache
 	dirs       sync.Map // collections known to exist, so uploads skip the MKCOL walk
@@ -538,20 +538,19 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	return nil
 }
 
-func (b *WebDAVBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	if b.cksumAlgo == "" {
-		return "", fmt.Errorf("no checksum algorithm configured")
-	}
-	if h, ok := b.sums.get(relPath, b.cksumAlgo); ok {
+// Checksum is the algo checksum the server gives for relPath (oc:checksums),
+// from the listing that carried it or a PROPFIND of relPath alone.
+func (b *WebDAVBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	if h, ok := b.sums.get(relPath, algo); ok {
 		return h, nil
 	}
 	if err := b.statInto(ctx, relPath); err != nil {
 		return "", err
 	}
-	if h, ok := b.sums.get(relPath, b.cksumAlgo); ok {
+	if h, ok := b.sums.get(relPath, algo); ok {
 		return h, nil
 	}
-	return "", fmt.Errorf("no %s checksum for %s", b.cksumAlgo, relPath)
+	return "", fmt.Errorf("no %s checksum for %s", algo, relPath)
 }
 
 func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
@@ -569,29 +568,38 @@ func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
 	return nil
 }
 
-func (b *WebDAVBackend) ProbeChecksums() []string {
+// ChecksumAlgos are the checksums the server gives with its files, found on
+// the first ask and kept. An ask that failed keeps nothing, so the next one
+// asks again: it used to keep "none" for good, and could not be stopped.
+func (b *WebDAVBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	b.algosMu.Lock()
+	defer b.algosMu.Unlock()
 	if b.availAlgos != nil {
-		return b.availAlgos
+		return b.availAlgos, nil
 	}
-	b.availAlgos = []string{}
-	seen := b.probeAlgos(context.Background())
+	seen, err := b.probeAlgos(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("webdav: asking for checksums: %w", err)
+	}
+	algos := []string{}
 	for _, a := range []string{"sha256", "sha1", "md5"} {
 		if seen[a] {
-			b.availAlgos = append(b.availAlgos, a)
+			algos = append(algos, a)
 		}
 	}
-	return b.availAlgos
+	b.availAlgos = algos
+	return algos, nil
 }
 
 // probeAlgos descends the first subdirectory chain until a listing carries
 // checksums, so a tree whose top level is all directories still probes.
-func (b *WebDAVBackend) probeAlgos(ctx context.Context) map[string]bool {
+func (b *WebDAVBackend) probeAlgos(ctx context.Context) (map[string]bool, error) {
 	seen := map[string]bool{}
 	dir := ""
 	for depth := 0; depth < 4; depth++ {
 		ms, err := b.propfind(ctx, dir, "1")
 		if err != nil {
-			return seen
+			return nil, err
 		}
 		firstSub := ""
 		found := false
@@ -612,14 +620,12 @@ func (b *WebDAVBackend) probeAlgos(ctx context.Context) map[string]bool {
 			}
 		}
 		if found || firstSub == "" {
-			return seen
+			return seen, nil
 		}
 		dir = firstSub
 	}
-	return seen
+	return seen, nil
 }
-
-func (b *WebDAVBackend) SetChecksumAlgo(algo string) { b.cksumAlgo = algo }
 
 func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
 	body := fmt.Sprintf(`<?xml version="1.0"?>`+

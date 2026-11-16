@@ -44,12 +44,6 @@ type lazyBackend struct {
 	inner    model.Backend
 	closed   bool
 	parallel int // last SetParallel, reapplied to every redialed inner; 0 = never set
-	// The checksum the scanner negotiated, replayed on every redialed inner:
-	// a new connection is a new backend object, which knows neither what
-	// the probe found (an ssh remote's commands) nor the algorithm (F6).
-	probed  bool
-	algo    string
-	algoSet bool
 	// Connects that failed, shared by every call (F7). A refused login is
 	// kept and no connect is tried again: each would be one more failed
 	// login. Other failures in a row space the next connect out on the
@@ -118,13 +112,6 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	}
 	b.mu.Lock()
 	b.failed = 0
-	probed := b.probed
-	b.mu.Unlock()
-	cp, hasSums := inner.(model.ChecksumProber)
-	if probed && hasSums {
-		cp.ProbeChecksums() // on the server, so not under mu
-	}
-	b.mu.Lock()
 	closed := b.closed
 	if !closed {
 		b.inner = inner
@@ -132,9 +119,6 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		// moved it since.
 		if b.parallel > 0 {
 			SetParallel(inner, b.parallel)
-		}
-		if b.algoSet && hasSums {
-			cp.SetChecksumAlgo(b.algo)
 		}
 	}
 	b.mu.Unlock()
@@ -347,8 +331,16 @@ func (b *lazyBackend) Stat(ctx context.Context, relPath string) (model.FileEntry
 	return doVal(b, ctx, "stat "+relPath, func(in model.Backend) (model.FileEntry, error) { return in.Stat(ctx, relPath) })
 }
 
-func (b *lazyBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	return doVal(b, ctx, "checksum "+relPath, func(in model.Backend) (string, error) { return in.Checksum(ctx, relPath) })
+// Checksum passes algo on: a new connection is a new backend, which knew
+// neither the algorithm nor what its server's probe found until the
+// wrapper replayed both (F6). Now each call says which, and the new
+// connection asks its server when it first needs to.
+func (b *lazyBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	return doVal(b, ctx, "checksum "+relPath, func(in model.Backend) (string, error) { return in.Checksum(ctx, relPath, algo) })
+}
+
+func (b *lazyBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	return doVal(b, ctx, "checksum algorithms", func(in model.Backend) ([]string, error) { return in.ChecksumAlgos(ctx) })
 }
 
 func (b *lazyBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
@@ -452,30 +444,8 @@ func (b *lazyBackend) SetParallel(n int) {
 	}
 }
 
-func (b *lazyBackend) ProbeChecksums() []string {
-	p, err := capability[model.ChecksumProber](b, context.Background())
-	if err != nil {
-		return nil
-	}
-	b.mu.Lock()
-	b.probed = true
-	b.mu.Unlock()
-	return p.ProbeChecksums()
-}
-
-// SetChecksumAlgo sets the algorithm on the connected backend and keeps it
-// for every redial. It holds mu so a redial cannot miss it.
-func (b *lazyBackend) SetChecksumAlgo(algo string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.algo, b.algoSet = algo, true
-	if p, ok := b.inner.(model.ChecksumProber); ok {
-		p.SetChecksumAlgo(algo)
-	}
-}
-
-func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
-	err := doAs(b, ctx, "prefetch "+scope, func(p model.ChecksumPrefetcher) error { return p.PrefetchChecksums(ctx, scope, recursive) })
+func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
+	err := doAs(b, ctx, "prefetch "+scope, func(p model.ChecksumPrefetcher) error { return p.PrefetchChecksums(ctx, scope, algo, recursive) })
 	if errors.Is(err, ErrUnsupported) {
 		return nil
 	}
@@ -524,7 +494,7 @@ func (b *lazyBackend) CommitPart(ctx context.Context, relPath string, mode os.Fi
 	return doAs(b, ctx, "commit "+relPath, func(p model.PartWriter) error { return p.CommitPart(ctx, relPath, mode) })
 }
 
-func (b *lazyBackend) ChecksumRange(ctx context.Context, relPath string, off, n int64) (string, error) {
+func (b *lazyBackend) ChecksumRange(ctx context.Context, relPath, algo string, off, n int64) (string, error) {
 	if _, err := capability[model.RegionChecksummer](b, ctx); err != nil {
 		return "", err
 	}
@@ -533,7 +503,7 @@ func (b *lazyBackend) ChecksumRange(ctx context.Context, relPath string, off, n 
 		if !ok {
 			return "", ErrUnsupported
 		}
-		return r.ChecksumRange(ctx, relPath, off, n)
+		return r.ChecksumRange(ctx, relPath, algo, off, n)
 	})
 }
 

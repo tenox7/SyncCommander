@@ -106,7 +106,7 @@ func TestLocalRefusesLinksAndPipes(t *testing.T) {
 		refused("Mkdir at a link to a folder", b.Mkdir(ctx, "dirlink", 0o755))
 	})
 	within(t, "Checksum of a link", 5*time.Second, pipe, func() {
-		_, err := b.Checksum(ctx, "link.txt")
+		_, err := b.Checksum(ctx, "link.txt", "md5")
 		refused("Checksum of a link", err)
 	})
 	within(t, "CopyFrom onto a named pipe", 5*time.Second, pipe, func() {
@@ -120,7 +120,7 @@ func TestLocalRefusesLinksAndPipes(t *testing.T) {
 		refused("Open of a named pipe", err)
 	})
 	within(t, "Checksum of a named pipe", 5*time.Second, pipe, func() {
-		_, err := b.Checksum(ctx, "pipe")
+		_, err := b.Checksum(ctx, "pipe", "md5")
 		refused("Checksum of a named pipe", err)
 	})
 	if got, _ := os.ReadFile(filepath.Join(root, "outside.txt")); string(got) != "keep me" {

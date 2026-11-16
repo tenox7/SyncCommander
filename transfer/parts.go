@@ -106,7 +106,8 @@ func (c *copier) partOffset(ctx context.Context, pw model.PartWriter, relPath, p
 // checksum. A whole part is compared with the whole source, so a source that
 // grew since does not match it.
 func (c *copier) partMatches(ctx context.Context, relPath, part string, n int64, whole bool) string {
-	if !c.req.Scanner.NegotiateChecksum() {
+	algo, ok := c.req.Scanner.NegotiateChecksum(ctx)
+	if !ok {
 		return "no checksum algorithm works on both sides"
 	}
 	const noRegion = "the source cannot checksum part of a file"
@@ -116,16 +117,16 @@ func (c *copier) partMatches(ctx context.Context, relPath, part string, n int64,
 	}
 	var srcSum string
 	if whole {
-		srcSum, err = c.src.Checksum(ctx, relPath)
+		srcSum, err = c.src.Checksum(ctx, relPath, algo)
 	} else if rc, ok := c.src.(model.RegionChecksummer); ok && caps.RegionSums {
-		srcSum, err = rc.ChecksumRange(ctx, relPath, 0, n)
+		srcSum, err = rc.ChecksumRange(ctx, relPath, algo, 0, n)
 	} else {
 		return noRegion
 	}
 	if err != nil {
 		return "the source's checksum: " + err.Error()
 	}
-	dstSum, err := c.dst.Checksum(ctx, part)
+	dstSum, err := c.dst.Checksum(ctx, part, algo)
 	if err != nil {
 		return "the unfinished copy's checksum: " + err.Error()
 	}
@@ -165,11 +166,15 @@ func (c *copier) fillPart(ctx context.Context, relPath, part string, src *model.
 // append, so a difference is in the rest; the part goes, and the next try
 // copies from the start.
 func (c *copier) verifyPart(ctx context.Context, relPath, part string) error {
-	srcSum, err := c.src.Checksum(ctx, relPath)
+	algo, ok := c.req.Scanner.NegotiateChecksum(ctx)
+	if !ok {
+		return errors.New("no checksum algorithm works on both sides")
+	}
+	srcSum, err := c.src.Checksum(ctx, relPath, algo)
 	if err != nil {
 		return err
 	}
-	dstSum, err := c.dst.Checksum(ctx, part)
+	dstSum, err := c.dst.Checksum(ctx, part, algo)
 	if err != nil {
 		return err
 	}

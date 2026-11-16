@@ -39,7 +39,7 @@ func (s *sumStub) List(context.Context, string) ([]model.FileEntry, error) {
 func (s *sumStub) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
 	return statByListing(ctx, s, relPath)
 }
-func (s *sumStub) Checksum(ctx context.Context, _ string) (string, error) {
+func (s *sumStub) Checksum(ctx context.Context, _, _ string) (string, error) {
 	wait := s.sumDelay
 	if s.hang {
 		wait = time.Hour
@@ -51,8 +51,7 @@ func (s *sumStub) Checksum(ctx context.Context, _ string) (string, error) {
 		return "", ctx.Err()
 	}
 }
-func (s *sumStub) ProbeChecksums() []string { return []string{"sha256"} }
-func (s *sumStub) SetChecksumAlgo(string)   {}
+func (s *sumStub) ChecksumAlgos(context.Context) ([]string, error) { return []string{"sha256"}, nil }
 func (s *sumStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }

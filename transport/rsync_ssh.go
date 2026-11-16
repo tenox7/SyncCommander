@@ -194,19 +194,27 @@ func (s *sessionRW) Read(p []byte) (int, error)  { return s.r.Read(p) }
 func (s *sessionRW) Write(p []byte) (int, error) { return s.w.Write(p) }
 func (s *sessionRW) Close() error                { return s.w.Close() }
 
-func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath string) (string, error) {
-	if b.cksumAlgo == "md4" {
+// Checksum takes md4 from rsync's file list, other algorithms from the
+// shell's commands.
+func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	if algo == "md4" {
 		return b.md4.lookup(ctx, relPath, b.fetchMD4)
 	}
-	return b.sshShell.Checksum(ctx, relPath)
+	return b.sshShell.Checksum(ctx, relPath, algo)
 }
 
-func (b *RsyncSSHBackend) ProbeChecksums() []string {
-	return append(b.sshShell.ProbeChecksums(), "md4")
+func (b *RsyncSSHBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	algos, err := b.sshShell.ChecksumAlgos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(algos, "md4"), nil
 }
 
-func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope string, recursive bool) error {
-	if b.cksumAlgo != "md4" {
+// PrefetchChecksums fetches md4 for scope in one rsync run; the shell's
+// algorithms are asked file by file.
+func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
+	if algo != "md4" {
 		return nil
 	}
 	_, err := b.fetchMD4(ctx, scope, recursive)

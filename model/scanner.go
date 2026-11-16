@@ -63,7 +63,7 @@ type Scanner struct {
 	maxDepth    int
 	progress    atomic.Value
 	rev         atomic.Uint64
-	cksumOnce   sync.Once
+	cksumNegMu  sync.Mutex   // one negotiation at a time
 	cksumMu     sync.RWMutex // guards the probe results below
 	cksumOK     bool
 	cksumAlgo   string
@@ -263,7 +263,11 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 	if ctx.Err() != nil {
 		return
 	}
-	if !opts.Checksum || !s.negotiateChecksum() {
+	algo, ok := "", false
+	if opts.Checksum {
+		algo, ok = s.negotiateChecksum(ctx)
+	}
+	if !ok {
 		s.setProgress(progress(PhaseDone))
 		return
 	}
@@ -279,7 +283,7 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 		s.setProgress(p)
 	}
 	update()
-	s.runChecksumSides(ctx, groups, func() {
+	s.runChecksumSides(ctx, groups, algo, func() {
 		checksumDone.Add(1)
 		update()
 	})
@@ -555,20 +559,25 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 	if !opts.Checksum {
 		groups = filterPartialCRCGroups(groups)
 	}
-	if len(groups) == 0 || !s.negotiateChecksum() {
+	if len(groups) == 0 {
+		return
+	}
+	algo, ok := s.negotiateChecksum(ctx)
+	if !ok {
 		return
 	}
 	ckTotal = countGroupFiles(groups)
 	s.resetChecksumPhase(groups)
 	setp(PhaseChecksumming)
-	s.runChecksumSides(ctx, groups, func() {
+	s.runChecksumSides(ctx, groups, algo, func() {
 		ckDone.Add(1)
 		setp(PhaseChecksumming)
 	})
 }
 
 func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
-	if !s.negotiateChecksum() {
+	algo, ok := s.negotiateChecksum(ctx)
+	if !ok {
 		return
 	}
 	var groups []checksumGroup
@@ -589,7 +598,7 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 		s.setProgress(p)
 	}
 	update()
-	s.runChecksumSides(ctx, groups, func() {
+	s.runChecksumSides(ctx, groups, algo, func() {
 		done.Add(1)
 		update()
 	})
@@ -641,9 +650,12 @@ func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, 
 	return e, r, err
 }
 
-// NegotiateChecksum picks a checksum algorithm both backends support and
-// configures them to use it. Reports whether one was found.
-func (s *Scanner) NegotiateChecksum() bool { return s.negotiateChecksum() }
+// NegotiateChecksum returns the checksum algorithm both backends offer, the
+// one every Checksum call of this scanner is given, and whether there is
+// one. The first call that can ask both backends picks it.
+func (s *Scanner) NegotiateChecksum(ctx context.Context) (string, bool) {
+	return s.negotiateChecksum(ctx)
+}
 
 // EnsureSubtreeListed lists every directory under node that the scan left
 // unlisted (shallow scan, collapsed dir, earlier list failure). Copy and
@@ -878,13 +890,20 @@ func DirOf(relPath string) string {
 }
 
 // checksumNode synchronously runs both sides for one node and combines.
-// Used by rescanFile for single-file checksum.
+// Used by rescanFile for single-file checksum. It picks the algorithm
+// first, as every checksum pass does: a rescan of one file before any
+// pass ran summed with whatever each backend held, sha256 on a local disk
+// and nothing over ssh.
 func (s *Scanner) checksumNode(ctx context.Context, node *TreeNode) {
+	algo, ok := s.negotiateChecksum(ctx)
+	if !ok {
+		return
+	}
 	s.resetChecksumPhase([]checksumGroup{{files: []*TreeNode{node}}})
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideLeft) }()
-	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideRight) }()
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideLeft, algo) }()
+	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideRight, algo) }()
 	wg.Wait()
 }
 
@@ -918,15 +937,15 @@ func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 // supports it) and then per-file Checksum calls, up to s.concurrency in
 // parallel. The faster side pipelines ahead, so the spinner on the left panel
 // can be on a different dir than the right panel.
-func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, onPairDone func()) {
+func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, algo string, onPairDone func()) {
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideLeft, onPairDone) }()
-	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideRight, onPairDone) }()
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideLeft, algo, onPairDone) }()
+	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideRight, algo, onPairDone) }()
 	wg.Wait()
 }
 
-func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, onPairDone func()) {
+func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, algo string, onPairDone func()) {
 	prefetcher := asPrefetcher(ctx, s.backend(side))
 	sem := make(chan struct{}, s.concurrency)
 
@@ -950,7 +969,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		setDir(g.dir, true, true)
 		if prefetcher != nil && g.dir != nil {
 			if e := g.dir.Sides[side].Entry; e != nil && e.IsDir {
-				_ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, true)
+				_ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, algo, true)
 			}
 		}
 
@@ -964,7 +983,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			go func(n *TreeNode) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				if s.checksumSideFile(ctx, n, side) && onPairDone != nil {
+				if s.checksumSideFile(ctx, n, side, algo) && onPairDone != nil {
 					onPairDone()
 				}
 			}(f)
@@ -980,16 +999,17 @@ func markChecksumInFlight(node *TreeNode, side Side, delta int32) {
 	}
 }
 
-// checksumSideFile runs one side's Checksum for node and stores the result.
-// Returns true if this call completed the pair (both sides done); the caller
-// uses that to increment the file-count progress exactly once per pair.
-func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Side) bool {
+// checksumSideFile runs one side's Checksum with algo for node and stores
+// the result. Returns true if this call completed the pair (both sides
+// done); the caller uses that to increment the file-count progress exactly
+// once per pair.
+func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Side, algo string) bool {
 	entry := node.Sides[side].Entry
 	var sum string
 	var err error
 	if entry != nil {
 		markChecksumInFlight(node, side, 1)
-		sum, err = s.backend(side).Checksum(ctx, node.RelPath)
+		sum, err = s.backend(side).Checksum(ctx, node.RelPath, algo)
 		markChecksumInFlight(node, side, -1)
 	}
 
@@ -1238,34 +1258,48 @@ func filterPartialCRCGroups(groups []checksumGroup) []checksumGroup {
 }
 
 // checksumPreference orders the algorithms both sides may share.
-var checksumPreference = []string{"xxh3", "sha256", "sha1", "md5", "md4", "rsync"}
+var checksumPreference = []string{"xxh3", "sha256", "sha1", "md5", "md4"}
 
-// negotiateChecksum probes both backends once. The UI polls the results every
-// tick from its own goroutine, so they are published under cksumMu rather than
-// left to the Once; only callers of Do get its happens-before.
-func (s *Scanner) negotiateChecksum() bool {
-	s.cksumOnce.Do(func() {
-		left, right := s.backends()
-		leftAlgos, rightAlgos := probeBackend(left), probeBackend(right)
-		leftSet, rightSet := toSet(leftAlgos), toSet(rightAlgos)
-		algo, ok := "", false
-		for _, a := range checksumPreference {
-			if leftSet[a] && rightSet[a] {
-				setBackendAlgo(left, a)
-				setBackendAlgo(right, a)
-				algo, ok = a, true
-				break
-			}
-		}
-		s.cksumMu.Lock()
-		s.cksumProbed = true
-		s.cksumLeft, s.cksumRight = leftAlgos, rightAlgos
-		s.cksumAlgo, s.cksumOK = algo, ok
-		s.cksumMu.Unlock()
-	})
+// negotiateChecksum picks the algorithm both backends offer, the first in
+// checksumPreference, and keeps it for the scanner's life: every Checksum
+// call is given it. Asking a backend may connect and ask its server; when
+// either side cannot be asked, nothing is kept and the next call asks
+// again (an ask that failed left checksums off for good). The UI polls the
+// results every tick from its own goroutine, so they are published under
+// cksumMu.
+func (s *Scanner) negotiateChecksum(ctx context.Context) (string, bool) {
+	s.cksumNegMu.Lock()
+	defer s.cksumNegMu.Unlock()
 	s.cksumMu.RLock()
-	defer s.cksumMu.RUnlock()
-	return s.cksumOK
+	probed, algo, ok := s.cksumProbed, s.cksumAlgo, s.cksumOK
+	s.cksumMu.RUnlock()
+	if probed {
+		return algo, ok
+	}
+	left, right := s.backends()
+	leftAlgos, err := left.ChecksumAlgos(ctx)
+	if err != nil {
+		logScanErr(fmt.Errorf("the left side's checksums: %w", err))
+		return "", false
+	}
+	rightAlgos, err := right.ChecksumAlgos(ctx)
+	if err != nil {
+		logScanErr(fmt.Errorf("the right side's checksums: %w", err))
+		return "", false
+	}
+	leftSet, rightSet := toSet(leftAlgos), toSet(rightAlgos)
+	for _, a := range checksumPreference {
+		if leftSet[a] && rightSet[a] {
+			algo, ok = a, true
+			break
+		}
+	}
+	s.cksumMu.Lock()
+	s.cksumProbed = true
+	s.cksumLeft, s.cksumRight = leftAlgos, rightAlgos
+	s.cksumAlgo, s.cksumOK = algo, ok
+	s.cksumMu.Unlock()
+	return algo, ok
 }
 
 func (s *Scanner) ChecksumAlgo() string {
@@ -1284,19 +1318,6 @@ func (s *Scanner) ChecksumInfo() (left, right []string) {
 	s.cksumMu.RLock()
 	defer s.cksumMu.RUnlock()
 	return s.cksumLeft, s.cksumRight
-}
-
-func probeBackend(b Backend) []string {
-	if p, ok := b.(ChecksumProber); ok {
-		return p.ProbeChecksums()
-	}
-	return nil
-}
-
-func setBackendAlgo(b Backend, algo string) {
-	if p, ok := b.(ChecksumProber); ok {
-		p.SetChecksumAlgo(algo)
-	}
 }
 
 func toSet(s []string) map[string]bool {

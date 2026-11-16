@@ -3,13 +3,9 @@ package transport
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"io/fs"
 	"net/url"
@@ -19,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mmcloughlin/md4"
 	"github.com/zeebo/xxh3"
 
 	"sc/model"
@@ -59,7 +54,6 @@ type FakeBackend struct {
 	latency   time.Duration
 	ckLatency time.Duration
 	noData    bool
-	cksumAlgo string
 
 	mu   sync.RWMutex
 	over map[string]map[string]*fakeMut // dir → name → override or tombstone
@@ -458,7 +452,7 @@ func (b *FakeBackend) lookup(relPath string) (model.FileEntry, bool) {
 	return model.FileEntry{}, false
 }
 
-func (b *FakeBackend) Checksum(ctx context.Context, relPath string) (string, error) {
+func (b *FakeBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
 	if err := fakeDelay(ctx, b.ckLatency); err != nil {
 		return "", err
 	}
@@ -466,18 +460,9 @@ func (b *FakeBackend) Checksum(ctx context.Context, relPath string) (string, err
 	if !ok {
 		return "", fmt.Errorf("fake: %s: %w", relPath, fs.ErrNotExist)
 	}
-	var h hash.Hash
-	switch b.cksumAlgo {
-	case "xxh3":
-		h = xxh3.New()
-	case "sha1":
-		h = sha1.New()
-	case "md5":
-		h = md5.New()
-	case "md4":
-		h = md4.New()
-	default:
-		h = sha256.New()
+	h, err := newHash(algo)
+	if err != nil {
+		return "", err
 	}
 	rd, err := b.openEntry(ctx, relPath, e, 0)
 	if err != nil {
@@ -490,11 +475,7 @@ func (b *FakeBackend) Checksum(ctx context.Context, relPath string) (string, err
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (b *FakeBackend) ProbeChecksums() []string {
-	return []string{"xxh3", "sha256", "sha1", "md5", "md4"}
-}
-
-func (b *FakeBackend) SetChecksumAlgo(algo string) { b.cksumAlgo = algo }
+func (b *FakeBackend) ChecksumAlgos(context.Context) ([]string, error) { return localAlgos, nil }
 
 func (b *FakeBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	return b.OpenAt(ctx, relPath, 0)
