@@ -210,7 +210,7 @@ func (b *RsyncBackend) remoteURL(relPath string) (string, error) {
 
 func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, error) {
 	var stdout bytes.Buffer
-	if err := b.rsyncRunStdout(ctx, &stdout, false, args...); err != nil {
+	if err := b.rsyncRunStdout(ctx, &stdout, args...); err != nil {
 		return "", err
 	}
 	return stdout.String(), nil
@@ -218,17 +218,16 @@ func (b *RsyncBackend) rsyncRun(ctx context.Context, args ...string) (string, er
 
 // rsyncRunStdout invokes rsync with stdout routed through w. Used by transfer
 // paths that pass --progress to credit byte progress via rsyncProgressWriter.
-// strict fails the run when the daemon reported per-file errors, which rsync
-// itself only turns into exit code 23 after finishing.
-func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, strict bool, args ...string) error {
+// A run rsync would end with exit code 23 or 24 fails (transferErr).
+func (b *RsyncBackend) rsyncRunStdout(ctx context.Context, w io.Writer, args ...string) error {
 	cmd := rsynccmd.Command("rsync", args...)
 	cmd.DialContext = dialLimited
 	var stderr bytes.Buffer
 	cmd.Stdout = nopWriteCloser{w}
 	cmd.Stderr = nopWriteCloser{&stderr}
 	res, err := cmd.Run(ctx)
-	if err == nil && strict && res.XferErrors > 0 {
-		err = fmt.Errorf("rsync: %d transfer error(s)", res.XferErrors)
+	if err == nil {
+		err = transferErr(res.XferErrors, res.IOErrors)
 	}
 	if err == nil {
 		return nil
@@ -482,7 +481,7 @@ func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder 
 		args = append(args, "--progress")
 	}
 	Log.Add("rsync", DirOut, label+" ["+strings.Join(args, " ")+"]")
-	err := b.rsyncRunStdout(ctx, stdout, appendVerify(extra), append(args, src, dest)...)
+	err := b.rsyncRunStdout(ctx, stdout, append(args, src, dest)...)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
 	}
@@ -636,7 +635,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	}
 	stageTop := filepath.Join(tmpDir, strings.SplitN(clean, "/", 2)[0])
 	Log.Add("rsync", DirOut, "MKDIR "+clean)
-	_, err = b.rsyncRun(ctx, "-r", "-t", stageTop, dest+"/")
+	_, err = b.rsyncRun(ctx, "-r", "-t", "-O", stageTop, dest+"/")
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
@@ -745,9 +744,9 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 			}
 			// The placeholder already holds offset bytes, so a source the
 			// daemon could not send leaves it in place and the run ends
-			// without an error: only the per-file error count shows it.
-			if res.XferErrors > 0 {
-				return fmt.Errorf("%s: %d transfer error(s)", relPath, res.XferErrors)
+			// without an error: only the error counts show it.
+			if err := transferErr(res.XferErrors, res.IOErrors); err != nil {
+				return fmt.Errorf("%s: %w", relPath, err)
 			}
 			// --append also leaves the placeholder alone when the source is
 			// not longer than it, as rsync does, so a source shorter than

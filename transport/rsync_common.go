@@ -31,8 +31,11 @@ import (
 // (mostly immutable archives). --ignore-times bypasses rsync's quick-check
 // (skip when size+mtime match): SC only invokes these calls on user-initiated
 // copies, so we must transfer unconditionally, otherwise a same-size,
-// same-mtime, different-content file is silently skipped.
-var rsyncTransferFlags = []string{"-t", "--inplace", "--partial", "-W", "--ignore-times"}
+// same-mtime, different-content file is silently skipped. -O leaves the
+// times of folders alone: sc stages uploads in a temp tree whose folder
+// times mean nothing, and a server may not let it set the time of a folder
+// it does not own, which rsync reports as an error.
+var rsyncTransferFlags = []string{"-t", "-O", "--inplace", "--partial", "-W", "--ignore-times"}
 
 func transferFlags() []string { return slices.Clone(rsyncTransferFlags) }
 
@@ -69,11 +72,20 @@ func countingRW(adder *CappedAdder) func(io.ReadWriteCloser) io.ReadWriteCloser 
 	return func(rw io.ReadWriteCloser) io.ReadWriteCloser { return &CountingReadWriter{RW: rw, Adder: adder} }
 }
 
-// appendVerify reports whether flags ask the receiver to verify an appended
-// prefix. rsync keeps a failed verification as a per-file error that the
-// run as a whole survives; sc wants it to fail the append so the engine
-// recopies in full, hence the strict check at the call sites.
-func appendVerify(flags []string) bool { return slices.Contains(flags, "--append-verify") }
+// transferErr fails a transfer run that rsync itself ends with exit code
+// 23 or 24 and that the library returns without an error: the server
+// reported errors for some files (it could not write, delete or read
+// them, or a failed --append-verify), or the sending side left something
+// out because it could not read it or it vanished.
+func transferErr(xferErrors, ioErrors int) error {
+	switch {
+	case xferErrors > 0:
+		return fmt.Errorf("rsync: the server reported %d error(s); not everything was done", xferErrors)
+	case ioErrors != 0:
+		return errors.New("rsync: the sending side could not read everything; not everything was sent")
+	}
+	return nil
+}
 
 // md4Cache holds the MD4 sums an rsync file list delivers in bulk. It has no
 // TTL, so every write that changes a file's body must drop its entry.

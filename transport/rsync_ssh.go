@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
 	"golang.org/x/crypto/ssh"
@@ -80,7 +81,7 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 	}
 	defer os.RemoveAll(tmpDir)
 	remote := b.abs(scope) + "/"
-	result, err := b.runRsync(ctx, "RLIST", b.client, client, remote, []string{tmpDir + "/"}, nil)
+	result, err := b.runRsync(ctx, "RLIST", b.client, client, remote, []string{tmpDir + "/"}, nil, false)
 	if err != nil {
 		return err
 	}
@@ -92,17 +93,24 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 	return nil
 }
 
-// runPooled is runRsync on a pooled connection, for data transfers.
+// runPooled is runRsync on a pooled connection, for data transfers: a run
+// rsync would end with exit code 23 or 24 fails (transferErr), and so does
+// any non-zero exit status of the remote rsync.
 func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) (*rsyncclient.Result, error) {
 	conn, release := b.pool.acquire()
 	defer release()
-	return b.runRsync(ctx, label, conn, client, remote, local, wrap)
+	return b.runRsync(ctx, label, conn, client, remote, local, wrap, true)
 }
+
+// remoteExitWait bounds the wait for the remote rsync to exit once the
+// protocol has ended.
+const remoteExitWait = 30 * time.Second
 
 // runRsync starts the remote rsync server for remote over a fresh session on
 // conn and drives client against it; wrap may decorate the stream to credit
-// progress.
-func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) (*rsyncclient.Result, error) {
+// progress. A transfer also checks the error counts and the remote exit
+// status; a listing judges the counts itself (rsyncListing.finish).
+func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.Client, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser, transfer bool) (*rsyncclient.Result, error) {
 	serverCmd := b.buildServerCmd(client.ServerCommandOptions(remote))
 	Log.Add(b.proto, DirOut, label+" "+serverCmd)
 	session, err := conn.NewSession()
@@ -119,6 +127,8 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.
 	if err != nil {
 		return nil, err
 	}
+	var stderr bytes.Buffer
+	session.Stderr = &stderr
 	if err := session.Start(serverCmd); err != nil {
 		Log.Add(b.proto, DirErr, err.Error())
 		return nil, err
@@ -128,10 +138,39 @@ func (b *RsyncSSHBackend) runRsync(ctx context.Context, label string, conn *ssh.
 		rw = wrap(rw)
 	}
 	result, err := client.Run(ctx, rw, local)
+	if err == nil && transfer {
+		err = transferErr(result.XferErrors, result.IOErrors)
+		if err == nil {
+			stdin.Close()
+			err = waitRemote(ctx, session, &stderr)
+		}
+	}
 	if err != nil {
 		Log.Add(b.proto, DirErr, err.Error())
 	}
 	return result, err
+}
+
+// waitRemote waits for the remote rsync to exit and fails unless it exits
+// with status 0: rsync counts errors there that need not reach the client.
+// stderr is read only once the session is done with it.
+func waitRemote(ctx context.Context, session *ssh.Session, stderr *bytes.Buffer) error {
+	done := make(chan error, 1)
+	go func() { done <- session.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			return nil
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+		return fmt.Errorf("rsync: the remote rsync: %w", err)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(remoteExitWait):
+		return errors.New("rsync: the remote rsync did not exit after the transfer")
+	}
 }
 
 func (b *RsyncSSHBackend) buildServerCmd(args []string) string {
@@ -186,7 +225,7 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 	if recursive {
 		remote += "/"
 	}
-	result, err := b.runRsync(ctx, "MD4", b.client, client, remote, []string{tmpDir + "/"}, nil)
+	result, err := b.runRsync(ctx, "MD4", b.client, client, remote, []string{tmpDir + "/"}, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +299,7 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(remoteDest)); err != nil {
 		return err
 	}
-	client, err := newRsyncClient([]string{"-t", "--inplace", "--partial", "-W", "-r", "-c", "--progress"},
+	client, err := newRsyncClient([]string{"-t", "-O", "--inplace", "--partial", "-W", "-r", "-c", "--progress"},
 		rsyncclient.WithSender(), rsyncclient.WithStdout(&filenameLineParser{onFile: onFile}))
 	if err != nil {
 		return err
@@ -320,11 +359,7 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	if err != nil {
 		return err
 	}
-	res, err := b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
-	if err == nil && appendVerify(extraFlags) && res.XferErrors > 0 {
-		err = fmt.Errorf("%s: %d transfer error(s)", label, res.XferErrors)
-		Log.Add(b.proto, DirErr, err.Error())
-	}
+	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(adder))
 	b.listCache.invalidateAncestors(relPath)
 	b.md4.invalidate(relPath)
 	settlePush(ctx, adder, budget, err)
