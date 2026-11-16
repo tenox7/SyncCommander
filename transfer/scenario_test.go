@@ -107,6 +107,9 @@ func splitRel(relPath string) []string {
 }
 
 // copy runs one copy; replace lists the type conflicts the user confirmed.
+// The user agreed to overwrite newer files: a fixture writes a destination
+// file just after the source's, which makes it a second newer when the two
+// writes fall on two seconds (F16).
 func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, replace ...string) *Progress {
 	t.Helper()
 	src, dst := s.lb, s.rb
@@ -116,7 +119,7 @@ func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, 
 	p := &Progress{}
 	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: s.node(t, relPath), RelPath: relPath,
 		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: replace,
-		VerifyResume: s.verifyResume})
+		VerifyResume: s.verifyResume, Newer: NewerOverwrite})
 	return p
 }
 

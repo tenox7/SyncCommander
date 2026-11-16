@@ -148,49 +148,33 @@ func (m *Model) handleOpenDlgKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // handleConfirmKey commits or drops the pending delete or copy. A both-side
-// delete asks which side: a=left, l=right, enter=both. A copy onto a folder
-// that holds more asks whether to delete that: c=keep, d=delete.
+// delete asks which side: a=left, l=right, b=both. Enter meant both: the
+// most destructive answer was on the key that opens a folder (F16). A copy
+// asks its own questions (answerCopy).
 func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	k := msg.String()
+	if m.pendingCopy != nil {
+		return m.answerCopy(k)
+	}
 	if m.confirm.choiceMode && m.pendingDelete != nil {
 		switch k {
 		case "a":
 			return m.confirmDelete(model.PresenceLeftOnly)
 		case "l":
 			return m.confirmDelete(model.PresenceRightOnly)
-		case "enter":
+		case "b":
 			return m.confirmDelete(model.PresenceBoth)
 		case "esc", "q":
 			m.cancelConfirm()
 		}
 		return nil
 	}
-	if pc := m.pendingCopy; pc != nil && pc.askMirror {
-		switch k {
-		case "c", "C":
-			return m.chooseMirror(false)
-		case "d", "D":
-			return m.chooseMirror(true)
-		case "esc", "n", "N", "q":
-			m.cancelConfirm()
-		}
-		return nil
-	}
 	switch k {
 	case "y", "Y":
-		switch {
-		case m.pendingDelete != nil:
+		if m.pendingDelete != nil {
 			return m.confirmDelete(m.pendingDelete.presence)
-		case m.pendingCopy != nil:
-			// Files not compared yet are copied only when the dialog asked.
-			return m.confirmCopy(m.pendingCopy.unknown > 0)
 		}
 		m.confirm.Close()
-	case "s", "S":
-		// Copy, but skip the files not compared yet the dialog asked about.
-		if m.pendingCopy != nil && m.pendingCopy.unknown > 0 {
-			return m.confirmCopy(false)
-		}
 	case "esc", "n", "N", "q":
 		m.cancelConfirm()
 	}

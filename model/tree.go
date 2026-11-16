@@ -946,6 +946,30 @@ func WalkCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool, visit fu
 	}
 }
 
+// OverwritesNewer says why a copy of n would put an older or smaller file
+// over the destination's: the file there is "newer", "larger", or "newer
+// and larger"; or "" (F16). A time the compare calls equal (to the second,
+// within the grace, a time-zone shift) is not newer, nor is a time a side
+// does not know.
+func OverwritesNewer(n *TreeNode, leftToRight bool, opts CompareOpts) string {
+	from, to := CopySides(leftToRight)
+	src, dst := n.Sides[from].Entry, n.Sides[to].Entry
+	if src == nil || dst == nil || src.IsDir || dst.IsDir || src.IsSpecial() || dst.IsSpecial() {
+		return ""
+	}
+	newer := !src.ModTime.IsZero() && dst.ModTime.After(src.ModTime) && cmpTime(src.ModTime, dst.ModTime, opts) == AttrDifferent
+	larger := dst.Size > src.Size
+	switch {
+	case newer && larger:
+		return "newer and larger"
+	case newer:
+		return "newer"
+	case larger:
+		return "larger"
+	}
+	return ""
+}
+
 // CollectTypeCollisions returns the destination nodes a copy of node has to
 // remove before it can write: same-name twins of another kind (file, folder,
 // link or other special) of node itself, and of every node the copy writes

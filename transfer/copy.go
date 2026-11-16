@@ -41,7 +41,25 @@ type Request struct {
 	// (no checksum yet), when the user said so (F10). Without it a folder
 	// copy leaves them out and logs how many.
 	CopyUnknown bool
+	// Newer is what the copy does with a file that is newer or larger on
+	// the destination (model.OverwritesNewer). By default it writes none:
+	// each such path fails, and the next copy asks (F16).
+	Newer NewerRule
 }
+
+// NewerRule is what a copy does with a file that is newer or larger on the
+// destination than on the source.
+type NewerRule int
+
+const (
+	// NewerRefuse writes none: the user was asked about none, so each such
+	// path fails, and the next copy asks.
+	NewerRefuse NewerRule = iota
+	// NewerKeep leaves them as they are, as the user chose.
+	NewerKeep
+	// NewerOverwrite writes them, as the user chose.
+	NewerOverwrite
+)
 
 // Result tells the caller what to rescan afterwards and which destination
 // paths changed, so their cached checksums are dropped.
@@ -59,6 +77,7 @@ type item struct {
 	src, dst *model.FileEntry
 	part     bool   // the scan listed a part file of it on the destination
 	clash    string // why the destination cannot hold it apart from another source name; "" when it can
+	newer    string // the destination's file is newer or larger, and the user was not asked: not written
 }
 
 type entry struct {
@@ -151,7 +170,7 @@ func Copy(ctx context.Context, req Request) Result {
 	if caps, err := req.Dst.Capabilities(ctx); err == nil {
 		names = caps.Names
 	}
-	collisions, files, totalBytes, leftOut := req.enumerate(names)
+	collisions, files, totalBytes, leftOut, keptNewer := req.enumerate(names)
 	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
 	p.TotalBytes.Store(totalBytes)
@@ -159,10 +178,13 @@ func Copy(ctx context.Context, req Request) Result {
 	if leftOut > 0 {
 		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY %s: left out %d files on both sides that are not compared yet", displayPath(req.RelPath), leftOut))
 	}
+	if keptNewer > 0 {
+		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY %s: left out %d files that are newer or larger on %s", displayPath(req.RelPath), keptNewer, dstSideName(req.LeftToRight)))
+	}
 
 	// One rsync session sends every file in the folder: not when some are to
 	// be left out or refused.
-	batched := isDir && req.Batch && leftOut == 0 && !slices.ContainsFunc(files, func(f item) bool { return f.clash != "" }) && c.batch(files, totalBytes)
+	batched := isDir && req.Batch && leftOut == 0 && keptNewer == 0 && !slices.ContainsFunc(files, func(f item) bool { return f.clash != "" || f.newer != "" }) && c.batch(files, totalBytes)
 	if !batched {
 		c.runParallel(files)
 	}
@@ -192,9 +214,11 @@ func Copy(ctx context.Context, req Request) Result {
 
 // enumerate snapshots everything the transfer needs from the live tree in one
 // locked pass; the transfer never touches a node again. leftOut counts the
-// files not compared yet that a folder copy leaves out (CopyUnknown). names
-// is how the destination matches names, for the clashes it would make.
-func (req Request) enumerate(names model.NameRule) (collisions []entry, files []item, totalBytes int64, leftOut int) {
+// files not compared yet that a folder copy leaves out (CopyUnknown), and
+// keptNewer the files newer or larger on the destination it leaves as they
+// are (NewerKeep). names is how the destination matches names, for the
+// clashes it would make.
+func (req Request) enumerate(names model.NameRule) (collisions []entry, files []item, totalBytes int64, leftOut, keptNewer int) {
 	src, dst := model.CopySides(req.LeftToRight)
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
@@ -219,14 +243,30 @@ func (req Request) enumerate(names model.NameRule) (collisions []entry, files []
 		parts := partsListed(dst)
 		clash := nameClashes(src, names)
 		for _, f := range nodes {
-			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f), clash: clash(f)}
+			newer := model.OverwritesNewer(f, req.LeftToRight, req.Opts)
+			switch {
+			case newer == "" || req.Newer == NewerOverwrite:
+				newer = ""
+			case req.Newer == NewerKeep:
+				keptNewer++
+				continue
+			}
+			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f), clash: clash(f), newer: newer}
 			if it.src != nil && !it.src.IsSpecial() {
 				totalBytes += it.src.Size
 			}
 			files = append(files, it)
 		}
 	})
-	return collisions, files, totalBytes, leftOut
+	return collisions, files, totalBytes, leftOut, keptNewer
+}
+
+// dstSideName is the side a copy writes to, as the panels name it.
+func dstSideName(leftToRight bool) string {
+	if leftToRight {
+		return "right"
+	}
+	return "left"
 }
 
 // nameClashes returns, for a node to copy, why the destination cannot hold
@@ -550,6 +590,13 @@ func (c *copier) copyOne(f item) {
 	if f.clash != "" {
 		p.Failed.Add(1)
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, "+f.clash)
+		return
+	}
+	// Nor over a newer or larger file the user was not asked about: the
+	// dialog counted it only when the tree held it (F16).
+	if f.newer != "" {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, it is "+f.newer+" on "+dstSideName(c.req.LeftToRight)+": copy it again to be asked")
 		return
 	}
 	// A file can be one object on both sides even when its folders are not:

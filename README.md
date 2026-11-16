@@ -42,6 +42,15 @@ choose it. When the destination folder holds files the source does not, `>`
 and `<` ask: `c` copies and keeps them, `d` copies and deletes them (a
 mirror), `Esc` cancels.
 
+A copy never puts an older or smaller file over a newer or larger one
+without asking. It names such files and asks: `y` overwrites them, `s`
+skips them and copies the rest, `Esc` cancels. One that the copy finds
+only while it runs, in a folder the scan had not listed, is not written:
+it fails, and the next copy asks.
+
+Deleting a file or folder that is on both sides asks which side: `a` left,
+`l` right, `b` both. Enter does nothing there.
+
 Mirror copy only deletes destination-only files when every copy in the run
 succeeded; a copy also lists any unscanned subtree first so nothing is skipped
 or under-deleted. Resumed (appended) copies are checksum-verified and recopied
