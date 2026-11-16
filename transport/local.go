@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -55,7 +56,16 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 			return nil, ctx.Err()
 		}
 		info, err := d.Info()
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed since ReadDir
+		}
+		if err != nil {
+			// Skipping it would make a short listing look complete: the
+			// scan would show the entry as missing and mirror delete it on
+			// the other side. Fail the folder instead.
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 		entry := model.FileEntry{

@@ -429,3 +429,35 @@ func TestScenarioMirrorKeepsNameThatIsNowOnTheSource(t *testing.T) {
 	}
 	wantTree(t, "mirror after the source changed", right, "a/", "a/late.txt", "a/x.txt")
 }
+
+// L5: a source folder whose names can be read but whose entries cannot
+// (mode r--) must not list as empty, or mirror deletes its files on the
+// other side.
+func TestScenarioUnreadableEntriesFailTheListing(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	for _, side := range []string{left, right} {
+		writeFile(t, filepath.Join(side, "d", "a.txt"), "same on both sides")
+		writeFile(t, filepath.Join(side, "d", "b.txt"), "same on both sides")
+	}
+	if err := os.Chmod(filepath.Join(left, "d"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(left, "d"), 0o755) })
+
+	if entries, err := transport.NewLocalBackend(left).List(context.Background(), "d"); err == nil {
+		t.Errorf("List of an r-- folder = %d entries and no error", len(entries))
+	}
+	s := newScenario(t, left, right)
+	if !s.node(t, "d").ListErr {
+		t.Error("the folder is not flagged as a failed listing")
+	}
+	p := s.copy(t, "d", true, true)
+	if p.Failed.Load() == 0 {
+		t.Error("a mirror copy of an unreadable folder did not fail")
+	}
+	wantTree(t, "mirror from an unreadable folder", right, "d/", "d/a.txt", "d/b.txt")
+}
