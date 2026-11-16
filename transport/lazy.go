@@ -62,7 +62,7 @@ func protoManagesLiveness(proto string) bool {
 // dialMu serializes dial attempts so parallel callers share one, while mu
 // only guards the pointer: Close never waits behind a dial.
 type lazyBackend struct {
-	factory  func() (model.Backend, error)
+	factory  func(context.Context) (model.Backend, error)
 	display  string
 	proto    string
 	mu       sync.Mutex
@@ -72,7 +72,10 @@ type lazyBackend struct {
 	dialMu   sync.Mutex
 }
 
-func NewLazyBackend(display string, factory func() (model.Backend, error)) model.Backend {
+// NewLazyBackend connects through factory on first use. The factory gets
+// the ctx of the call that dials, which bounds the connect: a cancel stops
+// a dial that hangs, as on an ssh -L forward whose far end is dead.
+func NewLazyBackend(display string, factory func(context.Context) (model.Backend, error)) model.Backend {
 	proto := "remote"
 	if idx := strings.Index(display, "://"); idx > 0 {
 		proto = display[:idx]
@@ -98,7 +101,7 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		return inner, nil
 	}
 	Log.Add(b.proto, DirOut, "connecting to "+b.display)
-	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, b.factory)
+	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, func() (model.Backend, error) { return b.factory(ctx) })
 	if err != nil {
 		Log.Add(b.proto, DirErr, b.display+": "+err.Error())
 		return nil, err

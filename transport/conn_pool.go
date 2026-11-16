@@ -1,6 +1,9 @@
 package transport
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // connPool is a lazy connection pool for backends whose transport handles one
 // transfer at a time (ssh sessions, sftp clients, ftp control connections).
@@ -16,7 +19,7 @@ import "sync"
 type connPool[T any] struct {
 	primary   T
 	idle      []T // released extras, oldest first
-	dial      func() (T, error)
+	dial      func(context.Context) (T, error)
 	closeFn   func(T)
 	mu        sync.Mutex
 	size      int // extras alive: idle, lent out or being dialed
@@ -24,14 +27,15 @@ type connPool[T any] struct {
 	closed    bool
 }
 
-func newConnPool[T any](primary T, maxExtras int, dial func() (T, error), closeFn func(T)) *connPool[T] {
+func newConnPool[T any](primary T, maxExtras int, dial func(context.Context) (T, error), closeFn func(T)) *connPool[T] {
 	return &connPool[T]{primary: primary, dial: dial, closeFn: closeFn, maxExtras: max(maxExtras, 0)}
 }
 
 // acquire returns a connection and a release function. The release MUST be
 // called exactly once. Returns primary (with a no-op release) when the
-// pool is full, dial fails, or the pool has been closed.
-func (p *connPool[T]) acquire() (T, func()) {
+// pool is full, dial fails, or the pool has been closed. ctx bounds a dial
+// of a new extra.
+func (p *connPool[T]) acquire(ctx context.Context) (T, func()) {
 	if p == nil {
 		var zero T
 		return zero, func() {}
@@ -48,7 +52,7 @@ func (p *connPool[T]) acquire() (T, func()) {
 	if p.size < p.maxExtras {
 		p.size++
 		p.mu.Unlock()
-		c, err := p.dial()
+		c, err := p.dial(ctx)
 		if err != nil {
 			p.mu.Lock()
 			p.size--

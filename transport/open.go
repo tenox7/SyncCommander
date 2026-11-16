@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -14,7 +15,8 @@ import (
 
 const fakeScheme = "fake://"
 
-type opener func(arg string, insecure bool, parallel int) (model.Backend, error)
+// An opener connects; ctx bounds the connect, the backend outlives it.
+type opener func(ctx context.Context, arg string, insecure bool, parallel int) (model.Backend, error)
 
 // schemes maps URL prefixes to constructors; IsRemote and OpenBackend both
 // read it, so a new protocol is one line here.
@@ -38,14 +40,30 @@ var schemes = []struct {
 	{fakeScheme, openFake},
 }
 
-func openSFTP(a string, i bool, p int) (model.Backend, error)     { return NewSFTPBackend(a, i, p) }
-func openFTP(a string, i bool, p int) (model.Backend, error)      { return NewFTPBackend(a, i, p) }
-func openRsyncSSH(a string, i bool, p int) (model.Backend, error) { return NewRsyncSSHBackend(a, i, p) }
-func openRsync(a string, _ bool, _ int) (model.Backend, error)    { return NewRsyncBackend(a) }
-func openWebDAV(a string, i bool, p int) (model.Backend, error)   { return NewWebDAVBackend(a, i, p) }
-func openRestic(a string, i bool, p int) (model.Backend, error)   { return NewResticBackend(a, i, p) }
-func openRclone(a string, i bool, _ int) (model.Backend, error)   { return NewRcloneBackend(a, i) }
-func openFake(a string, _ bool, _ int) (model.Backend, error)     { return NewFakeBackend(a) }
+func openSFTP(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return dialSFTPBackend(ctx, a, i, p)
+}
+func openFTP(_ context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewFTPBackend(a, i, p)
+}
+func openRsyncSSH(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return dialRsyncSSHBackend(ctx, a, i, p)
+}
+func openRsync(_ context.Context, a string, _ bool, _ int) (model.Backend, error) {
+	return NewRsyncBackend(a)
+}
+func openWebDAV(_ context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewWebDAVBackend(a, i, p)
+}
+func openRestic(_ context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewResticBackend(a, i, p)
+}
+func openRclone(_ context.Context, a string, i bool, _ int) (model.Backend, error) {
+	return NewRcloneBackend(a, i)
+}
+func openFake(_ context.Context, a string, _ bool, _ int) (model.Backend, error) {
+	return NewFakeBackend(a)
+}
 
 func lookupScheme(arg string) opener {
 	for _, s := range schemes {
@@ -88,8 +106,12 @@ func MaskURLPassword(rawURL string) string {
 // OpenBackend connects synchronously; anything without a known scheme is a
 // local directory.
 func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error) {
+	return openBackend(context.Background(), arg, insecure, parallel)
+}
+
+func openBackend(ctx context.Context, arg string, insecure bool, parallel int) (model.Backend, error) {
 	if open := lookupScheme(arg); open != nil {
-		return open(arg, insecure, parallel)
+		return open(ctx, arg, insecure, parallel)
 	}
 	return NewLocalBackend(arg), nil
 }
@@ -99,8 +121,8 @@ func OpenBackend(arg string, insecure bool, parallel int) (model.Backend, error)
 // shell-and-cat SCPBackend. Used for ssh:// and scp:// URLs; sftp:// always
 // goes straight to SFTP without a fallback. parallel sizes the lazy
 // connection pool used for parallel transfers (1 = no extras).
-func openSSHBackend(rawURL string, insecure bool, parallel int) (model.Backend, error) {
-	conn, err := dialSSH(rawURL, insecure)
+func openSSHBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (model.Backend, error) {
+	conn, err := dialSSH(ctx, rawURL, insecure)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +176,8 @@ func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, err
 		}
 		return NewLocalBackend(arg), nil
 	}
-	return NewLazyBackend(MaskURLPassword(arg), func() (model.Backend, error) {
-		return OpenBackend(arg, insecure, parallel)
+	return NewLazyBackend(MaskURLPassword(arg), func(ctx context.Context) (model.Backend, error) {
+		return openBackend(ctx, arg, insecure, parallel)
 	}), nil
 }
 

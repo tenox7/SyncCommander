@@ -55,7 +55,12 @@ type SFTPBackend struct {
 }
 
 func NewSFTPBackend(rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
-	conn, err := dialSSH(rawURL, insecure)
+	return dialSFTPBackend(context.Background(), rawURL, insecure, parallel)
+}
+
+// dialSFTPBackend is NewSFTPBackend with ctx bounding the connect.
+func dialSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
+	conn, err := dialSSH(ctx, rawURL, insecure)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +85,8 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 		return nil, fmt.Errorf("sftp: %w", err)
 	}
 	b.display = sshDisplayURL(conn, b.base)
-	dial := func() (*sftpConn, error) {
-		c, err := dialSSH(rawURL, insecure)
+	dial := func(ctx context.Context) (*sftpConn, error) {
+		c, err := dialSSH(ctx, rawURL, insecure)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +174,7 @@ func (b *SFTPBackend) write(ctx context.Context, fullPath string, flags int, off
 	if err := b.sftp.MkdirAll(path.Dir(fullPath)); err != nil {
 		return err
 	}
-	conn, release := b.pool.acquire()
+	conn, release := b.pool.acquire(ctx)
 	defer release()
 	f, err := conn.sftp.OpenFile(fullPath, flags)
 	if err != nil {
@@ -222,16 +227,16 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 	return err
 }
 
-func (b *SFTPBackend) Open(_ context.Context, relPath string) (io.ReadCloser, error) {
-	return b.openAt(relPath, 0)
+func (b *SFTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
+	return b.openAt(ctx, relPath, 0)
 }
 
-func (b *SFTPBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	return b.openAt(relPath, offset)
+func (b *SFTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	return b.openAt(ctx, relPath, offset)
 }
 
-func (b *SFTPBackend) openAt(relPath string, offset int64) (io.ReadCloser, error) {
-	conn, release := b.pool.acquire()
+func (b *SFTPBackend) openAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	conn, release := b.pool.acquire(ctx)
 	rc, err := conn.sftp.Open(b.abs(relPath))
 	if err == nil && offset > 0 {
 		if _, err = rc.Seek(offset, io.SeekStart); err != nil {

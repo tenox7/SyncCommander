@@ -237,7 +237,7 @@ func TestScenarioSameFileInDifferentFolders(t *testing.T) {
 
 // L1: one remote URL on both sides is one object store.
 func TestSameObjectRemoteLocation(t *testing.T) {
-	open := func() (model.Backend, error) { return nil, errors.New("not dialed in this test") }
+	open := func(context.Context) (model.Backend, error) { return nil, errors.New("not dialed in this test") }
 	a := transport.NewLazyBackend("sftp://u:xxxxx@host/data", open)
 	b := transport.NewLazyBackend("sftp://u:xxxxx@host/data/", open)
 	c := transport.NewLazyBackend("sftp://u:xxxxx@host/other", open)

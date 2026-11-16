@@ -48,7 +48,7 @@ func (s *copyStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.Fil
 }
 
 func newLazyFor(inner model.Backend) model.Backend {
-	return NewLazyBackend("stub://host/path", func() (model.Backend, error) { return inner, nil })
+	return NewLazyBackend("stub://host/path", func(context.Context) (model.Backend, error) { return inner, nil })
 }
 
 // A failure before anything was read off src is safe to retry: the connection

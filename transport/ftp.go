@@ -166,7 +166,7 @@ func NewFTPBackend(rawURL string, insecure bool, parallel int) (*FTPBackend, err
 	// is at capacity acquireExtra returns false and the caller serializes on
 	// the primary conn under b.mu. maxExtras=0 (parallel<=1) means every
 	// transfer takes the primary path.
-	dial := func() (*ftpConn, error) {
+	dial := func(context.Context) (*ftpConn, error) {
 		c, raw, derr := dialFTPConn(addr, scheme, user, pass, tlsCfg, nil)
 		if derr != nil {
 			return nil, derr
@@ -210,7 +210,7 @@ func (b *FTPBackend) Close() error {
 // uses the primary), so a long-idle extra may have been dropped by the
 // server; probe with NoOp and redial before handing it out.
 func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) {
-	c, poolRelease := b.pool.acquire()
+	c, poolRelease := b.pool.acquire(ctx)
 	if c == nil {
 		poolRelease()
 		return nil, nil, false

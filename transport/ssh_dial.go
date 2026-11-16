@@ -72,7 +72,16 @@ type sshConn struct {
 	basePath string
 }
 
-func dialSSH(rawURL string, insecure bool) (*sshConn, error) {
+// sshHandshakeTimeout bounds the ssh handshake (version exchange, key
+// exchange, login) after the TCP connect. ClientConfig.Timeout covers only
+// ssh.Dial's own connect, and sc dials itself: an ssh -L forward whose far
+// end is dead accepts the TCP connection and then never answers, and the
+// dial hung for good, holding the pane's dial lock. A var for tests.
+var sshHandshakeTimeout = 30 * time.Second
+
+// dialSSH connects and logs in. ctx bounds the connect and the handshake
+// only; the connection outlives it.
+func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error) {
 	scheme, user, pass, alias, port, remotePath := parseRemoteURL(rawURL)
 	host := alias
 
@@ -143,10 +152,12 @@ func dialSSH(rawURL string, insecure bool) (*sshConn, error) {
 
 	addr := net.JoinHostPort(host, port)
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	rawConn, err := dialer.DialContext(context.Background(), "tcp", addr)
+	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %v", addr, err)
 	}
+	rawConn.SetDeadline(time.Now().Add(sshHandshakeTimeout))
+	stopWatch := context.AfterFunc(ctx, func() { rawConn.Close() })
 	tracked := &trackedConn{Conn: LimitConn(rawConn)}
 	tracked.touch()
 	cfg := &ssh.ClientConfig{
@@ -156,10 +167,18 @@ func dialSSH(rawURL string, insecure bool) (*sshConn, error) {
 		Timeout:         10 * time.Second,
 	}
 	c, chans, reqs, err := ssh.NewClientConn(tracked, addr, cfg)
+	if !stopWatch() && err == nil {
+		c.Close() // ctx ended as the handshake finished: the watcher closed it
+		err = ctx.Err()
+	}
 	if err != nil {
 		rawConn.Close()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		return nil, fmt.Errorf("ssh handshake %s: %v", addr, hostKeyHint(err))
 	}
+	rawConn.SetDeadline(time.Time{})
 	client := ssh.NewClient(c, chans, reqs)
 	go sshKeepalive(client, tracked, scheme)
 

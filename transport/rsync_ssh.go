@@ -26,7 +26,12 @@ type RsyncSSHBackend struct {
 // NewRsyncSSHBackend dials rawURL; up to parallel-1 extra connections are
 // dialed lazily so parallel transfers do not share one TCP stream.
 func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
-	conn, err := dialSSH(rawURL, insecure)
+	return dialRsyncSSHBackend(context.Background(), rawURL, insecure, parallel)
+}
+
+// dialRsyncSSHBackend is NewRsyncSSHBackend with ctx bounding the connect.
+func dialRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, parallel int) (*RsyncSSHBackend, error) {
+	conn, err := dialSSH(ctx, rawURL, insecure)
 	if err != nil {
 		return nil, err
 	}
@@ -40,8 +45,8 @@ func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBa
 		return nil, errors.New("rsync+ssh: remote rsync not found")
 	}
 	b.display = sshDisplayURL(conn, b.base)
-	dial := func() (*ssh.Client, error) {
-		c, err := dialSSH(rawURL, insecure)
+	dial := func(ctx context.Context) (*ssh.Client, error) {
+		c, err := dialSSH(ctx, rawURL, insecure)
 		if err != nil {
 			return nil, err
 		}
@@ -100,7 +105,7 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 // rsync would end with exit code 23 or 24 fails (transferErr), and so does
 // any non-zero exit status of the remote rsync.
 func (b *RsyncSSHBackend) runPooled(ctx context.Context, label string, client *rsyncclient.Client, remote string, local []string, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) (*rsyncclient.Result, error) {
-	conn, release := b.pool.acquire()
+	conn, release := b.pool.acquire(ctx)
 	defer release()
 	return b.runRsync(ctx, label, conn, client, remote, local, wrap, true)
 }
@@ -274,7 +279,7 @@ func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadClos
 }
 
 func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	conn, release := b.pool.acquire()
+	conn, release := b.pool.acquire(ctx)
 	return b.stream(ctx, conn, b.tailCmd(relPath, offset), release)
 }
 

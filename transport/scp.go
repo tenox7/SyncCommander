@@ -30,8 +30,8 @@ func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*
 	}
 	b.base = base
 	b.display = sshDisplayURL(conn, b.base)
-	dial := func() (*ssh.Client, error) {
-		c, err := dialSSH(rawURL, insecure)
+	dial := func(ctx context.Context) (*ssh.Client, error) {
+		c, err := dialSSH(ctx, rawURL, insecure)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +64,7 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(path.Dir(fullPath))); err != nil {
 		return err
 	}
-	client, release := b.pool.acquire()
+	client, release := b.pool.acquire(ctx)
 	defer release()
 	err := b.exec(ctx, client, fmt.Sprintf("cat > %s && chmod %04o %s", shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)), src, nil)
 	b.listCache.invalidateAncestors(relPath)
@@ -81,7 +81,7 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 		return err
 	}
 	defer rd.Close()
-	client, release := b.pool.acquire()
+	client, release := b.pool.acquire(ctx)
 	defer release()
 	cmd := fmt.Sprintf("%s && cat >> %s && chmod %04o %s", truncateCmd(fullPath, offset), shellQuote(fullPath), mode.Perm(), shellQuote(fullPath))
 	err = b.exec(ctx, client, cmd, rd, nil)
@@ -90,11 +90,11 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 }
 
 func (b *SCPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	client, release := b.pool.acquire()
+	client, release := b.pool.acquire(ctx)
 	return b.stream(ctx, client, "cat "+shellQuote(b.abs(relPath)), release)
 }
 
 func (b *SCPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	client, release := b.pool.acquire()
+	client, release := b.pool.acquire(ctx)
 	return b.stream(ctx, client, b.tailCmd(relPath, offset), release)
 }

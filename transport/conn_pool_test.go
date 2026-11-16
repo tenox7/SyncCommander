@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,26 +14,26 @@ import (
 func TestConnPoolNilPrimaryFallback(t *testing.T) {
 	var dialed int64
 	type fakeConn struct{ id int64 }
-	dial := func() (*fakeConn, error) {
+	dial := func(context.Context) (*fakeConn, error) {
 		return &fakeConn{id: atomic.AddInt64(&dialed, 1)}, nil
 	}
 	var closed int64
 	p := newConnPool[*fakeConn](nil, 2, dial, func(*fakeConn) { atomic.AddInt64(&closed, 1) })
 
-	c1, r1 := p.acquire()
-	c2, _ := p.acquire()
+	c1, r1 := p.acquire(context.Background())
+	c2, _ := p.acquire(context.Background())
 	if c1 == nil || c2 == nil {
 		t.Fatal("first two acquires should dial extras")
 	}
 
-	c3, r3 := p.acquire()
+	c3, r3 := p.acquire(context.Background())
 	if c3 != nil {
 		t.Fatalf("acquire at capacity must return nil primary, got %v", c3)
 	}
 	r3() // primary release is a no-op; must not panic
 
 	r1()
-	if c4, _ := p.acquire(); c4 == nil {
+	if c4, _ := p.acquire(context.Background()); c4 == nil {
 		t.Fatal("after release a pooled extra should be reusable")
 	}
 	if got := atomic.LoadInt64(&dialed); got != 2 {
@@ -41,10 +42,10 @@ func TestConnPoolNilPrimaryFallback(t *testing.T) {
 }
 
 func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
-	dial := func() (*int, error) { v := 0; return &v, nil }
+	dial := func(context.Context) (*int, error) { v := 0; return &v, nil }
 	p := newConnPool[*int](nil, 0, dial, func(*int) {})
 	for i := 0; i < 3; i++ {
-		c, r := p.acquire()
+		c, r := p.acquire(context.Background())
 		if c != nil {
 			t.Fatal("maxExtras=0 (parallel=1) must always return nil primary")
 		}
@@ -56,16 +57,16 @@ func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
 // lowering leaves busy extras alone and closes them as they come back.
 func TestConnPoolResizeWhileInUse(t *testing.T) {
 	var dialed, closed atomic.Int64
-	dial := func() (*int64, error) { n := dialed.Add(1); return &n, nil }
+	dial := func(context.Context) (*int64, error) { n := dialed.Add(1); return &n, nil }
 	p := newConnPool[*int64](nil, 1, dial, func(*int64) { closed.Add(1) })
 
-	c1, r1 := p.acquire()
-	if c, _ := p.acquire(); c1 == nil || c != nil {
+	c1, r1 := p.acquire(context.Background())
+	if c, _ := p.acquire(context.Background()); c1 == nil || c != nil {
 		t.Fatal("with one extra the second acquire must fall back to primary")
 	}
 	p.resize(3)
-	c2, r2 := p.acquire()
-	c3, r3 := p.acquire()
+	c2, r2 := p.acquire(context.Background())
+	c3, r3 := p.acquire(context.Background())
 	if c2 == nil || c3 == nil {
 		t.Fatal("raising the limit must let the next acquires dial")
 	}
@@ -83,7 +84,7 @@ func TestConnPoolResizeWhileInUse(t *testing.T) {
 	if got := closed.Load(); got != 2 {
 		t.Fatalf("the extra within the limit should stay pooled, %d closed", got)
 	}
-	if c, _ := p.acquire(); c != c3 {
+	if c, _ := p.acquire(context.Background()); c != c3 {
 		t.Fatal("the extra kept after lowering the limit should be reused")
 	}
 	if got := dialed.Load(); got != 3 {
@@ -95,11 +96,11 @@ func TestConnPoolResizeWhileInUse(t *testing.T) {
 // than keeping it until the backend closes.
 func TestConnPoolShrinkClosesIdleExtras(t *testing.T) {
 	var closed atomic.Int64
-	dial := func() (*int, error) { v := 0; return &v, nil }
+	dial := func(context.Context) (*int, error) { v := 0; return &v, nil }
 	p := newConnPool[*int](nil, 3, dial, func(*int) { closed.Add(1) })
 	var releases []func()
 	for range 3 {
-		_, r := p.acquire()
+		_, r := p.acquire(context.Background())
 		releases = append(releases, r)
 	}
 	for _, r := range releases {

@@ -20,7 +20,7 @@ func (s *parallelStub) SetParallel(n int) { s.n = n }
 // a redial must come back with the value the user picked.
 func TestLazySetParallelSurvivesRedial(t *testing.T) {
 	var dials []*parallelStub
-	b := NewLazyBackend("stub://host/path", func() (model.Backend, error) {
+	b := NewLazyBackend("stub://host/path", func(context.Context) (model.Backend, error) {
 		s := &parallelStub{n: 4} // what OpenBackend(…, parallel=4) builds
 		dials = append(dials, s)
 		return s, nil
