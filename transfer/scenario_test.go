@@ -64,13 +64,19 @@ type scenario struct {
 
 func newScenario(t *testing.T, left, right string) *scenario {
 	t.Helper()
+	return newScenarioDepth(t, left, right, true)
+}
+
+// newScenarioDepth scans deep, or only the top level as -deep-scan=false does.
+func newScenarioDepth(t *testing.T, left, right string, deep bool) *scenario {
+	t.Helper()
 	for _, d := range []string{left, right} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s := &scenario{left: left, right: right, lb: transport.NewLocalBackend(left), rb: transport.NewLocalBackend(right)}
-	s.sc = model.NewScanner(s.lb, s.rb, 1, 1, true)
+	s.sc = model.NewScanner(s.lb, s.rb, 1, 1, deep)
 	s.sc.Scan(context.Background(), scenarioOpts)
 	return s
 }
@@ -98,7 +104,8 @@ func splitRel(relPath string) []string {
 	return parts
 }
 
-func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool) *Progress {
+// copy runs one copy; replace lists the type conflicts the user confirmed.
+func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, replace ...string) *Progress {
 	t.Helper()
 	src, dst := s.lb, s.rb
 	if !leftToRight {
@@ -106,7 +113,7 @@ func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool) 
 	}
 	p := &Progress{}
 	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: s.node(t, relPath), RelPath: relPath,
-		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p})
+		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: replace})
 	return p
 }
 
@@ -239,4 +246,96 @@ func TestSameObjectRemoteLocation(t *testing.T) {
 	if sameObject(a, c, "f.txt") {
 		t.Error("two different URLs are seen as one object")
 	}
+}
+
+// F2: copying one file removes only that file's own type conflict, never an
+// unrelated folder next to it.
+func TestScenarioCopyFileLeavesSiblingConflictAlone(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "a.txt"), "the file the user copies")
+	writeFile(t, filepath.Join(left, "notes"), "on the source 'notes' is a file")
+	writeFile(t, filepath.Join(right, "notes", "2024.txt"), "on the destination 'notes' is a folder")
+	writeFile(t, filepath.Join(right, "notes", "2025.txt"), "more data")
+	s := newScenario(t, left, right)
+
+	if got := model.CollectTypeCollisions(s.node(t, "a.txt"), true); len(got) != 0 {
+		t.Errorf("CollectTypeCollisions(a.txt) = %d nodes, want none", len(got))
+	}
+	if p := s.copy(t, "a.txt", true, false); p.Failed.Load() != 0 {
+		t.Errorf("copy a.txt: failed=%d", p.Failed.Load())
+	}
+	wantTree(t, "copy of a.txt only", right, "a.txt", "notes/", "notes/2024.txt", "notes/2025.txt")
+}
+
+// F2: replacing a folder with a file needs the confirmed path; without it the
+// folder stays and the copy fails.
+func TestScenarioReplaceFolderWithFileNeedsConfirmation(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "notes"), "a file now")
+	writeFile(t, filepath.Join(right, "notes", "2024.txt"), "was a folder")
+	s := newScenario(t, left, right)
+	var file *model.TreeNode
+	for _, c := range s.sc.Tree().Children {
+		if c.Name == "notes" && !c.IsDir {
+			file = c
+		}
+	}
+	if got := model.CollectTypeCollisions(file, true); len(got) != 1 || got[0].RelPath != "notes" || !got[0].IsDir {
+		t.Fatalf("CollectTypeCollisions(notes) = %v, want the folder notes/", got)
+	}
+
+	p := &Progress{}
+	Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: file, RelPath: "notes",
+		LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p})
+	if p.Failed.Load() != 1 {
+		t.Errorf("unconfirmed replace: failed=%d, want 1", p.Failed.Load())
+	}
+	wantTree(t, "unconfirmed replace", right, "notes/", "notes/2024.txt")
+
+	p = &Progress{}
+	Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: file, RelPath: "notes",
+		LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: []string{"notes"}})
+	if p.Failed.Load() != 0 {
+		t.Errorf("confirmed replace: failed=%d, want 0", p.Failed.Load())
+	}
+	wantTree(t, "confirmed replace", right, "notes")
+	if got := readFile(t, filepath.Join(right, "notes")); got != "a file now" {
+		t.Errorf("notes = %q after the confirmed replace", got)
+	}
+}
+
+// F2: a file on the destination in the way of a source folder is replaced
+// when confirmed, and the folder's files land under it.
+func TestScenarioReplaceFileWithFolder(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "x", "a.txt"), "one")
+	writeFile(t, filepath.Join(left, "x", "b.txt"), "two")
+	writeFile(t, filepath.Join(right, "x"), "a file in the way")
+	s := newScenario(t, left, right)
+	if p := s.copy(t, "", true, false, "x"); p.Failed.Load() != 0 {
+		t.Errorf("confirmed replace of file x: failed=%d", p.Failed.Load())
+	}
+	wantTree(t, "file x replaced by folder x/", right, "x/", "x/a.txt", "x/b.txt")
+}
+
+// U3: a conflict the copy only finds after listing an unlisted subtree was
+// never in a dialog, so it must not be removed.
+func TestScenarioUnconfirmedConflictFoundAfterListing(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "A", "y"), "a file on the source")
+	writeFile(t, filepath.Join(left, "A", "z.txt"), "copied")
+	writeFile(t, filepath.Join(right, "A", "y", "keep.txt"), "a folder with data on the destination")
+	s := newScenarioDepth(t, left, right, false)
+	if model.UnlistedDir(s.node(t, "A")) == nil {
+		t.Fatal("A should be unlisted after a shallow scan")
+	}
+	p := s.copy(t, "A", true, false)
+	if p.Failed.Load() != 1 {
+		t.Errorf("failed=%d, want 1 (the file y)", p.Failed.Load())
+	}
+	wantTree(t, "copy of A without a dialog", right, "A/", "A/y/", "A/y/keep.txt", "A/z.txt")
 }

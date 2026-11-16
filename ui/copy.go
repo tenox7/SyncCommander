@@ -20,6 +20,7 @@ type copyDoneMsg struct {
 type pendingCopyInfo struct {
 	node        *model.TreeNode
 	leftToRight bool
+	replace     []string // the type conflicts the dialog showed
 }
 
 // startCopy copies the cursor node in the given direction, asking first when
@@ -34,12 +35,12 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	if node == nil || m.presence(node) == blocked {
 		return nil
 	}
-	if lines, ok := m.copyConfirmLines(node, leftToRight); ok {
-		m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight}
+	if lines, replace, ok := m.copyConfirmLines(node, leftToRight); ok {
+		m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight, replace: replace}
 		m.confirm.Open(title, lines, true)
 		return nil
 	}
-	return m.runCopy(node, leftToRight, false)
+	return m.runCopy(node, leftToRight, false, nil)
 }
 
 // confirmCopy runs the copy the user just confirmed, mirror deletes included.
@@ -47,13 +48,15 @@ func (m *Model) confirmCopy() tea.Cmd {
 	pc := m.pendingCopy
 	m.pendingCopy = nil
 	m.confirm.Close()
-	return m.runCopy(pc.node, pc.leftToRight, true)
+	return m.runCopy(pc.node, pc.leftToRight, true, pc.replace)
 }
 
-func (m *Model) runCopy(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd {
+// runCopy starts the copy. replace names the type conflicts the user agreed
+// to replace; the copy leaves every other one alone.
+func (m *Model) runCopy(node *model.TreeNode, leftToRight, mirror bool, replace []string) tea.Cmd {
 	m.copying = true
 	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
-	return tea.Batch(m.copyNode(node, leftToRight, mirror), m.ensureTick())
+	return tea.Batch(m.copyNode(node, leftToRight, mirror, replace), m.ensureTick())
 }
 
 func (m *Model) finishCopy(msg copyDoneMsg) tea.Cmd {
@@ -136,7 +139,7 @@ func (m *Model) setCopyParallel(n int) {
 
 // copyNode hands the transfer engine a snapshot of what it needs and reports
 // back with the rescan root and the changed paths.
-func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd {
+func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool, replace []string) tea.Cmd {
 	var relPath string
 	m.readTree(func(*model.TreeNode) { relPath = node.RelPath })
 	src, dst := m.left, m.right
@@ -150,6 +153,7 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool) tea.Cmd
 		Src: src, Dst: dst, Scanner: m.scanner, Node: node, RelPath: relPath,
 		LeftToRight: leftToRight, Mirror: mirror, Opts: *m.cmpOpts, Parallel: parallel,
 		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
+		Replace: replace,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = transport.ContextWithFatalCancel(ctx, cancel)
@@ -171,38 +175,50 @@ func (m *Model) presence(node *model.TreeNode) model.Presence {
 
 // copyConfirmLines counts collisions and mirror deletes across the subtree, so
 // it runs the free function of the same name under the read lock.
-func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool) ([]string, bool) {
-	var lines []string
-	var ok bool
-	m.readTree(func(*model.TreeNode) { lines, ok = copyConfirmLines(node, leftToRight) })
-	return lines, ok
+func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []string, ok bool) {
+	m.readTree(func(*model.TreeNode) { lines, replace, ok = copyConfirmLines(node, leftToRight) })
+	return lines, replace, ok
 }
 
-// copyConfirmLines builds the destructive-copy confirmation body, or reports
-// false when the copy destroys nothing and needs no confirmation. Counts come
-// from the in-memory tree: an unlisted dir reads as empty, so the totals are a
-// lower bound until the copy itself lists the subtree — say so rather than
-// quote a number the delete pass will exceed.
-func copyConfirmLines(node *model.TreeNode, leftToRight bool) ([]string, bool) {
+// maxConfirmPaths caps how many paths a confirm dialog lists by name.
+const maxConfirmPaths = 5
+
+// copyConfirmLines builds the destructive-copy confirmation body and the
+// destination paths of the type conflicts it names, or reports false when the
+// copy destroys nothing and needs no confirmation. Counts come from the
+// in-memory tree: an unlisted dir reads as empty, so the totals are a lower
+// bound until the copy itself lists the subtree — say so rather than quote a
+// number the delete pass will exceed. A conflict the copy only finds then is
+// not replaced: its path fails and the next copy asks.
+func copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []string, ok bool) {
 	side := "right"
 	if !leftToRight {
 		side = "left"
 	}
-	collisions := len(model.CollectTypeCollisions(node, leftToRight))
+	collisions := model.CollectTypeCollisions(node, leftToRight)
 	var delFiles, delDirs int
 	if node.IsDir {
 		delFiles, delDirs = model.CountMirrorDeletes(node, leftToRight)
 	}
-	if collisions == 0 && delFiles == 0 && delDirs == 0 {
-		return nil, false
+	if len(collisions) == 0 && delFiles == 0 && delDirs == 0 {
+		return nil, nil, false
 	}
 	name := node.Name
 	if node.IsDir {
 		name += "/"
 	}
-	lines := []string{"", name}
-	if collisions > 0 {
-		lines = append(lines, fmt.Sprintf("Will replace %d type conflicts (file↔dir) on %s", collisions, side))
+	lines = []string{"", name}
+	if len(collisions) > 0 {
+		lines = append(lines, fmt.Sprintf("Will delete on %s, to put the other type there:", side))
+		for i, c := range collisions {
+			replace = append(replace, c.RelPath)
+			if i < maxConfirmPaths {
+				lines = append(lines, "  "+describeTwin(c))
+			}
+		}
+		if n := len(collisions) - maxConfirmPaths; n > 0 {
+			lines = append(lines, fmt.Sprintf("  ... and %d more", n))
+		}
 	}
 	if delFiles > 0 || delDirs > 0 {
 		lines = append(lines, fmt.Sprintf("Will also delete %d files, %d folders", delFiles, delDirs), "that only exist on "+side)
@@ -210,5 +226,13 @@ func copyConfirmLines(node *model.TreeNode, leftToRight bool) ([]string, bool) {
 	if model.UnlistedDir(node) != nil {
 		lines = append(lines, "", "⚠ subtree not fully scanned - actual counts may be higher")
 	}
-	return lines, true
+	return lines, replace, true
+}
+
+// describeTwin names a destination entry a copy replaces with the other type.
+func describeTwin(n *model.TreeNode) string {
+	if !n.IsDir {
+		return n.RelPath + "  (file)"
+	}
+	return n.RelPath + "/  (folder: " + describeSubtree(n) + ")"
 }

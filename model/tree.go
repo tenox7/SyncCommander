@@ -867,53 +867,62 @@ func collectCopyFilesRec(node *TreeNode, opts *CompareOpts, leftToRight bool, re
 	}
 }
 
-// CollectTypeCollisions returns dst-side nodes that have a same-name twin on the
-// src side with the opposite type (file vs directory). These twins must be
-// removed on dst before a copy can succeed. Walks the input node's subtree and
-// also checks the input node's own siblings (so single-file copies work).
+// CollectTypeCollisions returns the destination nodes a copy of node has to
+// remove before it can write: same-name twins of the opposite type (file vs
+// folder) of node itself, and of every node the copy writes inside it. Twins
+// of node's siblings belong to other copies and are never returned.
 func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 	var result []*TreeNode
-	seen := make(map[*TreeNode]bool)
-	if node.Parent != nil {
-		findTwinPairs(node.Parent.Children, leftToRight, seen, &result)
+	src, dst := CopySides(leftToRight)
+	if node.Parent != nil && node.Sides[src].Entry != nil {
+		for _, sib := range node.Parent.Children {
+			if sib != node && sib.Name == node.Name && sib.IsDir != node.IsDir && sib.Sides[dst].Entry != nil {
+				result = append(result, sib)
+			}
+		}
 	}
-	collectTypeCollisionsRec(node, leftToRight, seen, &result)
+	if node.dirOn(src) {
+		collectTypeCollisionsRec(node, leftToRight, &result)
+	}
 	return result
 }
 
-func findTwinPairs(children []*TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
+// findTwinPairs appends each child that is on the destination side only and
+// has a same-name twin of the other type on the source side.
+func findTwinPairs(children []*TreeNode, leftToRight bool, result *[]*TreeNode) {
 	src, dst := CopySides(leftToRight)
-	byName := make(map[string][]*TreeNode)
+	var dirs map[string]*TreeNode
 	for _, c := range children {
-		byName[c.Name] = append(byName[c.Name], c)
+		if c.IsDir {
+			if dirs == nil {
+				dirs = make(map[string]*TreeNode)
+			}
+			dirs[c.Name] = c
+		}
 	}
-	for _, group := range byName {
-		if len(group) < 2 {
+	if dirs == nil {
+		return
+	}
+	for _, f := range children {
+		d := dirs[f.Name]
+		if f.IsDir || d == nil {
 			continue
 		}
-		for _, a := range group {
-			if a.Sides[src].Entry == nil {
-				continue
-			}
-			for _, b := range group {
-				if a == b || a.IsDir == b.IsDir {
-					continue
-				}
-				if b.Sides[dst].Entry == nil || seen[b] {
-					continue
-				}
-				seen[b] = true
-				*result = append(*result, b)
-			}
+		switch {
+		case f.Sides[src].Entry != nil && d.Sides[dst].Entry != nil:
+			*result = append(*result, d)
+		case d.Sides[src].Entry != nil && f.Sides[dst].Entry != nil:
+			*result = append(*result, f)
 		}
 	}
 }
 
-func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, seen map[*TreeNode]bool, result *[]*TreeNode) {
-	findTwinPairs(node.Children, leftToRight, seen, result)
+func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, result *[]*TreeNode) {
+	src, _ := CopySides(leftToRight)
+	findTwinPairs(node.Children, leftToRight, result)
 	for _, child := range node.Children {
-		if child.IsDir {
-			collectTypeCollisionsRec(child, leftToRight, seen, result)
+		if child.dirOn(src) {
+			collectTypeCollisionsRec(child, leftToRight, result)
 		}
 	}
 }

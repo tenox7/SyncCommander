@@ -31,7 +31,7 @@ func TestCopyNodeCopiesWholeSubtree(t *testing.T) {
 	}
 	want := int64(len(model.CollectCopyFiles(subtree, m.cmpOpts, true)))
 
-	msg := m.copyNode(subtree, true, false)()
+	msg := m.copyNode(subtree, true, false, nil)()
 	if _, ok := msg.(copyDoneMsg); !ok {
 		t.Fatalf("copy returned %T, want copyDoneMsg", msg)
 	}

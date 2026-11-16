@@ -30,6 +30,10 @@ type Request struct {
 	Batch        bool // one rsync session for a local subtree when Dst supports it
 	VerifyResume bool
 	Progress     *Progress
+	// Replace holds the destination paths of file/folder conflicts the user
+	// agreed to replace in the confirm dialog. A conflict the copy finds that
+	// is not in it stays, and copying its path fails.
+	Replace []string
 }
 
 // Result tells the caller what to rescan afterwards and which destination
@@ -60,6 +64,17 @@ type copier struct {
 	src, dst   model.Backend
 	mu         sync.Mutex
 	dstChanged map[string]bool
+	twins      map[string]*twin // by destination path
+}
+
+// twin is a destination entry of the other type (a folder where a file is
+// copied, or the reverse). It is removed once, right before the first write
+// at or under its path, and only when the user confirmed it.
+type twin struct {
+	entry
+	confirmed bool
+	once      sync.Once
+	err       error
 }
 
 // locator is a remote backend that can name the place it opens.
@@ -119,7 +134,7 @@ func Copy(ctx context.Context, req Request) Result {
 
 	c := &copier{req: req, ctx: ctx, p: p, src: req.Src, dst: req.Dst, dstChanged: map[string]bool{}}
 	collisions, files, totalBytes := req.enumerate()
-	c.clearCollisions(collisions)
+	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
 	p.TotalBytes.Store(totalBytes)
 	p.Start.Store(time.Now().UnixNano())
@@ -176,20 +191,69 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 	return collisions, files, totalBytes
 }
 
-// clearCollisions removes destination entries whose type (file vs dir) clashes
-// with the source, since a copy could not land over them.
-func (c *copier) clearCollisions(collisions []entry) {
+// twinSet indexes the conflicts the copy found and marks the ones the user
+// confirmed.
+func (req Request) twinSet(collisions []entry) map[string]*twin {
+	if len(collisions) == 0 {
+		return nil
+	}
+	confirmed := make(map[string]bool, len(req.Replace))
+	for _, p := range req.Replace {
+		confirmed[p] = true
+	}
+	twins := make(map[string]*twin, len(collisions))
 	for _, e := range collisions {
-		if c.ctx.Err() != nil {
+		twins[e.relPath] = &twin{entry: e, confirmed: confirmed[e.relPath]}
+	}
+	return twins
+}
+
+func kindOf(isDir bool) string {
+	if isDir {
+		return "folder"
+	}
+	return "file"
+}
+
+// clearTwin removes the twin in the way of relPath, at that path or above
+// it, the first time a write needs it gone. An unconfirmed twin is never
+// removed: the write fails instead.
+func (c *copier) clearTwin(relPath string) error {
+	var tw *twin
+	for p := relPath; tw == nil && len(c.twins) > 0; p = model.DirOf(p) {
+		tw = c.twins[p]
+		if p == "" {
+			break
+		}
+	}
+	if tw == nil {
+		return nil
+	}
+	tw.once.Do(func() {
+		kind := kindOf(tw.isDir)
+		if !tw.confirmed {
+			tw.err = fmt.Errorf("the destination has a %s %s in the way, not replaced without confirmation (copy again to see the dialog)", kind, tw.relPath)
 			return
 		}
-		if err := c.remove(e); err != nil {
-			c.p.Failed.Add(1)
-			transport.Log.Add("copy", transport.DirErr, "type-collision cleanup "+e.relPath+": "+err.Error())
-			continue
+		if err := c.remove(tw.entry); err != nil {
+			tw.err = fmt.Errorf("could not remove the %s %s in the way: %w", kind, tw.relPath, err)
+			return
 		}
-		transport.Log.Add("copy", transport.DirIn, "type-collision cleanup "+e.relPath)
+		transport.Log.Add("copy", transport.DirIn, "removed "+kind+" "+tw.relPath+" to replace it with a "+kindOf(!tw.isDir))
+	})
+	return tw.err
+}
+
+// clearAllTwins removes every confirmed twin at once, for a batch transfer
+// that writes the whole subtree in one session. False when any twin stays.
+func (c *copier) clearAllTwins() bool {
+	ok := true
+	for p := range c.twins {
+		if c.clearTwin(p) != nil {
+			ok = false
+		}
 	}
+	return ok
 }
 
 func (c *copier) remove(e entry) error {
@@ -226,7 +290,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 		}
 		return nil
 	})
-	if batchFiles == 0 {
+	if batchFiles == 0 || !c.clearAllTwins() {
 		return false
 	}
 	p := c.p
@@ -314,6 +378,18 @@ func (c *copier) copyOne(f item) {
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": not on the source side")
 		return
 	}
+	// A file can be one object on both sides even when its folders are not:
+	// a hard link, or a destination folder that links into the source.
+	if !srcEntry.IsDir && sameObject(c.src, c.dst, f.relPath) {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, source and destination are the same file")
+		return
+	}
+	if err := c.clearTwin(f.relPath); err != nil {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": "+err.Error())
+		return
+	}
 	if srcEntry.IsDir {
 		p.File.Store(f.relPath)
 		p.beginFile(0)
@@ -324,22 +400,6 @@ func (c *copier) copyOne(f item) {
 		}
 		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
 		return
-	}
-	// A file can be one object on both sides even when its folders are not:
-	// a hard link, or a destination folder that links into the source.
-	if sameObject(c.src, c.dst, f.relPath) {
-		p.Failed.Add(1)
-		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, source and destination are the same file")
-		return
-	}
-	if dstEntry != nil && dstEntry.IsDir != srcEntry.IsDir {
-		if err := c.remove(entry{relPath: f.relPath, isDir: dstEntry.IsDir}); err != nil {
-			p.Failed.Add(1)
-			transport.Log.Add("copy", transport.DirErr, "clear dst type-mismatch "+f.relPath+": "+err.Error())
-			return
-		}
-		transport.Log.Add("copy", transport.DirIn, "cleared dst type-mismatch "+f.relPath)
-		dstEntry = nil
 	}
 	slot := p.claimSlot()
 	defer p.releaseSlot(slot)
