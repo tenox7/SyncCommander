@@ -1,10 +1,66 @@
 package transport
 
-import "sc/model"
+import (
+	"context"
 
-// The optional capability interfaces are picked up by type assertion, so a
-// renamed or mistyped method would silently drop a feature. These lines make
-// the compiler check every backend against what it is meant to offer.
+	"sc/model"
+)
+
+// What each backend can do beyond model.Backend, one value per backend (D2).
+// Each flag names an optional interface the backend implements; the lines
+// below the methods make the compiler check the methods, and
+// TestCapsMatchTheMethods checks that the flags say the same. None depends
+// on the server: a server that refuses a call fails it, and the copy falls
+// back as on any failure.
+
+func (b *LocalBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true}, nil
+}
+
+func (b *SFTPBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true}, nil
+}
+
+func (b *SCPBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true}, nil
+}
+
+// An rsync destination counts its own upload progress (OwnsProgress). The
+// region checksums of rsync+ssh are its shell's.
+func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, RegionSums: true, OpenAt: true, SendLocal: true, RecvLocal: true, Batch: true,
+		Preload: true, PrefetchSums: true, OwnsProgress: true}, nil
+}
+
+func (b *RsyncBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, OpenAt: true, SendLocal: true, RecvLocal: true, Preload: true,
+		PrefetchSums: true, OwnsProgress: true}, nil
+}
+
+func (b *FTPBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true, Parts: true, OpenAt: true}, nil
+}
+
+func (b *WebDAVBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OpenAt: true, Preload: true}, nil
+}
+
+func (b *ResticBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OpenAt: true, Preload: true}, nil
+}
+
+func (b *RcloneBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OpenAt: true, Preload: true}, nil
+}
+
+func (b *FakeBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OpenAt: true}, nil
+}
+
+// The optional interfaces are reached by type assertion once Caps says yes,
+// so a renamed or mistyped method would drop a feature without a word.
+// These lines make the compiler check every backend against what it is
+// meant to offer.
 var (
 	_ model.Backend            = (*LocalBackend)(nil)
 	_ model.ChecksumProber     = (*LocalBackend)(nil)
@@ -33,20 +89,21 @@ var (
 	_ model.ChecksumProber     = (*RsyncSSHBackend)(nil)
 	_ model.ChecksumPrefetcher = (*RsyncSSHBackend)(nil)
 	_ model.Resumer            = (*RsyncSSHBackend)(nil)
+	_ model.RegionChecksummer  = (*RsyncSSHBackend)(nil)
 	_ model.SeekableOpener     = (*RsyncSSHBackend)(nil)
 	_ model.LocalSender        = (*RsyncSSHBackend)(nil)
 	_ model.LocalReceiver      = (*RsyncSSHBackend)(nil)
 	_ model.BatchSender        = (*RsyncSSHBackend)(nil)
 	_ model.RecursivePreloader = (*RsyncSSHBackend)(nil)
-	_ ProgressOwner            = (*RsyncSSHBackend)(nil)
 	_ ParallelSetter           = (*RsyncSSHBackend)(nil)
 	_ model.Backend            = (*RsyncBackend)(nil)
 	_ model.ChecksumProber     = (*RsyncBackend)(nil)
 	_ model.ChecksumPrefetcher = (*RsyncBackend)(nil)
+	_ model.Resumer            = (*RsyncBackend)(nil)
+	_ model.SeekableOpener     = (*RsyncBackend)(nil)
 	_ model.LocalSender        = (*RsyncBackend)(nil)
 	_ model.LocalReceiver      = (*RsyncBackend)(nil)
 	_ model.RecursivePreloader = (*RsyncBackend)(nil)
-	_ ProgressOwner            = (*RsyncBackend)(nil)
 	_ model.Backend            = (*FTPBackend)(nil)
 	_ model.ChecksumProber     = (*FTPBackend)(nil)
 	_ model.Resumer            = (*FTPBackend)(nil)
@@ -75,5 +132,4 @@ var (
 	_ ParallelSetter           = (*lazyBackend)(nil)
 	_ model.PartWriter         = (*lazyBackend)(nil)
 	_ model.RegionChecksummer  = (*lazyBackend)(nil)
-	_ ProgressOwner            = (*lazyBackend)(nil)
 )

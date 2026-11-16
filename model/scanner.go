@@ -600,12 +600,39 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 
 func (s *Scanner) preloadRecursive(ctx context.Context, scope string, leftIsDir, rightIsDir bool) {
 	left, right := s.backends()
-	if p, ok := left.(RecursivePreloader); ok && leftIsDir {
-		p.PreloadRecursive(ctx, scope)
+	for _, side := range []struct {
+		b     Backend
+		isDir bool
+	}{{left, leftIsDir}, {right, rightIsDir}} {
+		if !side.isDir {
+			continue
+		}
+		if p := asPreloader(ctx, side.b); p != nil {
+			p.PreloadRecursive(ctx, scope)
+		}
 	}
-	if p, ok := right.(RecursivePreloader); ok && rightIsDir {
-		p.PreloadRecursive(ctx, scope)
+}
+
+// asPreloader returns b as a RecursivePreloader when its Caps says it
+// preloads; nil when not, or when that cannot be told: the listings that
+// follow say why.
+func asPreloader(ctx context.Context, b Backend) RecursivePreloader {
+	if caps, err := b.Capabilities(ctx); err != nil || !caps.Preload {
+		return nil
 	}
+	p, _ := b.(RecursivePreloader)
+	return p
+}
+
+// asPrefetcher returns b as a ChecksumPrefetcher when its Caps says it
+// prefetches; nil when not, or when that cannot be told: the checksums
+// that follow say why.
+func asPrefetcher(ctx context.Context, b Backend) ChecksumPrefetcher {
+	if caps, err := b.Capabilities(ctx); err != nil || !caps.PrefetchSums {
+		return nil
+	}
+	p, _ := b.(ChecksumPrefetcher)
+	return p
 }
 
 func (s *Scanner) ListBothDir(ctx context.Context, relDir string) ([]FileEntry, []FileEntry, error) {
@@ -900,7 +927,7 @@ func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, 
 }
 
 func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, onPairDone func()) {
-	prefetcher, _ := s.backend(side).(ChecksumPrefetcher)
+	prefetcher := asPrefetcher(ctx, s.backend(side))
 	sem := make(chan struct{}, s.concurrency)
 
 	setDir := func(dir *TreeNode, active, pending bool) {

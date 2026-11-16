@@ -62,10 +62,7 @@ type lazyBackend struct {
 	lastErr     error
 	nextConnect time.Time
 	pausedUntil time.Time
-	// The connected backend counts its own upload progress (rsync), kept
-	// from the last connection (F21).
-	ownsProgress atomic.Bool
-	dialMu       sync.Mutex
+	dialMu      sync.Mutex
 }
 
 // NewLazyBackend connects through factory on first use. The factory gets
@@ -123,8 +120,6 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	b.failed = 0
 	probed := b.probed
 	b.mu.Unlock()
-	owner, ok := inner.(ProgressOwner)
-	b.ownsProgress.Store(ok && owner.OwnsCopyProgress())
 	cp, hasSums := inner.(model.ChecksumProber)
 	if probed && hasSums {
 		cp.ProbeChecksums() // on the server, so not under mu
@@ -261,13 +256,6 @@ func NotConnecting(b model.Backend) bool {
 	return l.authErr != nil || time.Now().Before(l.pausedUntil)
 }
 
-// OwnsCopyProgress passes on the connected backend's answer: an rsync
-// destination counts its own upload progress, and the copy engine must not
-// count it again. The wrapper used to have no such method, so every copy to
-// an rsync destination was counted twice (F21). The answer is the last
-// connection's: the same server, between a lost connection and the next.
-func (b *lazyBackend) OwnsCopyProgress() bool { return b.ownsProgress.Load() }
-
 // do runs op against the connected backend under Retry.
 func (b *lazyBackend) do(ctx context.Context, what string, op func(model.Backend) error) error {
 	return Retry(ctx, b.proto, what, func(context.Context) error {
@@ -289,13 +277,19 @@ func doVal[T any](b *lazyBackend, ctx context.Context, what string, op func(mode
 	return v, err
 }
 
-// capability returns the connected backend as T, or ErrUnsupported. The
-// connect runs under Retry, like any call.
-func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
-	var zero T
-	inner, err := RetryVal(ctx, b.proto, "connect "+b.display, func(context.Context) (model.Backend, error) {
+// connect returns the connected backend, connecting under Retry like any
+// call.
+func (b *lazyBackend) connect(ctx context.Context) (model.Backend, error) {
+	return RetryVal(ctx, b.proto, "connect "+b.display, func(context.Context) (model.Backend, error) {
 		return b.ensureConnected(ctx)
 	})
+}
+
+// capability returns the connected backend as T, or ErrUnsupported: a
+// caller that asked Capabilities first never gets it.
+func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
+	var zero T
+	inner, err := b.connect(ctx)
 	if err != nil {
 		return zero, err
 	}
@@ -306,20 +300,16 @@ func capability[T any](b *lazyBackend, ctx context.Context) (T, error) {
 	return t, nil
 }
 
-// Supports reports whether b has the optional capability T. A lazy backend
-// claims every capability, so it asks the backend it connects to; an error
-// when it cannot connect, so a caller never picks a way to copy on a guess.
-func Supports[T any](ctx context.Context, b model.Backend) (bool, error) {
-	l, ok := b.(*lazyBackend)
-	if !ok {
-		_, ok = b.(T)
-		return ok, nil
+// Capabilities says what the connected backend can do, connecting first:
+// the wrapper has the methods of every optional interface, so its method
+// set says nothing (D2). The same server stays behind it from one
+// connection to the next, and so do its capabilities.
+func (b *lazyBackend) Capabilities(ctx context.Context) (model.Caps, error) {
+	inner, err := b.connect(ctx)
+	if err != nil {
+		return model.Caps{}, err
 	}
-	_, err := capability[T](l, ctx)
-	if errors.Is(err, ErrUnsupported) {
-		return false, nil
-	}
-	return err == nil, err
+	return inner.Capabilities(ctx)
 }
 
 // doAs is do for an optional capability: a backend without it fails fast

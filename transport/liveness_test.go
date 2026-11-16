@@ -180,7 +180,9 @@ type ownerStub struct {
 	sawPreCounted bool
 }
 
-func (s *ownerStub) OwnsCopyProgress() bool { return true }
+func (s *ownerStub) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OwnsProgress: true}, nil
+}
 func (s *ownerStub) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	s.sawPreCounted = IsPreCounted(src)
 	return s.copyStub.CopyFrom(ctx, relPath, src, p)
@@ -195,11 +197,8 @@ func TestWrapperPassesOnProgressOwnership(t *testing.T) {
 	inner := &ownerStub{}
 	b := NewLazyBackend("rsync://host/m", func(context.Context) (model.Backend, error) { return inner, nil })
 	defer CloseBackend(b)
-	if ok, err := Supports[ProgressOwner](ctx, b); err != nil || !ok {
-		t.Fatalf("Supports = %v, %v; want the backend's own counting seen", ok, err)
-	}
-	if owner, ok := b.(ProgressOwner); !ok || !owner.OwnsCopyProgress() {
-		t.Error("the wrapper does not say its backend counts its own copy progress")
+	if caps, err := b.Capabilities(ctx); err != nil || !caps.OwnsProgress {
+		t.Fatalf("Capabilities = %+v, %v; want the backend's own counting seen", caps, err)
 	}
 	if err := b.CopyFrom(ctx, "f", WrapPreCounted(io.NopCloser(strings.NewReader("abc"))), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
@@ -210,10 +209,7 @@ func TestWrapperPassesOnProgressOwnership(t *testing.T) {
 
 	plain := NewLazyBackend("sftp://host/x", func(context.Context) (model.Backend, error) { return &connStub{}, nil })
 	defer CloseBackend(plain)
-	if ok, err := Supports[ProgressOwner](ctx, plain); err != nil || ok {
-		t.Errorf("Supports for a backend that does not count = %v, %v; want false", ok, err)
-	}
-	if owner, ok := plain.(ProgressOwner); ok && owner.OwnsCopyProgress() {
-		t.Error("the wrapper says a backend that does not count its progress does")
+	if caps, err := plain.Capabilities(ctx); err != nil || caps.OwnsProgress {
+		t.Errorf("Capabilities for a backend that does not count = %+v, %v; want no OwnsProgress", caps, err)
 	}
 }

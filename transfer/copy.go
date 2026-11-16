@@ -321,9 +321,16 @@ func (c *copier) markChanged(relPath string) {
 // supports it. Reports false when it did not apply or failed, so the
 // per-file path runs instead.
 func (c *copier) batch(files []item, totalBytes int64) bool {
-	bs, ok := c.dst.(model.BatchSender)
 	lp, isLocal := c.src.(model.LocalFS)
-	if !ok || !isLocal {
+	if !isLocal {
+		return false
+	}
+	// Asked before the walk below, which counts every file of the local
+	// folder: a remote's wrapper has every optional method, so the walk ran
+	// for every remote and was thrown away when the backend behind it took
+	// no batch (F20, D2).
+	bs, ok := capable[model.BatchSender](c.ctx, c.dst, func(caps model.Caps) bool { return caps.Batch })
+	if !ok {
 		return false
 	}
 	srcRoot := lp.LocalPath("")
@@ -555,7 +562,7 @@ func (c *copier) copyOne(f item) {
 	err = transport.Retry(fileCtx, "copy", "copy "+f.relPath, func(tryCtx context.Context) error {
 		return transport.WithStallGuard(tryCtx, slotBytes, transport.StallTimeout(), func(attemptCtx context.Context) error {
 			attempt++
-			if attempt > 1 {
+			if attempt > 1 && appends(attemptCtx, c.dst) {
 				// A retry resumes whatever the failed attempt left behind.
 				if offset := peekDstSize(attemptCtx, c.dst, f.relPath); offset > 0 && offset < srcEntry.Size {
 					err := resumeAttempt(attemptCtx, c.src, c.dst, f.relPath, f.relPath, srcEntry.Mode, srcEntry, offset, slotBytes, slotBase, verify)

@@ -27,6 +27,9 @@ type sumStub struct {
 
 func (s *sumStub) BasePath() string { return "/stub" }
 func (s *sumStub) Close() error     { return nil }
+func (s *sumStub) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{Resume: true}, nil
+}
 func (s *sumStub) List(context.Context, string) ([]model.FileEntry, error) {
 	if n := s.size.Load(); n > 0 {
 		return []model.FileEntry{{Name: "f.bin", RelPath: "f.bin", Size: n, Mode: 0o644}}, nil

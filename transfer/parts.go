@@ -16,11 +16,12 @@ import (
 // when a remote cannot be reached: the copy must not guess, or a copy that
 // should go through a part would write the real file directly.
 func partWriter(ctx context.Context, dst model.Backend) (model.PartWriter, error) {
-	ok, err := transport.Supports[model.PartWriter](ctx, dst)
-	if !ok || err != nil {
+	caps, err := dst.Capabilities(ctx)
+	if err != nil || !caps.Parts {
 		return nil, err
 	}
-	return dst.(model.PartWriter), nil
+	pw, _ := dst.(model.PartWriter)
+	return pw, nil
 }
 
 // copyIntoPart copies f into its part file and renames the part over the
@@ -109,16 +110,16 @@ func (c *copier) partMatches(ctx context.Context, relPath, part string, n int64,
 		return "no checksum algorithm works on both sides"
 	}
 	const noRegion = "the source cannot checksum part of a file"
+	caps, err := c.src.Capabilities(ctx)
+	if err != nil {
+		return "the source: " + err.Error()
+	}
 	var srcSum string
-	var err error
 	if whole {
 		srcSum, err = c.src.Checksum(ctx, relPath)
-	} else if rc, ok := c.src.(model.RegionChecksummer); ok {
+	} else if rc, ok := c.src.(model.RegionChecksummer); ok && caps.RegionSums {
 		srcSum, err = rc.ChecksumRange(ctx, relPath, 0, n)
 	} else {
-		return noRegion
-	}
-	if errors.Is(err, transport.ErrUnsupported) {
 		return noRegion
 	}
 	if err != nil {

@@ -17,8 +17,9 @@ type listStub struct {
 	fail map[string]bool
 }
 
-func (b *listStub) BasePath() string { return "/stub" }
-func (b *listStub) Close() error     { return nil }
+func (b *listStub) BasePath() string                                 { return "/stub" }
+func (b *listStub) Close() error                                     { return nil }
+func (b *listStub) Capabilities(context.Context) (model.Caps, error) { return model.Caps{}, nil }
 
 func (b *listStub) List(_ context.Context, relDir string) ([]model.FileEntry, error) {
 	if b.fail[relDir] {

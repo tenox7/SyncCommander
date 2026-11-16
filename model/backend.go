@@ -81,6 +81,11 @@ func KindName(m os.FileMode) string {
 // Close does no harm: a pane closes the backends it replaces, and the
 // program closes the ones it started with on exit. It was found by type
 // assertion, which a wrapper that embeds Backend hid (D1).
+//
+// Capabilities says what the backend can do beyond these methods (Caps). A
+// remote's says what the server it connects to can do, so it may connect,
+// and it fails when it cannot: a caller must not guess, or a copy that
+// should go through a part file would write the real file directly.
 type Backend interface {
 	BasePath() string
 	List(ctx context.Context, relDir string) ([]FileEntry, error)
@@ -93,7 +98,33 @@ type Backend interface {
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
+	Capabilities(ctx context.Context) (Caps, error)
 	Close() error
+}
+
+// Caps is what a backend can do beyond Backend. Each flag names an optional
+// interface below; a caller decides from the flag, then type-asserts to
+// make the call. The reconnecting wrapper that holds every remote has the
+// methods of every optional interface, so its method set says nothing: it
+// says what the backend it connects to can do. Found by type assertion,
+// each was a "yes" for every remote and an ErrUnsupported at run time,
+// which every caller had to check again; a batch copy walked the whole
+// local folder before it learnt that the destination takes no batch (D2,
+// F20).
+type Caps struct {
+	Resume       bool // Resumer
+	Parts        bool // PartWriter
+	RegionSums   bool // RegionChecksummer
+	OpenAt       bool // SeekableOpener
+	SendLocal    bool // LocalSender
+	RecvLocal    bool // LocalReceiver
+	Batch        bool // BatchSender
+	Preload      bool // RecursivePreloader
+	PrefetchSums bool // ChecksumPrefetcher
+	// OwnsProgress: CopyFrom counts the bytes it sends against the context's
+	// progress counter itself (rsync), so the engine must not count them
+	// again (F21).
+	OwnsProgress bool
 }
 
 // PutParams is what a backend is told about a file it takes. Size and
@@ -259,8 +290,8 @@ type BatchSender interface {
 }
 
 // BackendRangeOpener adapts a Backend + relPath into a RangeOpener. OpenAt
-// uses the backend's SeekableOpener path when available, otherwise opens
-// from byte 0 and discards the prefix.
+// uses the backend's SeekableOpener path when its Caps has it, otherwise
+// opens from byte 0 and discards the prefix.
 type BackendRangeOpener struct {
 	Backend  Backend
 	RelPath  string
@@ -284,12 +315,12 @@ func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 	if offset == 0 {
 		return r.Backend.Open(ctx, r.RelPath)
 	}
-	if seeker, ok := r.Backend.(SeekableOpener); ok {
+	if seeker, ok := r.Backend.(SeekableOpener); ok && seeks(ctx, r.Backend) {
 		rd, err := seeker.OpenAt(ctx, r.RelPath, offset)
 		if err == nil {
 			return rd, nil
 		}
-		// Fall back below on any error (notably ErrUnsupported).
+		// Fall back below on any error.
 	}
 	rd, err := r.Backend.Open(ctx, r.RelPath)
 	if err != nil {
@@ -300,6 +331,13 @@ func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 		return nil, err
 	}
 	return rd, nil
+}
+
+// seeks reports whether b opens a file at an offset (Caps.OpenAt); false
+// when that cannot be told: the Open that follows says why.
+func seeks(ctx context.Context, b Backend) bool {
+	caps, err := b.Capabilities(ctx)
+	return err == nil && caps.OpenAt
 }
 
 // RecursivePreloader is implemented by backends where one recursive listing

@@ -76,8 +76,6 @@ func (b *RsyncBackend) BasePath() string { return b.display }
 // Close does nothing: every call dials the daemon and hangs up after.
 func (b *RsyncBackend) Close() error { return nil }
 
-func (b *RsyncBackend) OwnsCopyProgress() bool { return true }
-
 // modulePath is the daemon-protocol path module/base/rel, with a trailing
 // slash when the contents of a directory are wanted, written so that a
 // stock daemon reads back this one path (see daemonPath).

@@ -87,13 +87,6 @@ func IsPreCounted(r io.Reader) bool {
 	return false
 }
 
-// ProgressOwner is implemented by backends whose CopyFrom counts its own bytes
-// against the context counter. When dst implements this and OwnsCopyProgress
-// returns true, callers MUST NOT wrap the source reader with their own counter.
-type ProgressOwner interface {
-	OwnsCopyProgress() bool
-}
-
 // CappedAdder pushes monotonically increasing deltas to target up to a total
 // of cap bytes. Subsequent Add calls past the cap are silently ignored. Safe
 // for concurrent use.

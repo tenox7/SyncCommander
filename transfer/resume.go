@@ -26,18 +26,38 @@ import (
 // When it does not, the plain copy that follows fails on it too.
 func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry) bool {
 	if lp, ok := src.(model.LocalFS); ok {
-		if r, ok := dst.(model.LocalSender); ok {
+		if r, ok := capable[model.LocalSender](ctx, dst, func(caps model.Caps) bool { return caps.SendLocal }); ok {
 			local := lp.LocalPath(relPath)
 			return r.SendLocalFile(ctx, local, relPath, putParams(srcEntry, srcEntry.Mode)) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	if lp, ok := dst.(model.LocalFS); ok {
-		if r, ok := src.(model.LocalReceiver); ok {
+		if r, ok := capable[model.LocalReceiver](ctx, src, func(caps model.Caps) bool { return caps.RecvLocal }); ok {
 			local := lp.LocalPath(relPath)
 			return r.RecvToLocalFile(ctx, relPath, local) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	return false
+}
+
+// capable returns b as T when has says b's Caps has what T does; false when
+// not, or when that cannot be told: the plain copy that follows then says
+// why. A remote's wrapper has the methods of every optional interface, so
+// only its Caps tells (D2).
+func capable[T any](ctx context.Context, b model.Backend, has func(model.Caps) bool) (T, bool) {
+	var t T
+	caps, err := b.Capabilities(ctx)
+	if err != nil || !has(caps) {
+		return t, false
+	}
+	t, ok := b.(T)
+	return t, ok
+}
+
+// appends reports whether dst appends to a file (Caps.Resume).
+func appends(ctx context.Context, dst model.Backend) bool {
+	_, ok := capable[model.Resumer](ctx, dst, func(caps model.Caps) bool { return caps.Resume })
+	return ok
 }
 
 // putParams is what dst is told about the file it takes: the size and mtime
@@ -78,7 +98,9 @@ func tryResumeCopy(ctx context.Context, src, dst model.Backend, relPath string, 
 	if dstEntry == nil || dstEntry.IsDir || dstEntry.Size <= 0 || dstEntry.Size >= srcEntry.Size {
 		return false
 	}
-	if _, ok := dst.(model.Resumer); !ok {
+	// Asked before the size, which costs a round trip: a destination that
+	// cannot append was asked for it and then failed the append (D2).
+	if !appends(ctx, dst) {
 		return false
 	}
 	// The scan-time size goes stale as soon as anything else writes to dst,
@@ -203,8 +225,12 @@ func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
 // errResumeMismatch if the result does not match the source; on any error
 // the progress credited during the attempt is rolled back.
 func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath string, mode os.FileMode, srcEntry *model.FileEntry, offset int64, bytes, baseBytes *atomic.Int64, verify func(context.Context, int64) error) error {
+	caps, err := dst.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
 	resumer, ok := dst.(model.Resumer)
-	if !ok {
+	if !caps.Resume || !ok {
 		return transport.ErrUnsupported
 	}
 	bytes.Add(offset)
@@ -252,11 +278,11 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPa
 	}
 	defer reader.Close()
 	defer transport.CancelCloser(ctx, reader)()
-	// Asked once dst is connected: a reconnecting wrapper only knows the
-	// answer of the backend it connected to (F21).
+	// A reconnecting wrapper says what the backend it connects to does
+	// (F21, D2).
 	dstOwnsProgress := false
-	if ok, err := transport.Supports[transport.ProgressOwner](ctx, dst); err == nil && ok {
-		dstOwnsProgress = dst.(transport.ProgressOwner).OwnsCopyProgress()
+	if caps, err := dst.Capabilities(ctx); err == nil {
+		dstOwnsProgress = caps.OwnsProgress
 	}
 	var added atomic.Int64
 	var srcReader io.Reader = reader
@@ -367,10 +393,14 @@ func (o *trackedRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
 }
 
 func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
+	caps, err := o.Backend.Capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var rd io.ReadCloser
-	if seeker, ok := o.Backend.(model.SeekableOpener); ok {
+	if seeker, ok := o.Backend.(model.SeekableOpener); ok && caps.OpenAt {
 		r, err := seeker.OpenAt(ctx, o.RelPath, offset)
-		if err != nil && !errors.Is(err, transport.ErrUnsupported) {
+		if err != nil {
 			return nil, err
 		}
 		rd = r
