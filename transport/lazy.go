@@ -125,17 +125,21 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	return inner, nil
 }
 
-// markBrokenIf drops the cached backend when err says the connection died, so
-// the next call redials. Returns err unchanged.
-func (b *lazyBackend) markBrokenIf(err error) error {
+// markBrokenIf drops inner, the connection a call failed on, when err says
+// it died, so the next call redials. Only while inner is still the current
+// one: a call that ran on a connection another call has already replaced
+// fails late, and the new connection is healthy (F8). Returns err unchanged.
+func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 	if !isConnLost(err) {
 		return err
 	}
 	b.mu.Lock()
-	inner := b.inner
-	b.inner = nil
+	current := inner != nil && b.inner == inner
+	if current {
+		b.inner = nil
+	}
 	b.mu.Unlock()
-	if inner != nil {
+	if current {
 		Log.Add(b.proto, DirErr, "connection lost, reconnecting on next op: "+err.Error())
 		CloseBackend(inner)
 	}
@@ -149,7 +153,7 @@ func (b *lazyBackend) do(ctx context.Context, what string, op func(model.Backend
 		if err != nil {
 			return err
 		}
-		return b.markBrokenIf(op(inner))
+		return b.markBrokenIf(inner, op(inner))
 	})
 }
 
@@ -346,11 +350,15 @@ func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error 
 // AppendFrom is not retried here: the source has been consumed from offset,
 // so the copy layer re-probes the destination size and resumes again itself.
 func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
-	r, err := capability[model.Resumer](b, ctx)
+	inner, err := b.ensureConnected(ctx)
 	if err != nil {
 		return err
 	}
-	return b.markBrokenIf(r.AppendFrom(ctx, relPath, src, mode, offset))
+	r, ok := inner.(model.Resumer)
+	if !ok {
+		return ErrUnsupported
+	}
+	return b.markBrokenIf(inner, r.AppendFrom(ctx, relPath, src, mode, offset))
 }
 
 func (b *lazyBackend) PartSize(ctx context.Context, relPath string) (int64, error) {

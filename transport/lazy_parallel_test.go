@@ -39,7 +39,8 @@ func TestLazySetParallelSurvivesRedial(t *testing.T) {
 		t.Fatalf("connected backend sized for %d, want 9", got)
 	}
 
-	b.(*lazyBackend).markBrokenIf(io.EOF)
+	l := b.(*lazyBackend)
+	l.markBrokenIf(l.current(), io.EOF)
 	if _, err := b.List(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
