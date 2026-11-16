@@ -289,11 +289,26 @@ func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 }
 
 // consumedError marks a copy that failed after reading from its source; Retry
-// treats it as permanent without logging it, the copy layer reports it.
+// treats it as permanent without logging it. The copy layer, which opens the
+// source again for every try, takes the mark off (Unconsumed) and retries.
 type consumedError struct{ err error }
 
 func (e *consumedError) Error() string { return e.err.Error() }
 func (e *consumedError) Unwrap() error { return e.err }
+
+// Unconsumed takes off the mark a reconnecting backend puts on a CopyFrom
+// that failed after reading from its source: that backend cannot retry
+// with a stream it cannot rewind, so its Retry stops on the mark. A caller
+// that opens the source again for every try takes the mark off, so its own
+// Retry decides on the cause: an upload cut off by a dropped connection
+// is tried again (F29).
+func Unconsumed(err error) error {
+	var c *consumedError
+	if errors.As(err, &c) {
+		return c.err
+	}
+	return err
+}
 
 // countingReader records whether anything was read, so CopyFrom can tell an
 // untouched source stream from a partially consumed one.

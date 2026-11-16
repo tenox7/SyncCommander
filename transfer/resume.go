@@ -247,7 +247,9 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPa
 	}
 	counted := &countingReader{r: srcReader}
 	srcReader = &cancelReader{r: counted, ctx: ctx}
-	err = dst.CopyFrom(ctx, dstPath, srcReader, mode)
+	// This try opened the source itself, so a failure after the first byte
+	// is the copy layer's to retry, with the source opened again (F29).
+	err = transport.Unconsumed(dst.CopyFrom(ctx, dstPath, srcReader, mode))
 	if err == nil {
 		// A destination that takes the listed number of bytes and stops
 		// (rclone's Put is told the size) leaves the rest of a source that
