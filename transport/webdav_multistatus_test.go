@@ -26,12 +26,44 @@ func TestReadMultistatusRefusesWhatFollowsTheRoot(t *testing.T) {
 		{"nothing", "", false},
 	} {
 		n := 0
-		err := readMultistatus(strings.NewReader(tc.body), func(wdResponse) { n++ })
+		err := readMultistatus(strings.NewReader(tc.body), func(wdResponse) error { n++; return nil })
 		switch {
 		case tc.ok && (err != nil || n != 2):
 			t.Errorf("%s: %d responses, %v; want 2 and no error", tc.name, n, err)
 		case !tc.ok && err == nil:
 			t.Errorf("%s: accepted with %d responses", tc.name, n)
+		}
+	}
+}
+
+// W-H5: an href maps to a path under the base or is an error; a raw "#" or
+// "?" is part of the name, not a fragment or a query.
+func TestWebDAVHrefToRel(t *testing.T) {
+	for _, tc := range []struct {
+		base, href, want string
+		ok               bool
+	}{
+		{"dav", "/dav/", "", true},
+		{"dav", "/dav", "", true},
+		{"dav", "/dav/a/b.txt", "a/b.txt", true},
+		{"dav", "http://host:8080/dav/a%20b.txt", "a b.txt", true},
+		{"dav", "/dav/a#b.txt", "a#b.txt", true},
+		{"dav", "/dav/what?.txt", "what?.txt", true},
+		{"dav", "/dav/100%.txt", "100%.txt", true},
+		{"dav", "/dav//a/./b", "a/b", true},
+		{"dav//sub/", "/dav/sub/x", "x", true},
+		{"", "/a/b", "a/b", true},
+		{"", "https://host/", "", true},
+		{"dav", "/internal/files/a.txt", "", false},
+		{"dav", "/DAV/a.txt", "", false},
+		{"dav", "/davx/a.txt", "", false},
+		{"dav", "/dav/../etc/passwd", "", false},
+		{"dav", "a.txt", "", false},
+	} {
+		b := &WebDAVBackend{httpBase: &httpBase{base: tc.base}}
+		got, err := b.hrefToRel(tc.href)
+		if tc.ok && (err != nil || got != tc.want) || !tc.ok && err == nil {
+			t.Errorf("base %q: hrefToRel(%q) = %q, %v; want %q ok=%v", tc.base, tc.href, got, err, tc.want, tc.ok)
 		}
 	}
 }

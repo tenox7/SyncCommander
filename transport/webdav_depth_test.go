@@ -196,3 +196,120 @@ func TestWebDAVWalkAbortIsNotAListing(t *testing.T) {
 		}
 	})
 }
+
+// rewriteProxy forwards to the WebDAV server on port with prefix taken off
+// the path, as a reverse proxy that publishes the server under prefix does.
+// The server's hrefs then lack the prefix.
+func rewriteProxy(t *testing.T, port int, prefix string) int {
+	t.Helper()
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	srv := httptest.NewServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		r.SetURL(target)
+		r.Out.URL.Path, r.Out.URL.RawPath = strings.TrimPrefix(r.In.URL.Path, prefix), ""
+	}})
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().(*net.TCPAddr).Port
+}
+
+// W-H5, with real rclone serve webdav: behind a proxy that publishes it
+// under /dav/, every href lacks /dav/. Connecting fails and says why; the
+// remote side used to read as empty.
+func TestWebDAVProxyRewriteFailsToConnect(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	port, _ := startRcloneWebDAV(t, root)
+	b, err := NewWebDAVBackend(fmt.Sprintf("webdav://u:p@127.0.0.1:%d/dav/", rewriteProxy(t, port, "/dav")), false, 4)
+	if err == nil {
+		names, err := listNames(context.Background(), b, "")
+		t.Fatalf("connected; List = %q, %v", names, err)
+	}
+	if !strings.Contains(err.Error(), "not under /dav") {
+		t.Errorf("err = %v, want it to say the server's paths are not under /dav", err)
+	}
+}
+
+// cannedDAV answers PROPFIND from answers, keyed by Depth and path, with a
+// multistatus holding that body. Anything else is 404, Depth: infinity 403.
+func cannedDAV(t *testing.T, answers map[string]string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Depth") == "infinity" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		body, ok := answers[r.Header.Get("Depth")+" "+r.URL.Path]
+		if r.Method != "PROPFIND" || !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusMultiStatus)
+		io.WriteString(w, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">`+body+`</d:multistatus>`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
+func davEntry(href string, dir bool, status string) string {
+	rt := "<d:resourcetype/>"
+	if dir {
+		rt = "<d:resourcetype><d:collection/></d:resourcetype>"
+	}
+	return `<d:response><d:href>` + href + `</d:href><d:propstat><d:prop><d:getcontentlength>3</d:getcontentlength>` +
+		rt + `</d:prop><d:status>HTTP/1.1 ` + status + `</d:status></d:propstat></d:response>`
+}
+
+// W-H5: a one-level answer with an entry that cannot be mapped fails the
+// listing instead of dropping the entry; a raw "#" stays in the name; a
+// folder that is now a file, or an answer that does not include the folder,
+// is not an empty folder.
+func TestWebDAVListingNeverDropsAnEntry(t *testing.T) {
+	self := davEntry("/dav/", true, "200 OK")
+	for _, tc := range []struct {
+		name, dir, body string
+		want            []string // nil: the listing must fail
+	}{
+		{"an entry named by another path", "", self + davEntry("/dav/a.txt", false, "200 OK") + davEntry("/internal/files/b.txt", false, "200 OK") + davEntry("/dav/c/", true, "200 OK"), nil},
+		{"an entry with only a 403 propstat", "", self + davEntry("/dav/a.txt", false, "200 OK") + davEntry("/dav/secret/", true, "403 Forbidden"), nil},
+		{"a raw # in a name", "", self + davEntry("/dav/a#b.txt", false, "200 OK"), []string{"a#b.txt"}},
+		{"a folder that is a file now", "x", davEntry("/dav/x", false, "200 OK"), nil},
+		{"an answer without the folder", "", "", nil},
+		{"entries deeper than asked", "", self + davEntry("/dav/c/", true, "200 OK") + davEntry("/dav/c/d.txt", false, "200 OK"), []string{"c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/dav/"
+			if tc.dir != "" {
+				path += tc.dir + "/"
+			}
+			addr := cannedDAV(t, map[string]string{"0 /dav/": self, "1 " + path: tc.body})
+			b, err := NewWebDAVBackend("webdav://"+addr+"/dav/", false, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.PreloadRecursive(context.Background(), "")
+			names, err := listNames(context.Background(), b, tc.dir)
+			switch {
+			case tc.want == nil && err == nil:
+				t.Errorf("List(%q) = %q and no error", tc.dir, names)
+			case tc.want != nil && (err != nil || !slices.Equal(names, tc.want)):
+				t.Errorf("List(%q) = %q, %v; want %q", tc.dir, names, err, tc.want)
+			}
+		})
+	}
+}
+
+// W-H5: connecting checks the server's answer about the base itself.
+func TestWebDAVConnectChecksTheBase(t *testing.T) {
+	for name, self := range map[string]string{
+		"the server names the base in another case": davEntry("/DAV/", true, "200 OK"),
+		"the base is a file":                        davEntry("/dav", false, "200 OK"),
+		"the answer is empty":                       "",
+	} {
+		addr := cannedDAV(t, map[string]string{"0 /dav/": self})
+		if _, err := NewWebDAVBackend("webdav://"+addr+"/dav/", false, 1); err == nil {
+			t.Errorf("%s: connected", name)
+		}
+	}
+}

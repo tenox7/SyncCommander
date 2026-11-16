@@ -83,10 +83,35 @@ func NewWebDAVBackend(rawURL string, insecure bool, parallel int) (*WebDAVBacken
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if _, err := b.propfind(ctx, "", "0"); err != nil {
+	ms, err := b.propfind(ctx, "", "0")
+	if err != nil {
+		return nil, err
+	}
+	if err := b.checkBase(ms); err != nil {
+		Log.Add("webdav", DirErr, err.Error())
 		return nil, err
 	}
 	return b, nil
+}
+
+// checkBase requires the answer about the base to name it as typed, and as
+// a folder. A proxy that rewrites paths, or a server that spells the path
+// in another letter case, gives hrefs that do not start with the base: no
+// entry of a listing would map, and the remote side would read as empty.
+func (b *WebDAVBackend) checkBase(ms *wdMultistatus) error {
+	for _, r := range ms.Response {
+		e, _, err := b.entryFromResponse(r)
+		if err != nil {
+			return fmt.Errorf("webdav: %s: %v (a proxy that rewrites paths, or another letter case?)", b.pathFor(""), err)
+		}
+		if e.RelPath == "" {
+			if !e.IsDir {
+				return fmt.Errorf("webdav: %s is a file, not a folder", b.pathFor(""))
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("webdav: the server's answer about %s does not name it", b.pathFor(""))
 }
 
 func (b *WebDAVBackend) BasePath() string { return b.display }
@@ -104,7 +129,7 @@ func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*w
 		return nil, fmt.Errorf("PROPFIND %s: %s", relPath, resp.Status)
 	}
 	var ms wdMultistatus
-	if err := readMultistatus(resp.Body, func(r wdResponse) { ms.Response = append(ms.Response, r) }); err != nil {
+	if err := readMultistatus(resp.Body, func(r wdResponse) error { ms.Response = append(ms.Response, r); return nil }); err != nil {
 		err = fmt.Errorf("PROPFIND %s: %v", relPath, err)
 		Log.Add("webdav", DirErr, err.Error())
 		return nil, err
@@ -117,7 +142,7 @@ func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*w
 // space: golang.org/x/net/webdav, which rclone serve webdav runs, closes the
 // multistatus when its walk fails part way and then writes "Internal Server
 // Error" after it. That is a short listing in a well-formed document.
-func readMultistatus(body io.Reader, each func(wdResponse)) error {
+func readMultistatus(body io.Reader, each func(wdResponse) error) error {
 	dec := xml.NewDecoder(body)
 	root, err := wdRoot(dec)
 	if err != nil {
@@ -143,7 +168,9 @@ func readMultistatus(body io.Reader, each func(wdResponse)) error {
 			if err := dec.DecodeElement(&r, &t); err != nil {
 				return fmt.Errorf("decode: %v", err)
 			}
-			each(r)
+			if err := each(r); err != nil {
+				return err
+			}
 		case xml.EndElement:
 			return wdTrailer(dec)
 		}
@@ -190,32 +217,58 @@ func wdTrailer(dec *xml.Decoder) error {
 	}
 }
 
-func (b *WebDAVBackend) hrefToRel(href string) (string, bool) {
-	u, err := url.Parse(href)
-	if err != nil {
-		return "", false
-	}
-	p := path.Clean("/" + strings.Trim(u.Path, "/"))
-	if b.base != "" {
-		basePrefix := "/" + b.base
-		if p != basePrefix && !strings.HasPrefix(p, basePrefix+"/") {
-			return "", false
+// hrefToRel maps a response's href to a path under the base. An href is an
+// absolute URL or an absolute path, percent-encoded. A raw "?" or "#" is
+// part of the name, as a server that does not encode them means it; so is
+// a "%" that does not start an escape. An href outside the base is an
+// error: dropping it would hide the entry.
+func (b *WebDAVBackend) hrefToRel(href string) (string, error) {
+	p := strings.TrimSpace(href)
+	if i := strings.Index(p, "://"); i >= 0 && !strings.Contains(p[:i], "/") {
+		rest := p[i+3:]
+		j := strings.IndexByte(rest, '/')
+		if j < 0 {
+			j = len(rest)
+			rest += "/"
 		}
-		p = p[len(basePrefix):]
+		p = rest[j:]
 	}
-	return strings.Trim(p, "/"), true
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("the server named %q, not an absolute path", href)
+	}
+	if u, err := url.PathUnescape(p); err == nil {
+		p = u
+	}
+	p = path.Clean(p)
+	base := path.Clean("/" + b.base)
+	switch {
+	case base == "/":
+	case p == base:
+		p = "/"
+	case strings.HasPrefix(p, base+"/"):
+		p = p[len(base):]
+	default:
+		return "", fmt.Errorf("the server named %q, which is not under %s", href, base)
+	}
+	return strings.Trim(p, "/"), nil
 }
 
 // entryFromResponse converts one multistatus response; callers drop the
-// listed collection itself by comparing RelPath with the directory asked for.
-func (b *WebDAVBackend) entryFromResponse(r wdResponse) (model.FileEntry, map[string]string, bool) {
+// listed collection itself by comparing RelPath with the directory asked
+// for. A response it cannot convert is an error, never skipped: a listing
+// without it would show the entry as missing.
+func (b *WebDAVBackend) entryFromResponse(r wdResponse) (model.FileEntry, map[string]string, error) {
+	rel, err := b.hrefToRel(r.Href)
+	if err != nil {
+		return model.FileEntry{}, nil, err
+	}
 	prop, ok := okProp(r.Propstat)
 	if !ok {
-		return model.FileEntry{}, nil, false
-	}
-	rel, ok := b.hrefToRel(r.Href)
-	if !ok {
-		return model.FileEntry{}, nil, false
+		why := strings.TrimSpace(r.Status)
+		for _, p := range r.Propstat {
+			why = strings.TrimSpace(p.Status)
+		}
+		return model.FileEntry{}, nil, fmt.Errorf("the server gave no properties for %q (%s)", r.Href, why)
 	}
 	isDir := prop.Collection != nil
 	mode := os.FileMode(0644)
@@ -231,19 +284,17 @@ func (b *WebDAVBackend) entryFromResponse(r wdResponse) (model.FileEntry, map[st
 		IsDir:   isDir,
 		Mode:    mode,
 	}
-	return e, parseChecksums(prop.Checksums), true
+	return e, parseChecksums(prop.Checksums), nil
 }
 
-// okProp picks the successful propstat of a PROPFIND response, tolerating
-// servers that omit the status on their only propstat.
+// okProp picks the successful propstat of a PROPFIND response; a propstat
+// without a status counts as successful (statusOK). A lone 403 or 404
+// propstat is not: it would make a 0-byte file of whatever the entry is.
 func okProp(ps []wdPropstat) (wdProp, bool) {
 	for _, p := range ps {
 		if statusOK(p.Status) {
 			return p.Prop, true
 		}
-	}
-	if len(ps) == 1 {
-		return ps[0].Prop, true
 	}
 	return wdProp{}, false
 }
@@ -332,13 +383,33 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 	}
 	self := strings.Trim(relDir, "/")
 	var entries []model.FileEntry
+	sawSelf := false
 	for _, r := range ms.Response {
-		e, sums, ok := b.entryFromResponse(r)
-		if !ok || e.RelPath == self {
+		e, sums, err := b.entryFromResponse(r)
+		switch {
+		case err != nil:
+		case e.RelPath == self && !e.IsDir:
+			err = fmt.Errorf("%s is a file on the server, not a folder", b.pathFor(relDir))
+		case e.RelPath == self:
+			sawSelf = true
 			continue
+		case parentDir(e.RelPath) != self && !strings.HasPrefix(e.RelPath, self+"/") && self != "":
+			err = fmt.Errorf("the server listed %q, which is not in %s", r.Href, b.pathFor(relDir))
+		case parentDir(e.RelPath) != self:
+			continue // deeper than asked; listed with its own folder
+		}
+		if err != nil {
+			err = fmt.Errorf("PROPFIND %s: %v", b.pathFor(relDir), err)
+			Log.Add("webdav", DirErr, err.Error())
+			return nil, err
 		}
 		b.sums.put(e.RelPath, sums)
 		entries = append(entries, e)
+	}
+	if !sawSelf {
+		err := fmt.Errorf("PROPFIND %s: the answer does not include the folder itself", b.pathFor(relDir))
+		Log.Add("webdav", DirErr, err.Error())
+		return nil, err
 	}
 	Log.Add("webdav", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
@@ -388,14 +459,20 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	self := strings.Trim(scope, "/")
 	g := &emitGrouper{emit: emit, complete: complete, childlessUnknown: true}
 	n := 0
-	err = readMultistatus(resp.Body, func(r wdResponse) {
-		e, sums, ok := b.entryFromResponse(r)
-		if !ok || e.RelPath == self {
-			return
+	err = readMultistatus(resp.Body, func(r wdResponse) error {
+		e, sums, err := b.entryFromResponse(r)
+		switch {
+		case err != nil:
+			return err
+		case e.RelPath == self:
+			return nil
+		case self != "" && !strings.HasPrefix(e.RelPath, self+"/"):
+			return fmt.Errorf("the server listed %q, which is not in %s", r.Href, b.pathFor(scope))
 		}
 		b.sums.put(e.RelPath, sums)
 		g.add(e)
 		n++
+		return nil
 	})
 	if err != nil {
 		err = fmt.Errorf("RPROPFIND %s: %v; listing each folder on its own", b.pathFor(scope), err)
@@ -429,9 +506,11 @@ func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
 		return err
 	}
 	for _, r := range ms.Response {
-		if e, sums, ok := b.entryFromResponse(r); ok {
-			b.sums.put(e.RelPath, sums)
+		e, sums, err := b.entryFromResponse(r)
+		if err != nil {
+			return err
 		}
+		b.sums.put(e.RelPath, sums)
 	}
 	return nil
 }
@@ -463,8 +542,8 @@ func (b *WebDAVBackend) probeAlgos(ctx context.Context) map[string]bool {
 		firstSub := ""
 		found := false
 		for _, r := range ms.Response {
-			e, sums, ok := b.entryFromResponse(r)
-			if !ok || e.RelPath == dir {
+			e, sums, err := b.entryFromResponse(r)
+			if err != nil || e.RelPath == dir {
 				continue
 			}
 			if sums != nil {
