@@ -233,8 +233,20 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 // directory's children, without it the sender skips a directory argument and
 // hangs up after an empty list.
 func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d"}, b.modulePath(relDir, true))
+	remote := b.modulePath(relDir, true)
+	label := "LIST " + remote
+	peer := &peerMsgs{}
+	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d"}, remote, rsyncclient.WithStderr(peer))
 	if err != nil {
+		// A daemon that cannot open the folder says why, then hangs up:
+		// its reason beats "connection reset".
+		if probs := peer.problems(); len(probs) > 0 {
+			err = fmt.Errorf("%w (%v)", incompleteListing(label, probs), err)
+		}
+		return nil, err
+	}
+	if err := listErr(label, result, peer); err != nil {
+		Log.Add("rsync", DirErr, err.Error())
 		return nil, err
 	}
 	entries := fileListEntries(relDir, result.FileList)
@@ -250,14 +262,25 @@ func (b *RsyncBackend) PreloadRecursive(ctx context.Context, scope string) error
 }
 
 func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
-	add, finish := fileListStream(scope, emit, complete)
-	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, b.modulePath(scope, true), rsyncclient.WithFileListCallback(add))
+	remote := b.modulePath(scope, true)
+	l := newRsyncListing(scope, emit, complete, b.msgRelPath)
+	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, remote, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
 		return err
 	}
-	finish()
+	if err := l.finish("RLIST "+remote, result); err != nil {
+		Log.Add("rsync", DirWarn, err.Error())
+		return err
+	}
 	Log.Add("rsync", DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
+}
+
+// msgRelPath maps a path in a daemon message to a relPath under the
+// backend's base. rsync gives it from the module root: "photos" when the
+// run starts at the root, "/sub/photos" when it starts in sub.
+func (b *RsyncBackend) msgRelPath(p string) (string, bool) {
+	return relUnder("/"+b.base, "/"+strings.TrimPrefix(p, "/"))
 }
 
 func (b *RsyncBackend) ProbeChecksums() []string { return []string{"md4", "rsync"} }

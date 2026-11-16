@@ -2,12 +2,14 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"path"
 	"slices"
 	"strings"
 	"testing"
 
 	rsyncpkg "github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/rsyncclient"
 
 	"sc/model"
 )
@@ -73,7 +75,7 @@ func TestFileListStreamReleasesDirMidRun(t *testing.T) {
 	c := newListCache()
 	release := make(chan struct{})
 	c.start(context.Background(), "sub", func(_ context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
-		add, finish := fileListStream(scope, emit, complete)
+		add, finish := fileListStream(scope, emit, complete, nil)
 		for _, fi := range fileInfos(".", "a/", "b/", "a/1", "a/2", "b/1") {
 			add(fi)
 		}
@@ -88,4 +90,123 @@ func TestFileListStreamReleasesDirMidRun(t *testing.T) {
 	close(release)
 	mustServe(t, b, 2, false)
 	mustServe(t, serveAsync(c, "sub"), 2, false)
+}
+
+// peerLine is a message from the rsync peer as gorsync logs it.
+func peerLine(msg string) []byte {
+	return []byte("2026/11/16 05:40:56 wire.go:96: rsync: " + msg + "\n")
+}
+
+func moduleRel(p string) (string, bool) { return relUnder("/", "/"+strings.TrimPrefix(p, "/")) }
+
+// R3: once the peer reports a problem, folders the stream leaves are held
+// until the run ends. Then the folder the message names is listed live and
+// the rest is served from the cache.
+func TestRsyncListingHoldsAfterPeerMessage(t *testing.T) {
+	c := newListCache()
+	release := make(chan struct{})
+	c.start(context.Background(), "", func(_ context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+		l := newRsyncListing(scope, emit, complete, moduleRel)
+		for _, fi := range fileInfos(".", "a/", "b/", "c/", "a/1", "b/1") {
+			l.add(fi)
+		}
+		l.Write(peerLine(`rsync: [sender] link_stat "b/2" (in mod) failed: Permission denied (13)`))
+		l.add(fileInfos("c/1")[0])
+		<-release
+		return l.finish("RLIST mod/", &rsyncclient.Result{XferErrors: 1, IOErrors: 1})
+	})
+	mustServe(t, serveAsync(c, "a"), 1, false) // released before the message
+	b := serveAsync(c, "b")
+	mustBlock(t, b) // the stream left b after the message
+	close(release)
+	mustServe(t, b, 1, true)                   // b/2 is missing from b: live
+	mustServe(t, serveAsync(c, "c"), 1, false) // held, then released
+	mustServe(t, serveAsync(c, ""), 3, false)
+}
+
+// A folder rsync could not open is listed live, and so is its parent.
+func TestRsyncListingUnopenableFolder(t *testing.T) {
+	c := newListCache()
+	c.start(context.Background(), "", func(_ context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+		l := newRsyncListing(scope, emit, complete, moduleRel)
+		for _, fi := range fileInfos(".", "a/", "photos/", "a/1") {
+			l.add(fi)
+		}
+		l.Write(peerLine(`rsync: [sender] opendir "photos" (in mod) failed: Permission denied (13)`))
+		l.Write(peerLine(`rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338) [sender=3.5.1]`))
+		return l.finish("RLIST mod/", &rsyncclient.Result{XferErrors: 2, IOErrors: 1})
+	})
+	waitDone(t, c)
+	mustServe(t, serveAsync(c, "photos"), 1, true)
+	mustServe(t, serveAsync(c, ""), 1, true)
+	mustServe(t, serveAsync(c, "a"), 1, false)
+}
+
+// Problems that cannot be pinned to folders the list holds drop the whole
+// run: every folder is then listed live.
+func TestRsyncListingWholeRunFails(t *testing.T) {
+	for name, tc := range map[string]struct {
+		msgs []string
+		res  rsyncclient.Result
+	}{
+		"flag without a message (gorsync's sender)": {nil, rsyncclient.Result{IOErrors: 1}},
+		"message without a path":                    {[]string{"rsync: [sender] read errors mapping x"}, rsyncclient.Result{XferErrors: 1}},
+		"path outside the list":                     {[]string{`rsync: [sender] opendir "zz/q" (in mod) failed: Permission denied (13)`}, rsyncclient.Result{XferErrors: 1, IOErrors: 1}},
+		"more errors counted than seen":             {[]string{`rsync: [sender] opendir "a" (in mod) failed: Permission denied (13)`}, rsyncclient.Result{XferErrors: 2, IOErrors: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newListCache()
+			c.start(context.Background(), "", func(_ context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+				l := newRsyncListing(scope, emit, complete, moduleRel)
+				for _, fi := range fileInfos(".", "a/", "a/1") {
+					l.add(fi)
+				}
+				for _, m := range tc.msgs {
+					l.Write(peerLine(m))
+				}
+				err := l.finish("RLIST mod/", &tc.res)
+				var unread *unreadDirs
+				if err == nil || errors.As(err, &unread) {
+					t.Errorf("finish = %v, want a whole-run failure", err)
+				}
+				return err
+			})
+			waitDone(t, c)
+			mustServe(t, serveAsync(c, "a"), 1, true)
+			mustServe(t, serveAsync(c, ""), 1, true)
+		})
+	}
+}
+
+// A file deleted while rsync listed is rightly missing: not a problem.
+func TestRsyncListingVanishedFileIsFine(t *testing.T) {
+	c := newListCache()
+	c.start(context.Background(), "", func(_ context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+		l := newRsyncListing(scope, emit, complete, moduleRel)
+		for _, fi := range fileInfos(".", "a/", "a/1") {
+			l.add(fi)
+		}
+		l.Write(peerLine(`file has vanished: "a/2" (in mod)`))
+		return l.finish("RLIST mod/", &rsyncclient.Result{XferErrors: 1, IOErrors: 2})
+	})
+	waitDone(t, c)
+	mustServe(t, serveAsync(c, "a"), 1, false)
+	mustServe(t, serveAsync(c, ""), 1, false)
+}
+
+// Only the peer's messages count, not gorsync's own log lines.
+func TestPeerMsgsParsing(t *testing.T) {
+	var p peerMsgs
+	for _, line := range []string{
+		`2026/11/16 05:40:56 clientmaincmd.go:30: dest: "/tmp/rsync-rlist-1/", sources: ["mod/"]`,
+		`2026/11/16 05:40:56 wire.go:100: info: skipping non-regular file "x"`,
+		`2026/11/16 05:40:56 wire.go:96: rsync: rsync: [sender] opendir "a" (in mod) failed: Permission denied (13)`,
+		`rsync: plain`,
+	} {
+		p.Write([]byte(line + "\n"))
+	}
+	want := []string{`[sender] opendir "a" (in mod) failed: Permission denied (13)`, "plain"}
+	if got := p.problems(); !slices.Equal(got, want) {
+		t.Errorf("problems = %q, want %q", got, want)
+	}
 }

@@ -68,8 +68,9 @@ func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) er
 }
 
 func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
-	add, finish := fileListStream(scope, emit, complete)
-	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict(), rsyncclient.WithFileListCallback(add))
+	// rsync quotes paths in its messages as absolute paths.
+	l := newRsyncListing(scope, emit, complete, func(p string) (string, bool) { return relUnder(b.base, p) })
+	client, err := newRsyncClient([]string{"-n", "-r"}, rsyncclient.DontRestrict(), rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
 		return err
 	}
@@ -78,11 +79,15 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-	result, err := b.runRsync(ctx, "RLIST", b.client, client, b.abs(scope)+"/", []string{tmpDir + "/"}, nil)
+	remote := b.abs(scope) + "/"
+	result, err := b.runRsync(ctx, "RLIST", b.client, client, remote, []string{tmpDir + "/"}, nil)
 	if err != nil {
 		return err
 	}
-	finish()
+	if err := l.finish("RLIST "+remote, result); err != nil {
+		Log.Add(b.proto, DirWarn, err.Error())
+		return err
+	}
 	Log.Add(b.proto, DirIn, fmt.Sprintf("RLIST %d entries", len(result.FileList)))
 	return nil
 }

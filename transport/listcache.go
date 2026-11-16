@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"path"
 	"strings"
 	"sync"
@@ -42,10 +43,22 @@ func (c *listCache) reset() {
 // Emitters whose order cannot prove that never call complete.
 type recursiveLister func(ctx context.Context, scope string, emit func(parent string, entries []model.FileEntry), complete func(dir string)) error
 
+// unreadDirs is the result of a recursive listing that ran to the end but
+// could not list some folders in full. The run never released them; the
+// cache drops them and keeps the rest, so List lists just these live, where
+// the error shows.
+type unreadDirs struct {
+	dirs []string
+	why  string
+}
+
+func (e *unreadDirs) Error() string { return e.why }
+
 // start runs one recursive listing in the background, feeding the cache
 // through emit. A preload already in flight is left alone. When run fails
 // the partial contents are dropped, so List falls back to live per-dir calls
-// instead of trusting a truncated tree.
+// instead of trusting a truncated tree; an *unreadDirs failure drops only
+// the folders it names.
 func (c *listCache) start(ctx context.Context, scope string, run recursiveLister) {
 	c.mu.Lock()
 	if c.active && !c.done {
@@ -60,7 +73,13 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 	go func() {
 		err := run(ctx, scope, c.emit, c.markComplete)
 		c.mu.Lock()
-		if err != nil {
+		var unread *unreadDirs
+		switch {
+		case errors.As(err, &unread):
+			for _, d := range unread.dirs {
+				c.drop(d)
+			}
+		case err != nil:
 			c.reset()
 		}
 		c.done = true
@@ -219,10 +238,15 @@ func parentDir(relPath string) string {
 // child: rsync lists a directory's children as one run after the parent's
 // run, so the entry alone proves nothing. Directories never completed by the
 // stream (empty ones, or all of them without complete) are registered at
-// finish, so an empty leaf is a cache hit rather than a live list.
+// finish, so an empty leaf is a cache hit rather than a live list. While hold
+// reports true, a dir the stream leaves is not completed then but at finish:
+// the run has reported a problem, and only its end tells which listings are
+// whole.
 type emitGrouper struct {
 	emit         func(string, []model.FileEntry)
 	complete     func(string)
+	hold         func() bool
+	skip         map[string]bool // never completed, see finishExcept
 	lateChildren bool
 	current      string
 	have         bool
@@ -232,7 +256,7 @@ type emitGrouper struct {
 }
 
 func (g *emitGrouper) add(e model.FileEntry) {
-	g.closeOutside(e.RelPath)
+	g.closeOutside(e.RelPath, g.hold == nil || !g.hold())
 	parent := parentDir(e.RelPath)
 	if g.lateChildren && parent != "" && (len(g.open) == 0 || g.open[len(g.open)-1] != parent) {
 		g.push(parent)
@@ -245,10 +269,7 @@ func (g *emitGrouper) add(e model.FileEntry) {
 	if !e.IsDir {
 		return
 	}
-	if g.dirs == nil {
-		g.dirs = make(map[string]struct{})
-	}
-	g.dirs[e.RelPath] = struct{}{}
+	g.addDir(e.RelPath)
 	if !g.lateChildren {
 		g.push(e.RelPath)
 	}
@@ -260,18 +281,30 @@ func (g *emitGrouper) push(dir string) {
 	}
 }
 
-// closeOutside completes every open dir that rel is not under; "" closes all.
-func (g *emitGrouper) closeOutside(rel string) {
+// closeOutside closes every open dir that rel is not under; "" closes all.
+// A closed dir is completed now if release is set, else at finish.
+func (g *emitGrouper) closeOutside(rel string, release bool) {
 	for len(g.open) > 0 {
 		d := g.open[len(g.open)-1]
 		if strings.HasPrefix(rel, d+"/") {
 			return
 		}
 		g.flush()
+		g.open = g.open[:len(g.open)-1]
+		if !release || g.skip[d] {
+			g.addDir(d)
+			continue
+		}
 		g.complete(d)
 		delete(g.dirs, d)
-		g.open = g.open[:len(g.open)-1]
 	}
+}
+
+func (g *emitGrouper) addDir(d string) {
+	if g.dirs == nil {
+		g.dirs = make(map[string]struct{})
+	}
+	g.dirs[d] = struct{}{}
 }
 
 func (g *emitGrouper) flush() {
@@ -282,10 +315,18 @@ func (g *emitGrouper) flush() {
 	g.batch, g.have = nil, false
 }
 
-func (g *emitGrouper) finish() {
+func (g *emitGrouper) finish() { g.finishExcept(nil) }
+
+// finishExcept is finish for a run that could not list the dirs in skip in
+// full: they are never completed, and the caller has the cache drop them.
+func (g *emitGrouper) finishExcept(skip map[string]bool) {
+	g.skip = skip
 	g.flush()
-	g.closeOutside("")
+	g.closeOutside("", true)
 	for d := range g.dirs {
+		if skip[d] {
+			continue
+		}
 		if g.complete != nil {
 			g.complete(d)
 			continue

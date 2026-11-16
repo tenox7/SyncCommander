@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	rsyncpkg "github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -192,15 +194,197 @@ func fileListEntries(relDir string, list []rsyncpkg.FileInfo) []model.FileEntry 
 // pre-order; both keep a subtree contiguous, so a dir is complete once an
 // entry outside it arrives, but only its first child (lateChildren) proves
 // the run has begun. add goes to rsyncclient.WithFileListCallback; finish
-// runs after Run returns.
-func fileListStream(scope string, emit func(string, []model.FileEntry), complete func(string)) (add func(rsyncpkg.FileInfo), finish func()) {
-	g := &emitGrouper{emit: emit, complete: complete, lateChildren: true}
-	add = func(fi rsyncpkg.FileInfo) {
-		if e, ok := fileInfoEntry(scope, fi); ok {
-			g.add(e)
+// runs after Run returns. The stream holds back releases while hold reports
+// true; nil never holds.
+func fileListStream(scope string, emit func(string, []model.FileEntry), complete func(string), hold func() bool) (add func(rsyncpkg.FileInfo), finish func()) {
+	l := newRsyncListing(scope, emit, complete, nil)
+	l.g.hold = hold
+	return l.add, l.g.finish
+}
+
+// ioErrGeneral is rsync's IOERR_GENERAL bit of the io_error flag that ends
+// a file list: the sender could not read something and left it out. rsync
+// skips --delete when it is set. IOERR_VANISHED alone, a file deleted while
+// the sender listed, leaves the list right.
+const ioErrGeneral = 1
+
+// peerMsgs collects, as a run's stderr, the messages the rsync peer sends:
+// gorsync logs each as one line holding "rsync: <message>". On a listing
+// run, stock rsync sends one for everything it could not read and left out
+// of the file list, and it sends it ahead of any list data it writes later
+// (io.c perform_io flushes pending messages first).
+type peerMsgs struct {
+	seen atomic.Bool
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (p *peerMsgs) Write(b []byte) (int, error) {
+	for line := range strings.Lines(string(b)) {
+		i := strings.Index(line, "rsync: ")
+		if i < 0 || i > 0 && !strings.HasSuffix(line[:i], ": ") {
+			continue
+		}
+		// rsyserr messages carry their own "rsync: " prefix.
+		msg := strings.TrimPrefix(strings.TrimSpace(line[i+len("rsync: "):]), "rsync: ")
+		p.seen.Store(true)
+		p.mu.Lock()
+		p.msgs = append(p.msgs, msg)
+		p.mu.Unlock()
+	}
+	return len(b), nil
+}
+
+func (p *peerMsgs) Close() error { return nil }
+
+// missed reports error messages the peer counted but this report did not
+// see, a line format it does not know: nothing can be pinned on them.
+func (p *peerMsgs) missed(res *rsyncclient.Result) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return res.XferErrors > len(p.msgs)
+}
+
+// problems returns the messages about something left out of the file list.
+// "file has vanished" is not one: that file is gone, so leaving it out is
+// right. The "rsync error: ... (code 23)" summary repeats the others.
+func (p *peerMsgs) problems() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, m := range p.msgs {
+		if strings.HasPrefix(m, "file has vanished: ") || strings.HasPrefix(m, "rsync error: ") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// listErr fails a listing run whose file list the sender could not build in
+// full, the run rsync itself ends with exit code 23 and no deletes.
+func listErr(label string, res *rsyncclient.Result, peer *peerMsgs) error {
+	probs := peer.problems()
+	if len(probs) == 0 && res.IOErrors&ioErrGeneral == 0 && !peer.missed(res) {
+		return nil
+	}
+	return incompleteListing(label, probs)
+}
+
+// ErrIncompleteListing marks a listing the server could not build in full.
+// Retry treats it as permanent: what the server cannot read is on its disk.
+var ErrIncompleteListing = errors.New("the server could not read everything here, so this listing is incomplete")
+
+func incompleteListing(label string, probs []string) error {
+	err := fmt.Errorf("%s: %w", label, ErrIncompleteListing)
+	if len(probs) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.Join(probs[:min(len(probs), 3)], "; "))
+	}
+	return err
+}
+
+// relUnder maps p, an absolute path, to a relPath under base; false when it
+// is not under base.
+func relUnder(base, p string) (string, bool) {
+	if !strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	base, p = path.Clean(base), path.Clean(p)
+	switch {
+	case p == base:
+		return "", true
+	case base == "/":
+		return p[1:], true
+	case strings.HasPrefix(p, base+"/"):
+		return p[len(base)+1:], true
+	}
+	return "", false
+}
+
+// rsyncListing is one recursive listing run: the file list stream into the
+// cache, and the peer's messages as the run's stderr. Once the peer reports
+// a problem the stream stops releasing folders; at the end, the folders the
+// messages name are dropped and the rest is released.
+type rsyncListing struct {
+	peerMsgs
+	scope string
+	g     *emitGrouper
+	dirs  map[string]bool // every folder the list holds, and the scope
+	// toRel maps a path quoted in a peer message to a relPath, false when it
+	// is not under the backend's base.
+	toRel func(string) (string, bool)
+}
+
+func newRsyncListing(scope string, emit func(string, []model.FileEntry), complete func(string), toRel func(string) (string, bool)) *rsyncListing {
+	l := &rsyncListing{scope: scope, dirs: map[string]bool{scope: true}, toRel: toRel}
+	l.g = &emitGrouper{emit: emit, complete: complete, lateChildren: true, hold: l.seen.Load}
+	return l
+}
+
+func (l *rsyncListing) add(fi rsyncpkg.FileInfo) {
+	e, ok := fileInfoEntry(l.scope, fi)
+	if !ok {
+		return
+	}
+	if e.IsDir {
+		l.dirs[e.RelPath] = true
+	}
+	l.g.add(e)
+}
+
+// finish ends a run that returned no error. A run whose problems cannot all
+// be pinned to folders fails as a whole: the cache drops everything. That
+// includes a flag with no message at all, which is how gorsync's sender
+// reports an unreadable folder.
+func (l *rsyncListing) finish(label string, res *rsyncclient.Result) error {
+	probs := l.problems()
+	if l.missed(res) {
+		return incompleteListing(label, probs)
+	}
+	if len(probs) == 0 {
+		if res.IOErrors&ioErrGeneral != 0 {
+			return incompleteListing(label, nil)
+		}
+		l.g.finish()
+		return nil
+	}
+	unread := map[string]bool{}
+	for _, m := range probs {
+		dirs, ok := l.unreadBy(m)
+		if !ok {
+			return incompleteListing(label, probs)
+		}
+		for _, d := range dirs {
+			unread[d] = true
 		}
 	}
-	return add, g.finish
+	l.g.finishExcept(unread)
+	return &unreadDirs{dirs: slices.Sorted(maps.Keys(unread)), why: incompleteListing(label, probs).Error()}
+}
+
+// unreadBy names the folders whose listings a peer message makes short.
+// rsync quotes the path, as in `opendir "/photos" (in backups) failed`. A
+// folder it could not open lists none of its children; an entry it could
+// not stat is missing from its parent. Both are named for any message, as
+// long as one of them is a folder the list holds: false otherwise, also
+// for a message with no quoted path.
+func (l *rsyncListing) unreadBy(msg string) ([]string, bool) {
+	i, j := strings.IndexByte(msg, '"'), strings.LastIndexByte(msg, '"')
+	if i < 0 || j <= i || l.toRel == nil {
+		return nil, false
+	}
+	rel, ok := l.toRel(msg[i+1 : j])
+	if !ok || rel != l.scope && !strings.HasPrefix(rel, l.scope+"/") && l.scope != "" {
+		return nil, false
+	}
+	var dirs []string
+	if l.dirs[rel] {
+		dirs = append(dirs, rel)
+	}
+	if parent := parentDir(rel); rel != l.scope && l.dirs[parent] {
+		dirs = append(dirs, parent)
+	}
+	return dirs, len(dirs) > 0
 }
 
 // tailProgress credits growth of dir/base beyond skip to the context's
