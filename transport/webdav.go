@@ -104,10 +104,90 @@ func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*w
 		return nil, fmt.Errorf("PROPFIND %s: %s", relPath, resp.Status)
 	}
 	var ms wdMultistatus
-	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
-		return nil, fmt.Errorf("PROPFIND %s: decode: %v", relPath, err)
+	if err := readMultistatus(resp.Body, func(r wdResponse) { ms.Response = append(ms.Response, r) }); err != nil {
+		err = fmt.Errorf("PROPFIND %s: %v", relPath, err)
+		Log.Add("webdav", DirErr, err.Error())
+		return nil, err
 	}
 	return &ms, nil
+}
+
+// readMultistatus calls each for every response of a PROPFIND answer. The
+// answer must be one multistatus element with nothing after it but white
+// space: golang.org/x/net/webdav, which rclone serve webdav runs, closes the
+// multistatus when its walk fails part way and then writes "Internal Server
+// Error" after it. That is a short listing in a well-formed document.
+func readMultistatus(body io.Reader, each func(wdResponse)) error {
+	dec := xml.NewDecoder(body)
+	root, err := wdRoot(dec)
+	if err != nil {
+		return err
+	}
+	if root.Name.Local != "multistatus" {
+		return fmt.Errorf("the answer is <%s>, not a multistatus", root.Name.Local)
+	}
+	for {
+		tok, err := dec.Token() // the end of the body inside the root is a syntax error
+		if err != nil {
+			return fmt.Errorf("decode: %v", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local != "response" {
+				if err := dec.Skip(); err != nil {
+					return fmt.Errorf("decode: %v", err)
+				}
+				continue
+			}
+			var r wdResponse
+			if err := dec.DecodeElement(&r, &t); err != nil {
+				return fmt.Errorf("decode: %v", err)
+			}
+			each(r)
+		case xml.EndElement:
+			return wdTrailer(dec)
+		}
+	}
+}
+
+// wdRoot returns the root element, past the XML declaration, comments and
+// white space.
+func wdRoot(dec *xml.Decoder) (xml.StartElement, error) {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return xml.StartElement{}, fmt.Errorf("the answer is empty, not a multistatus")
+		}
+		if err != nil {
+			return xml.StartElement{}, fmt.Errorf("decode: %v", err)
+		}
+		if se, ok := tok.(xml.StartElement); ok {
+			return se, nil
+		}
+	}
+}
+
+// wdTrailer fails unless only white space, comments and processing
+// instructions follow the root element.
+func wdTrailer(dec *xml.Decoder) error {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("after the multistatus: %v", err)
+		}
+		switch t := tok.(type) {
+		case xml.Comment, xml.ProcInst:
+		case xml.CharData:
+			if text := strings.TrimSpace(string(t)); text != "" {
+				return fmt.Errorf("the server wrote %q after the multistatus: its listing was cut short", text[:min(len(text), 80)])
+			}
+		default:
+			return fmt.Errorf("the server wrote more XML after the multistatus: its listing was cut short")
+		}
+	}
 }
 
 func (b *WebDAVBackend) hrefToRel(href string) (string, bool) {
@@ -303,34 +383,24 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	// how deep the server went: sabre/dav answers Depth: infinity with one
 	// level by default and Tomcat stops at depth 3. So a folder with no
 	// children in the answer is listed again on its own (childlessUnknown).
+	// A failed answer returns before finish: the folders still open then
+	// were never completed, and the cache drops the whole run.
 	self := strings.Trim(scope, "/")
 	g := &emitGrouper{emit: emit, complete: complete, childlessUnknown: true}
-	dec := xml.NewDecoder(resp.Body)
 	n := 0
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			Log.Add("webdav", DirErr, "RPROPFIND decode: "+err.Error())
-			return err
-		}
-		se, ok := tok.(xml.StartElement)
-		if !ok || se.Name.Local != "response" {
-			continue
-		}
-		var r wdResponse
-		if err := dec.DecodeElement(&r, &se); err != nil {
-			return err
-		}
+	err = readMultistatus(resp.Body, func(r wdResponse) {
 		e, sums, ok := b.entryFromResponse(r)
 		if !ok || e.RelPath == self {
-			continue
+			return
 		}
 		b.sums.put(e.RelPath, sums)
 		g.add(e)
 		n++
+	})
+	if err != nil {
+		err = fmt.Errorf("RPROPFIND %s: %v; listing each folder on its own", b.pathFor(scope), err)
+		Log.Add("webdav", DirWarn, err.Error())
+		return err
 	}
 	g.finish()
 	Log.Add("webdav", DirIn, fmt.Sprintf("RPROPFIND %d entries", n))

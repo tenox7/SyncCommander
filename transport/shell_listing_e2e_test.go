@@ -50,7 +50,11 @@ func openShellBackend(t *testing.T, scheme, addr, base, lister string) shellBack
 	return b.(shellBackend)
 }
 
-func listNames(ctx context.Context, b shellBackend, dir string) ([]string, error) {
+type lister interface {
+	List(context.Context, string) ([]model.FileEntry, error)
+}
+
+func listNames(ctx context.Context, b lister, dir string) ([]string, error) {
 	entries, err := b.List(ctx, dir)
 	var names []string
 	for _, e := range entries {
