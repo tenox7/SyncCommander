@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -102,11 +104,20 @@ func expandHome(remotePath string, home func() (string, error)) string {
 // names survive.
 const findRecord = `%s\t%T@\t%A@\t%C@\t%m\t%y\t`
 
+// unreadRecord is findRecord for a folder find cannot list (not readable or
+// not searchable), with type letter D. find prunes it instead of reporting
+// it on stderr, so the report arrives in order with the entries and find
+// exits 0 when nothing else went wrong.
+const unreadRecord = `%s\t%T@\t%A@\t%C@\t%m\tD\t`
+
 // perlLister prints findRecord-shaped records on hosts whose find has no
 // -printf (BSD, macOS). Its arguments are the directory and 1 to recurse; the
 // name is the bare entry at one level and the full path when recursing,
-// matching find's %f and %p.
-const perlLister = `perl -e 'sub w{my($d,$r)=@_;opendir(my $h,$d)or return;for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p)or next;my $t=-l _?"l":-d _?"d":"f";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
+// matching find's %f and %p. A path it cannot read, a folder it cannot open
+// or an entry it cannot lstat, becomes a record of type ! holding the error
+// in the first field and the full path last. A file deleted while it lists
+// is skipped: leaving it out is right.
+const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":"f";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
 
 func (s *sshShell) listCmd(dir string, recursive bool) string {
 	if s.usePerl.Load() {
@@ -120,18 +131,25 @@ func (s *sshShell) listCmd(dir string, recursive bool) string {
 	if recursive {
 		depth, name = "", "%p"
 	}
-	return fmt.Sprintf(`find %s%s -mindepth 1 -printf '%s%s\0'`, shellQuote(dir), depth, findRecord, name)
+	return fmt.Sprintf(`find %s%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0' -prune \) -o -printf '%s%s\0'`,
+		shellQuote(dir), depth, unreadRecord, name, findRecord, name)
 }
 
 // list runs the directory lister into stdout, switching to the perl form for
-// good once find rejects -printf.
+// good once find rejects -printf, -readable or -executable (BSD, busybox and
+// pre-2007 GNU find).
 func (s *sshShell) list(ctx context.Context, dir string, recursive bool, stdout io.Writer) error {
 	err := s.exec(ctx, s.client, s.listCmd(dir, recursive), nil, stdout)
-	if err == nil || s.usePerl.Load() || !strings.Contains(err.Error(), "printf") {
+	if err == nil || s.usePerl.Load() || !findLacksPrimary(err) {
 		return err
 	}
 	s.usePerl.Store(true)
 	return s.exec(ctx, s.client, s.listCmd(dir, recursive), nil, stdout)
+}
+
+func findLacksPrimary(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "printf") || strings.Contains(msg, "readable") || strings.Contains(msg, "executable")
 }
 
 func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -144,57 +162,153 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		name, e, ok := parseFindRecord(rec)
-		if !ok {
+		r, ok := parseListRecord(rec)
+		switch {
+		case !ok:
 			continue
+		case r.err != "":
+			// perl could not open the folder or stat an entry: the listing
+			// is short, and exit status 0 says nothing.
+			err := fmt.Errorf("cannot read %s: %s", r.name, r.err)
+			Log.Add(s.proto, DirErr, err.Error())
+			return nil, err
 		}
-		e.RelPath, e.Name = path.Join(relDir, name), name
-		result = append(result, e)
+		r.entry.RelPath, r.entry.Name = path.Join(relDir, r.name), r.name
+		result = append(result, r.entry)
 	}
 	return result, nil
 }
 
 // findRecursive streams every entry under scope into emit as the listing
-// arrives, grouped by parent.
+// arrives, grouped by parent; see shellListing.
 func (s *sshShell) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	absPrefix := s.abs(scope)
-	g := &emitGrouper{emit: emit, complete: complete}
-	w := newRecordWriter(0, func(rec string) {
-		full, e, ok := parseFindRecord(rec)
-		rel := strings.TrimPrefix(strings.TrimPrefix(full, absPrefix), "/")
-		if !ok || rel == "" {
-			return
-		}
-		e.RelPath, e.Name = path.Join(scope, rel), path.Base(rel)
-		g.add(e)
-	})
+	l := newShellListing(scope, absPrefix, emit, complete)
+	w := newRecordWriter(0, l.add)
 	err := s.list(ctx, absPrefix, true, w)
 	w.flush()
-	g.finish()
+	if err == nil {
+		err = l.finish(s.proto + ": listing " + absPrefix)
+	}
+	if err != nil {
+		Log.Add(s.proto, DirWarn, err.Error())
+	}
 	return err
 }
 
-// parseFindRecord decodes one lister record; the trailing name field may
+// shellListing is one recursive run of find or the perl lister. Both report
+// what they cannot read in the same stream as the entries and in order: a D
+// record is a folder find cannot list, a ! record a path perl could not
+// read. So the folder a report makes short is still open when it arrives;
+// it is never released, and at the end the cache drops it, to be listed
+// live where the error shows. Everything else is served. A failed run, or a
+// report that cannot be pinned to a folder of the listing, drops all.
+type shellListing struct {
+	scope, absPrefix string
+	g                *emitGrouper
+	dirs             map[string]bool // every folder listed, and the scope
+	unread           map[string]bool // the grouper's skip set
+	reports          []string
+	bad              bool
+}
+
+func newShellListing(scope, absPrefix string, emit func(string, []model.FileEntry), complete func(string)) *shellListing {
+	l := &shellListing{scope: scope, absPrefix: absPrefix, dirs: map[string]bool{scope: true}, unread: map[string]bool{}}
+	l.g = &emitGrouper{emit: emit, complete: complete, skip: l.unread, hold: func() bool { return l.bad }}
+	return l
+}
+
+func (l *shellListing) add(rec string) {
+	r, ok := parseListRecord(rec)
+	if !ok {
+		return
+	}
+	rel, ok := relUnder(l.absPrefix, r.name)
+	if !ok {
+		l.bad = true
+		return
+	}
+	relPath := path.Join(l.scope, rel)
+	if r.err != "" {
+		l.reports = append(l.reports, r.name+": "+r.err)
+		l.unreadBy(relPath)
+		return
+	}
+	if rel == "" {
+		return
+	}
+	r.entry.RelPath, r.entry.Name = relPath, path.Base(relPath)
+	if r.entry.IsDir {
+		l.dirs[relPath] = true
+	}
+	if r.unread {
+		l.reports = append(l.reports, r.name+": cannot be read")
+		l.unread[relPath] = true
+	}
+	l.g.add(r.entry)
+}
+
+// unreadBy marks the folder a path perl could not read makes short: the
+// path itself when it is a folder of the listing (opendir failed), else its
+// parent, which lacks the entry (lstat failed).
+func (l *shellListing) unreadBy(relPath string) {
+	switch parent := parentDir(relPath); {
+	case l.dirs[relPath]:
+		l.unread[relPath] = true
+	case relPath != l.scope && l.dirs[parent]:
+		l.unread[parent] = true
+	default:
+		l.bad = true
+	}
+}
+
+func (l *shellListing) finish(label string) error {
+	switch {
+	case l.bad:
+		return fmt.Errorf("%s: %w", label, ErrIncompleteListing)
+	case len(l.unread) == 0:
+		l.g.finish()
+		return nil
+	}
+	l.g.finishExcept(l.unread)
+	return &unreadDirs{
+		dirs: slices.Sorted(maps.Keys(l.unread)),
+		why:  fmt.Sprintf("%s: %v: %s", label, ErrIncompleteListing, strings.Join(l.reports[:min(len(l.reports), 3)], "; ")),
+	}
+}
+
+// listRecord is one record of a shell lister.
+type listRecord struct {
+	name   string
+	entry  model.FileEntry
+	unread bool   // D: a folder find cannot list
+	err    string // !: the lister could not read name; no entry
+}
+
+// parseListRecord decodes one lister record; the trailing name field may
 // contain anything but NUL. Symlinks are skipped like on every backend.
-func parseFindRecord(rec string) (name string, e model.FileEntry, ok bool) {
+func parseListRecord(rec string) (listRecord, bool) {
 	f := strings.SplitN(rec, "\t", 7)
 	if len(f) < 7 || f[5] == "l" {
-		return "", model.FileEntry{}, false
+		return listRecord{}, false
+	}
+	if f[5] == "!" {
+		return listRecord{name: f[6], err: f[0]}, true
 	}
 	size, _ := strconv.ParseInt(f[0], 10, 64)
 	modeVal, _ := strconv.ParseUint(f[4], 8, 32)
-	e = model.FileEntry{
+	e := model.FileEntry{
 		Size:    size,
 		ModTime: parseEpoch(f[1]),
 		ATime:   parseEpoch(f[2]),
 		CTime:   parseEpoch(f[3]),
-		IsDir:   f[5] == "d",
+		IsDir:   f[5] == "d" || f[5] == "D",
 		Mode:    os.FileMode(modeVal),
 	}
 	if e.IsDir {
 		e.Mode |= os.ModeDir
 	}
-	return f[6], e, true
+	return listRecord{name: f[6], entry: e, unread: f[5] == "D"}, true
 }
 
 func parseEpoch(s string) time.Time {

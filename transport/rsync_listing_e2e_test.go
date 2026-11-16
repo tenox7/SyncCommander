@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -85,8 +86,15 @@ func TestRsyncListingUnreadableFolder(t *testing.T) {
 
 // startExecSSHServer runs an in-process sshd that runs every exec request
 // with sh -c on this machine, so ssh backends drive the real rsync, find
-// and perl as on a remote host.
-func startExecSSHServer(t *testing.T) string {
+// and perl as on a remote host. It has no SFTP, so ssh:// and scp:// get
+// the shell backend.
+func startExecSSHServer(t *testing.T) string { return startShellServer(t, false) }
+
+// startExecSFTPServer is startExecSSHServer with the sftp subsystem too, as
+// a stock sshd has it.
+func startExecSFTPServer(t *testing.T) string { return startShellServer(t, true) }
+
+func startShellServer(t *testing.T, withSFTP bool) string {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -123,7 +131,7 @@ func startExecSSHServer(t *testing.T) string {
 					}
 					c, creqs, err := ch.Accept()
 					if err == nil {
-						go serveExecSession(c, creqs)
+						go serveExecSession(c, creqs, withSFTP)
 					}
 				}
 			}()
@@ -132,9 +140,17 @@ func startExecSSHServer(t *testing.T) string {
 	return l.Addr().String()
 }
 
-func serveExecSession(c ssh.Channel, reqs <-chan *ssh.Request) {
+func serveExecSession(c ssh.Channel, reqs <-chan *ssh.Request, withSFTP bool) {
 	defer c.Close()
 	for req := range reqs {
+		var sub struct{ Name string }
+		if withSFTP && req.Type == "subsystem" && ssh.Unmarshal(req.Payload, &sub) == nil && sub.Name == "sftp" {
+			req.Reply(true, nil)
+			if srv, err := sftp.NewServer(c); err == nil {
+				srv.Serve()
+			}
+			return
+		}
 		var p struct{ Command string }
 		if req.Type != "exec" || ssh.Unmarshal(req.Payload, &p) != nil {
 			req.Reply(false, nil)
@@ -191,14 +207,16 @@ func TestRsyncSSHListingUnreadableFolder(t *testing.T) {
 	ctx := context.Background()
 	mark := len(Log.Lines())
 	b.PreloadRecursive(ctx, "")
-	b.List(ctx, "photos")
+	if entries, err := b.List(ctx, "photos"); err == nil {
+		t.Errorf("List(photos) = %d entries and no error; the folder cannot be read", len(entries))
+	}
 	for dir, want := range map[string]int{"": 3, "docs": 1, "deep/x": 1} {
 		if entries, err := b.List(ctx, dir); err != nil || len(entries) != want {
 			t.Errorf("List(%q) = %d entries, %v; want %d", dir, len(entries), err, want)
 		}
 	}
 	// photos and its parent are listed again, live; docs and deep/x come
-	// from the preload. (The live listing of photos is S1's to fail.)
+	// from the preload.
 	var livePhotos bool
 	for _, line := range Log.Lines()[mark:] {
 		if !strings.Contains(line, ">>> ") || strings.Contains(line, "RLIST") {
