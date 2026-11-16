@@ -134,6 +134,9 @@ type Caps struct {
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).
 	OwnsProgress bool
+	// Names is how the file system under the root matches names. A local
+	// root finds it out; a remote does not know it yet.
+	Names NameRule
 }
 
 // PutParams is what a backend is told about a file it takes. Size and

@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,7 +26,9 @@ import (
 )
 
 type LocalBackend struct {
-	base string
+	base      string
+	namesOnce sync.Once
+	names     model.NameRule // how base's file system matches names, see nameRule
 }
 
 func NewLocalBackend(base string) *LocalBackend {
@@ -33,6 +36,13 @@ func NewLocalBackend(base string) *LocalBackend {
 }
 
 func (b *LocalBackend) BasePath() string { return b.base }
+
+// nameRule is how the file system under base matches names, found by one
+// probe that writes nothing; the rule of a file system does not change.
+func (b *LocalBackend) nameRule() model.NameRule {
+	b.namesOnce.Do(func() { b.names = probeNames(b.base) })
+	return b.names
+}
 
 // LocalPath maps a slash-separated relPath onto the host filesystem. The path
 // is cleaned as if absolute first, so ".." segments can never climb above

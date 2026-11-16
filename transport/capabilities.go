@@ -13,8 +13,10 @@ import (
 // on the server: a server that refuses a call fails it, and the copy falls
 // back as on any failure.
 
+// A local root says how its file system matches names. A remote cannot
+// tell yet: its Names stay unknown.
 func (b *LocalBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Names: b.nameRule()}, nil
 }
 
 func (b *SFTPBackend) Capabilities(context.Context) (model.Caps, error) {

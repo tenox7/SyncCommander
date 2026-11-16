@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,7 +57,8 @@ type Result struct {
 type item struct {
 	relPath  string
 	src, dst *model.FileEntry
-	part     bool // the scan listed a part file of it on the destination
+	part     bool   // the scan listed a part file of it on the destination
+	clash    string // why the destination cannot hold it apart from another source name; "" when it can
 }
 
 type entry struct {
@@ -145,7 +147,11 @@ func Copy(ctx context.Context, req Request) Result {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	c := &copier{req: req, ctx: ctx, stop: stop, p: p, src: req.Src, dst: req.Dst, dstChanged: map[string]bool{}}
-	collisions, files, totalBytes, leftOut := req.enumerate()
+	var names model.NameRule
+	if caps, err := req.Dst.Capabilities(ctx); err == nil {
+		names = caps.Names
+	}
+	collisions, files, totalBytes, leftOut := req.enumerate(names)
 	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
 	p.TotalBytes.Store(totalBytes)
@@ -155,8 +161,8 @@ func Copy(ctx context.Context, req Request) Result {
 	}
 
 	// One rsync session sends every file in the folder: not when some are to
-	// be left out.
-	batched := isDir && req.Batch && leftOut == 0 && c.batch(files, totalBytes)
+	// be left out or refused.
+	batched := isDir && req.Batch && leftOut == 0 && !slices.ContainsFunc(files, func(f item) bool { return f.clash != "" }) && c.batch(files, totalBytes)
 	if !batched {
 		c.runParallel(files)
 	}
@@ -186,8 +192,9 @@ func Copy(ctx context.Context, req Request) Result {
 
 // enumerate snapshots everything the transfer needs from the live tree in one
 // locked pass; the transfer never touches a node again. leftOut counts the
-// files not compared yet that a folder copy leaves out (CopyUnknown).
-func (req Request) enumerate() (collisions []entry, files []item, totalBytes int64, leftOut int) {
+// files not compared yet that a folder copy leaves out (CopyUnknown). names
+// is how the destination matches names, for the clashes it would make.
+func (req Request) enumerate(names model.NameRule) (collisions []entry, files []item, totalBytes int64, leftOut int) {
 	src, dst := model.CopySides(req.LeftToRight)
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
@@ -210,8 +217,9 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 		}
 		files = make([]item, 0, len(nodes))
 		parts := partsListed(dst)
+		clash := nameClashes(src, names)
 		for _, f := range nodes {
-			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f)}
+			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f), clash: clash(f)}
 			if it.src != nil && !it.src.IsSpecial() {
 				totalBytes += it.src.Size
 			}
@@ -219,6 +227,74 @@ func (req Request) enumerate() (collisions []entry, files []item, totalBytes int
 		}
 	})
 	return collisions, files, totalBytes, leftOut
+}
+
+// nameClashes returns, for a node to copy, why the destination cannot hold
+// it: its name, or a folder's above it, is one name there with another
+// name on the source side (D10). A folding destination (a Mac, Windows)
+// took A.txt and a.txt for one file: the copy wrote it twice, the second
+// over the first, and both were "OK". Every source name counts, not only
+// those copied: a.txt copied next to an A.txt already there is written
+// over it.
+//
+// Letter case is folded only where the destination is known to fold it:
+// names that differ only in case are common where case counts (Linux
+// sources), and no remote's rule is known. Unicode forms are folded unless
+// the destination is known to keep them apart: two names that differ only
+// in form are one word typed on two systems, almost never two files kept
+// on purpose, and Macs and many servers store them as one.
+func nameClashes(src model.Side, rule model.NameRule) func(*model.TreeNode) string {
+	guard := rule
+	if guard.Forms == model.FoldUnknown {
+		guard.Forms = model.Folded
+	}
+	if !guard.Folds() {
+		return func(*model.TreeNode) string { return "" }
+	}
+	byDir := map[*model.TreeNode]map[string][]string{} // a folder's source names by guard.Key
+	clashOf := func(n *model.TreeNode) string {
+		dir := n.Parent
+		if dir == nil {
+			return ""
+		}
+		keys, ok := byDir[dir]
+		if !ok {
+			keys = map[string][]string{}
+			for _, c := range dir.Children {
+				// A link or pipe is never written, so it takes no name.
+				if e := c.Sides[src].Entry; e != nil && !e.IsSpecial() {
+					k := guard.Key(c.Name)
+					keys[k] = append(keys[k], c.Name)
+				}
+			}
+			byDir[dir] = keys
+		}
+		for _, other := range keys[guard.Key(n.Name)] {
+			if other == n.Name {
+				continue
+			}
+			pair := n.RelPath + " and " + path.Join(model.DirOf(n.RelPath), other)
+			if rule.Key(n.Name) == rule.Key(other) {
+				return "the destination takes " + pair + " for one name"
+			}
+			return "the destination may take " + pair + " for one name: it is not known whether it keeps Unicode forms apart"
+		}
+		return ""
+	}
+	dirWhy := map[*model.TreeNode]string{}
+	var check func(*model.TreeNode) string
+	check = func(n *model.TreeNode) string {
+		if why := clashOf(n); why != "" || n.Parent == nil {
+			return why
+		}
+		why, ok := dirWhy[n.Parent]
+		if !ok {
+			why = check(n.Parent)
+			dirWhy[n.Parent] = why
+		}
+		return why
+	}
+	return check
 }
 
 // partsListed returns whether the scan listed a part file of a node on the
@@ -468,6 +544,12 @@ func (c *copier) copyOne(f item) {
 			why = "what a cut-off copy left, never copied itself"
 		}
 		transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+srcEntry.Kind()+" ("+why+")")
+		return
+	}
+	// Before the twin too: nothing is written, so nothing is removed.
+	if f.clash != "" {
+		p.Failed.Add(1)
+		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, "+f.clash)
 		return
 	}
 	// A file can be one object on both sides even when its folders are not:

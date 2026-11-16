@@ -26,10 +26,11 @@ func methodCaps(b model.Backend) model.Caps {
 
 // Each backend's Caps says what its methods do (D2): a flag without the
 // method is a call no caller can make, a method without the flag a feature
-// no caller uses. Only the rsync backends count their own upload progress.
+// no caller uses. Only the rsync backends count their own upload progress,
+// and only a local root knows how its names match (D10).
 func TestCapsMatchTheMethods(t *testing.T) {
 	for name, b := range map[string]model.Backend{
-		"local":     (*LocalBackend)(nil),
+		"local":     NewLocalBackend(t.TempDir()),
 		"sftp":      (*SFTPBackend)(nil),
 		"scp":       (*SCPBackend)(nil),
 		"rsync+ssh": (*RsyncSSHBackend)(nil),
@@ -48,7 +49,10 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		if owns := name == "rsync" || name == "rsync+ssh"; caps.OwnsProgress != owns {
 			t.Errorf("%s: OwnsProgress = %v, want %v", name, caps.OwnsProgress, owns)
 		}
-		caps.OwnsProgress = false
+		if known := name == "local"; (caps.Names.Case != model.FoldUnknown) != known {
+			t.Errorf("%s: Names %+v; known only for a local root", name, caps.Names)
+		}
+		caps.OwnsProgress, caps.Names = false, model.NameRule{}
 		if want := methodCaps(b); caps != want {
 			t.Errorf("%s: Caps %+v; its methods give %+v", name, caps, want)
 		}
