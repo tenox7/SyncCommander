@@ -3,8 +3,10 @@ package transport
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -413,6 +415,56 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 	}
 	Log.Add("webdav", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
+}
+
+// Stat asks for relPath alone, a PROPFIND of depth 0, never from the listing
+// cache. The path goes without a slash at its end, as a file's: servers
+// answer that for a folder too, where a redirect to the slash would turn
+// the PROPFIND into a GET. Sums in the answer are kept, as a listing keeps
+// them.
+func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	rel := strings.Trim(relPath, "/")
+	Log.Add("webdav", DirOut, "STAT "+b.pathFor(rel))
+	resp, err := b.do(ctx, "PROPFIND", b.urlFor(rel, rel == ""), strings.NewReader(wdPropfindBody), map[string]string{
+		"Depth":        "0",
+		"Content-Type": "application/xml",
+	})
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	defer drainClose(resp.Body)
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return model.FileEntry{}, fmt.Errorf("PROPFIND %s: %w", b.pathFor(rel), fs.ErrNotExist)
+	case resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK:
+		return model.FileEntry{}, fmt.Errorf("PROPFIND %s: %s", b.pathFor(rel), resp.Status)
+	}
+	var e model.FileEntry
+	found := false
+	err = readMultistatus(resp.Body, func(r wdResponse) error {
+		got, sums, err := b.entryFromResponse(r)
+		switch {
+		case err != nil:
+			return err
+		case got.RelPath != rel:
+			return nil // depth 0 is the path itself; a server that adds more is ignored
+		}
+		b.sums.put(got.RelPath, sums)
+		e, found = got, true
+		return nil
+	})
+	if err == nil && !found {
+		err = errors.New("the answer does not include the path itself")
+	}
+	if err != nil {
+		err = fmt.Errorf("PROPFIND %s: %w", b.pathFor(rel), err)
+		Log.Add("webdav", DirErr, err.Error())
+		return model.FileEntry{}, err
+	}
+	if rel == "" {
+		e.Name = ""
+	}
+	return e, nil
 }
 
 // PreloadRecursive fires a single PROPFIND Depth:infinity in the background,

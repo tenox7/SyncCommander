@@ -236,6 +236,27 @@ func (b *FakeBackend) List(ctx context.Context, relDir string) ([]model.FileEntr
 	return b.applyOverlay(relDir, b.genEntries(relDir)), nil
 }
 
+// Stat picks relPath out of its folder's generated listing, overlay applied.
+func (b *FakeBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	if err := fakeDelay(ctx, b.latency); err != nil {
+		return model.FileEntry{}, err
+	}
+	if relPath == "" {
+		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
+	}
+	dir := model.DirOf(relPath)
+	if !b.tombstoned(relPath) {
+		name := relPath[len(dir):]
+		name = strings.TrimPrefix(name, "/")
+		for _, e := range b.applyOverlay(dir, b.genEntries(dir)) {
+			if e.Name == name {
+				return e, nil
+			}
+		}
+	}
+	return model.FileEntry{}, fmt.Errorf("fake: %s: %w", relPath, fs.ErrNotExist)
+}
+
 // genEntries derives one directory's children from the hash of its path. Dirs
 // come first so a listing looks like a real one; both groups are name-sorted by
 // construction.

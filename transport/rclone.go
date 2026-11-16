@@ -204,6 +204,38 @@ func (b *RcloneBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 	return entries, nil
 }
 
+// Stat asks for relPath alone: NewObject for a file, one call (a HEAD on an
+// object store), never from the listing cache. rclone has no call for one
+// folder, so when no file is there the parent folder is listed, as rclone's
+// own stat does.
+func (b *RcloneBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	rel := strings.Trim(relPath, "/")
+	if rel == "" {
+		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
+	}
+	Log.Add("rclone", DirOut, "stat "+b.f.Name()+":"+path.Join(b.f.Root(), rel))
+	o, err := b.f.NewObject(ctx, rel)
+	if err == nil {
+		return b.convert(ctx, fs.DirEntries{o})[0], nil
+	}
+	if !errors.Is(err, fs.ErrorObjectNotFound) && !errors.Is(err, fs.ErrorIsDir) && !errors.Is(err, fs.ErrorNotAFile) {
+		return model.FileEntry{}, err
+	}
+	dirEntries, err := b.f.List(ctx, model.DirOf(rel))
+	if errors.Is(err, fs.ErrorDirNotFound) {
+		return model.FileEntry{}, fmt.Errorf("rclone: %s: %w", rel, os.ErrNotExist)
+	}
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	for _, d := range dirEntries {
+		if strings.TrimPrefix(d.Remote(), "/") == rel {
+			return b.convert(ctx, fs.DirEntries{d})[0], nil
+		}
+	}
+	return model.FileEntry{}, fmt.Errorf("rclone: %s: %w", rel, os.ErrNotExist)
+}
+
 // convert maps rclone entries to sc entries, caching every object seen so a
 // later Checksum or Open costs no extra round trip.
 func (b *RcloneBackend) convert(ctx context.Context, dirEntries fs.DirEntries) []model.FileEntry {

@@ -135,6 +135,14 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			}
 			dc.Close()
 			reply("226 Directory send OK.")
+		case "MLST":
+			p := path.Clean(arg)
+			facts, ok := f.mlst(p)
+			if !ok {
+				reply("550 No such file or directory.")
+				continue
+			}
+			reply("250-Listing " + p + "\r\n " + facts + " " + p + "\r\n250 End")
 		case "MLSD":
 			lines, ok := f.mlsd[path.Clean(arg)]
 			if !ok || pasv == nil {
@@ -252,6 +260,21 @@ func (f *fakeFTPD) serve(c net.Conn) {
 }
 
 // list answers LIST arg: options start with "-", the folder follows.
+// mlst returns the facts of p, an absolute path, from its folder's MLSD
+// lines; the root is a cdir.
+func (f *fakeFTPD) mlst(p string) (string, bool) {
+	if p == "/" {
+		return "type=cdir;modify=20260101000000;", true
+	}
+	dir, name := path.Split(p)
+	for _, l := range f.mlsd[path.Clean(dir)] {
+		if facts, n, ok := strings.Cut(l, " "); ok && n == name {
+			return facts, true
+		}
+	}
+	return "", false
+}
+
 func (f *fakeFTPD) list(arg string) []string {
 	opts, dir := "", arg
 	if strings.HasPrefix(arg, "-") && !f.dashAIsName {

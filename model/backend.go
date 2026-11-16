@@ -67,9 +67,17 @@ func KindName(m os.FileMode) string {
 // error when it cannot vouch for that: a listing that is short without an
 // error makes mirror delete what it left out. Under a context from
 // WithFreshListing, List asks the server and never answers from a cache.
+//
+// Stat returns the entry of relPath alone, as the server holds it now: one
+// path, never from a listing or its cache, the same row a listing gives. A
+// link is reported as a link, not followed (lstat). Nothing at relPath is
+// fs.ErrNotExist. A part file is not the file: Stat looks at the final name
+// only (D1, F18: one file's size used to cost a listing of its folder, and
+// came from a cache that could be hours old).
 type Backend interface {
 	BasePath() string
 	List(ctx context.Context, relDir string) ([]FileEntry, error)
+	Stat(ctx context.Context, relPath string) (FileEntry, error)
 	Checksum(ctx context.Context, relPath string) (string, error)
 	SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error
 	CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error

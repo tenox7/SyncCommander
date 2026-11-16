@@ -353,6 +353,10 @@ func (b *lazyBackend) List(ctx context.Context, relDir string) ([]model.FileEntr
 	return doVal(b, ctx, "list "+relDir, func(in model.Backend) ([]model.FileEntry, error) { return in.List(ctx, relDir) })
 }
 
+func (b *lazyBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	return doVal(b, ctx, "stat "+relPath, func(in model.Backend) (model.FileEntry, error) { return in.Stat(ctx, relPath) })
+}
+
 func (b *lazyBackend) Checksum(ctx context.Context, relPath string) (string, error) {
 	return doVal(b, ctx, "checksum "+relPath, func(in model.Backend) (string, error) { return in.Checksum(ctx, relPath) })
 }

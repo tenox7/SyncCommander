@@ -32,6 +32,9 @@ func (s *sumStub) List(context.Context, string) ([]model.FileEntry, error) {
 	}
 	return nil, nil
 }
+func (s *sumStub) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	return statByListing(ctx, s, relPath)
+}
 func (s *sumStub) Checksum(ctx context.Context, _ string) (string, error) {
 	wait := s.sumDelay
 	if s.hang {

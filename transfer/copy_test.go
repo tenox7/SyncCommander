@@ -26,6 +26,11 @@ func (b *listStub) List(_ context.Context, relDir string) ([]model.FileEntry, er
 	return b.dirs[relDir], nil
 }
 
+// Stat picks relPath out of its folder's listing.
+func (b *listStub) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	return statByListing(ctx, b, relPath)
+}
+
 func (b *listStub) Checksum(context.Context, string) (string, error) { return "", nil }
 func (b *listStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil

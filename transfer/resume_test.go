@@ -31,6 +31,10 @@ func (s *resumeStub) List(_ context.Context, _ string) ([]model.FileEntry, error
 	return []model.FileEntry{{Name: "f.bin", RelPath: "f.bin", Size: s.dstSize}}, nil
 }
 
+func (s *resumeStub) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	return statByListing(ctx, s, relPath)
+}
+
 func (s *resumeStub) Checksum(context.Context, string) (string, error) { return s.sum, nil }
 func (s *resumeStub) ProbeChecksums() []string {
 	if s.algos != nil {

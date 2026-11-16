@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/textproto"
 	"os"
@@ -92,6 +93,9 @@ func dialFTPConn(addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCa
 		return c, nil
 	}
 	opts := []ftp.DialOption{ftp.DialWithTimeout(10 * time.Second), ftp.DialWithDialFunc(dialFunc)}
+	if lc != nil {
+		opts = append(opts, ftp.DialWithDebugOutput(lc))
+	}
 	switch scheme {
 	case "ftps":
 		opts = append(opts, ftp.DialWithTLS(tlsCfg))
@@ -293,23 +297,10 @@ func (b *FTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry
 }
 
 func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	dir := path.Join(b.base, relDir)
-	entries, err := b.listLocked(dir)
-	if err == nil && len(entries) == 0 {
-		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
-		err = b.conn.ChangeDir(dir)
-	}
+	dir, entries, err := b.rawListLocked(ctx, relDir)
 	if err != nil {
-		Log.Add("ftp", DirErr, err.Error())
 		return nil, err
 	}
-	Log.Add("ftp", DirIn, fmt.Sprintf("%d entries", len(entries)))
-	// MLSD already carries exact times; only fall back to one MDTM per entry
-	// when the listing came from LIST.
-	useMDTM := b.conn.IsGetTimeSupported() && !b.conn.IsTimePreciseInList()
 	result := make([]model.FileEntry, 0, len(entries))
 	for _, e := range entries {
 		if ctx.Err() != nil {
@@ -318,32 +309,127 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
-		isDir := e.Type == ftp.EntryTypeFolder
-		mode := os.FileMode(0644)
-		switch e.Type {
-		case ftp.EntryTypeFolder:
-			mode = os.ModeDir | 0755
-		case ftp.EntryTypeLink:
-			mode = os.ModeSymlink | 0777 // listed, never read or written through (L2)
-		case ftpEntrySpecial:
-			mode = os.ModeIrregular | 0644
-		}
-		modTime := e.Time
-		if useMDTM {
-			if t, err := b.conn.GetTime(path.Join(dir, e.Name)); err == nil {
-				modTime = t
-			}
-		}
-		result = append(result, model.FileEntry{
-			RelPath: path.Join(relDir, e.Name),
-			Name:    e.Name,
-			Size:    int64(e.Size),
-			ModTime: modTime,
-			IsDir:   isDir,
-			Mode:    mode,
-		})
+		result = append(result, b.entryLocked(path.Join(relDir, e.Name), path.Join(dir, e.Name), e))
 	}
 	return result, nil
+}
+
+// rawListLocked lists relDir, at dir on the server, as the library reads it.
+func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir string, entries []*ftp.Entry, err error) {
+	if ctx.Err() != nil {
+		return "", nil, ctx.Err()
+	}
+	dir = path.Join(b.base, relDir)
+	entries, err = b.listLocked(dir)
+	if err == nil && len(entries) == 0 {
+		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
+		err = b.conn.ChangeDir(dir)
+	}
+	if err != nil {
+		Log.Add("ftp", DirErr, err.Error())
+		return "", nil, err
+	}
+	Log.Add("ftp", DirIn, fmt.Sprintf("%d entries", len(entries)))
+	return dir, entries, nil
+}
+
+// entryLocked is the row of relPath, at p on the server, which a listing or
+// MLST described as e. MLSD and MLST carry exact times; only a listing that
+// came from LIST costs one MDTM, per entry.
+func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntry {
+	mode := os.FileMode(0644)
+	switch e.Type {
+	case ftp.EntryTypeFolder:
+		mode = os.ModeDir | 0755
+	case ftp.EntryTypeLink:
+		mode = os.ModeSymlink | 0777 // listed, never read or written through (L2)
+	case ftpEntrySpecial:
+		mode = os.ModeIrregular | 0644
+	}
+	modTime := e.Time
+	if b.conn.IsGetTimeSupported() && !b.conn.IsTimePreciseInList() {
+		if t, err := b.conn.GetTime(p); err == nil {
+			modTime = t
+		}
+	}
+	fe := model.FileEntry{
+		RelPath: relPath,
+		Name:    path.Base(relPath),
+		Size:    int64(e.Size),
+		ModTime: modTime,
+		IsDir:   e.Type == ftp.EntryTypeFolder,
+		Mode:    mode,
+	}
+	if relPath == "" {
+		fe.Name = ""
+	}
+	return fe
+}
+
+// Stat asks for relPath alone. With MLST that is one command on the control
+// connection. The library reads only "file" and "dir" from the answer and
+// takes a link for a file, so the type fact is read from the raw answer, as
+// for a listing (markMLSDTypes). A server without MLST has no one-path
+// command that does not follow links (SIZE, MDTM do), so there relPath is
+// picked out of its folder's listing. 550, the answer for a missing path,
+// is fs.ErrNotExist.
+func (b *FTPBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	var e model.FileEntry
+	err := b.withPrimary(ctx, func() (err error) {
+		e, err = b.statLocked(ctx, relPath)
+		return err
+	})
+	return e, err
+}
+
+func (b *FTPBackend) statLocked(ctx context.Context, relPath string) (model.FileEntry, error) {
+	if ctx.Err() != nil {
+		return model.FileEntry{}, ctx.Err()
+	}
+	p := path.Join(b.base, relPath)
+	if !b.conn.IsTimePreciseInList() { // the library offers MLST with MLSD
+		return b.statByListingLocked(ctx, relPath, p)
+	}
+	Log.Add("ftp", DirOut, "MLST "+p)
+	b.capture.ctrl.Store(new(bytes.Buffer))
+	e, err := b.conn.GetEntry(p)
+	raw := b.capture.ctrl.Swap(nil)
+	if err != nil {
+		return model.FileEntry{}, ftpStatErr(relPath, err)
+	}
+	if raw != nil {
+		markMLSDTypes(raw.Bytes(), []*ftp.Entry{e})
+	}
+	return b.entryLocked(relPath, p, e), nil
+}
+
+func (b *FTPBackend) statByListingLocked(ctx context.Context, relPath, p string) (model.FileEntry, error) {
+	if relPath == "" {
+		if err := b.conn.ChangeDir(p); err != nil {
+			return model.FileEntry{}, ftpStatErr(relPath, err)
+		}
+		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
+	}
+	dir, entries, err := b.rawListLocked(ctx, model.DirOf(relPath))
+	if err != nil {
+		return model.FileEntry{}, ftpStatErr(relPath, err)
+	}
+	name := path.Base(relPath)
+	for _, e := range entries {
+		if e.Name == name {
+			return b.entryLocked(relPath, path.Join(dir, name), e), nil
+		}
+	}
+	return model.FileEntry{}, fmt.Errorf("ftp: %s: %w", relPath, fs.ErrNotExist)
+}
+
+// ftpStatErr makes the server's 550 for a path fs.ErrNotExist.
+func ftpStatErr(relPath string, err error) error {
+	var reply *textproto.Error
+	if errors.As(err, &reply) && reply.Code == ftp.StatusFileUnavailable {
+		return fmt.Errorf("ftp: %s: %s: %w", relPath, reply.Msg, fs.ErrNotExist)
+	}
+	return err
 }
 
 // listLocked lists dir on the primary connection; b.mu is held. A server
@@ -474,7 +560,8 @@ func markMLSDTypes(raw []byte, entries []*ftp.Entry) {
 	var special map[string]ftp.EntryType
 	s := bufio.NewScanner(bytes.NewReader(raw))
 	for s.Scan() {
-		line := strings.TrimRight(s.Text(), "\r")
+		// An MLST answer indents its fact line by a space.
+		line := strings.TrimLeft(strings.TrimRight(s.Text(), "\r"), " ")
 		semi, space := strings.Index(line, ";"), strings.Index(line, " ")
 		if semi < 0 || space < 0 || semi > space {
 			continue // not an MLSD line
@@ -516,7 +603,21 @@ func mlsdType(v string) ftp.EntryType {
 // listCapture records what a listing's data connection reads while a List
 // runs on the primary connection. The library reads it on the List
 // caller's goroutine, so no lock is needed around the buffer.
-type listCapture struct{ buf atomic.Pointer[bytes.Buffer] }
+type listCapture struct {
+	buf  atomic.Pointer[bytes.Buffer]
+	ctrl atomic.Pointer[bytes.Buffer] // the control connection, while a Stat runs
+}
+
+// Write takes what the library's debug output sees of the primary
+// connection: the control connection in plain text, after TLS, and the
+// listing streams. It keeps the control connection's part only while a
+// Stat runs, under the backend's lock.
+func (lc *listCapture) Write(p []byte) (int, error) {
+	if b := lc.ctrl.Load(); b != nil {
+		b.Write(p)
+	}
+	return len(p), nil
+}
 
 func (lc *listCapture) start() { lc.buf.Store(new(bytes.Buffer)) }
 

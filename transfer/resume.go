@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"sync/atomic"
 
 	"sc/model"
@@ -178,21 +177,18 @@ func sameBytes(a, b io.Reader, n int64) (bool, error) {
 	return true, nil
 }
 
-// peekDstSize returns the current size of relPath on dst, or 0 if it cannot
-// be determined. Used between retry attempts to find how many bytes of a
-// partial upload survived so the next attempt can resume rather than restart.
+// peekDstSize returns the size relPath has on dst now, from one Stat: 0 when
+// it is not a regular file (a folder, a link, nothing) or cannot be told.
+// Used before and after a resume, and between retry attempts to find how
+// many bytes of a partial upload survived. It used to list the folder,
+// from the listing cache after a scan, so the size was as old as the scan
+// and cost the whole folder (F18).
 func peekDstSize(ctx context.Context, dst model.Backend, relPath string) int64 {
-	entries, err := dst.List(ctx, model.DirOf(relPath))
-	if err != nil {
+	e, err := dst.Stat(ctx, relPath)
+	if err != nil || e.IsDir || e.Mode.Type() != 0 {
 		return 0
 	}
-	name := path.Base(relPath)
-	for i := range entries {
-		if entries[i].Name == name && !entries[i].IsDir {
-			return entries[i].Size
-		}
-	}
-	return 0
+	return e.Size
 }
 
 // resumeAttempt appends relPath's bytes from offset onward to dstPath on dst

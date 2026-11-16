@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -209,6 +210,37 @@ func (b *ResticBackend) decodeListV1(resp *http.Response, typeName string) ([]mo
 
 func objectEntry(typeName, name string, size int64) model.FileEntry {
 	return model.FileEntry{RelPath: typeName + "/" + name, Name: name, Size: size, Mode: 0644}
+}
+
+// Stat answers relPath alone: the fixed top level for what it is, config or
+// an object from one HEAD, never from the listing cache. A row has what a
+// listing gives: an object has no time, config has its Last-Modified.
+func (b *ResticBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	rel := strings.Trim(relPath, "/")
+	typ, name, _ := strings.Cut(rel, "/")
+	switch {
+	case rel == "":
+		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
+	case isResticType(rel):
+		return model.FileEntry{RelPath: rel, Name: rel, IsDir: true, Mode: os.ModeDir | 0755}, nil
+	case rel != "config" && (!isResticType(typ) || name == "" || strings.Contains(name, "/")):
+		return model.FileEntry{}, fmt.Errorf("restic: %s: %w", rel, fs.ErrNotExist)
+	}
+	resp, err := b.do(ctx, "HEAD", b.objectURL(rel), nil, nil)
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	drainClose(resp.Body)
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return model.FileEntry{}, fmt.Errorf("restic: %s: %w", rel, fs.ErrNotExist)
+	case resp.StatusCode/100 != 2:
+		return model.FileEntry{}, fmt.Errorf("restic: HEAD %s: %s", rel, resp.Status)
+	}
+	if rel == "config" {
+		return model.FileEntry{RelPath: rel, Name: rel, Size: max(resp.ContentLength, 0), ModTime: parseWDTime(resp.Header.Get("Last-Modified")), Mode: 0644}, nil
+	}
+	return objectEntry(typ, name, max(resp.ContentLength, 0)), nil
 }
 
 func (b *ResticBackend) statSize(ctx context.Context, relPath string) int64 {

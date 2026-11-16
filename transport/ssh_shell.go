@@ -138,6 +138,72 @@ const unreadRecord = `%s\t%T@\t%A@\t%C@\t%m\tD\t`
 // is skipped: leaving it out is right.
 const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
 
+// exitNotThere is the exit status of a stat that finds nothing at its path.
+const exitNotThere = 78
+
+// perlStat prints the findRecord of its one argument, lstat'ed, the full
+// path as the name, for hosts whose find has no -printf. It exits
+// exitNotThere when nothing is there.
+const perlStat = `perl -e 'my @s=lstat($ARGV[0]);unless(@s){exit 78 if $!{ENOENT};my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$ARGV[0];exit 0}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$ARGV[0]'`
+
+// statCmd prints the list record of p itself, a link as a link, or exits
+// exitNotThere when nothing is there. find starts at p and, with
+// -maxdepth 0, prints only p, which it does not follow.
+func (s *sshShell) statCmd(p string) string {
+	q := shellQuote(p)
+	if s.usePerl.Load() {
+		return perlStat + " " + q
+	}
+	return fmt.Sprintf(`[ -e %[1]s ] || [ -L %[1]s ] || exit %[2]d; find %[1]s -maxdepth 0 -printf '%[3]s%[4]s\0'`,
+		q, exitNotThere, findRecord, "%f")
+}
+
+// Stat prints relPath's own list record on the server: one command, no
+// listing of its folder. A folder above relPath that the login cannot
+// search makes relPath "not there" too: the shell's test cannot tell the
+// two apart.
+func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	p := s.abs(relPath)
+	out, err := s.run(ctx, s.statCmd(p))
+	if err != nil && !s.usePerl.Load() && findLacksPrimary(err) {
+		s.usePerl.Store(true)
+		out, err = s.run(ctx, s.statCmd(p))
+	}
+	switch {
+	case exitCode(err) == exitNotThere:
+		return model.FileEntry{}, fmt.Errorf("%s: %s: %w", s.proto, relPath, os.ErrNotExist)
+	case err != nil:
+		return model.FileEntry{}, err
+	}
+	r, ok := statRecord(out)
+	switch {
+	case !ok:
+		return model.FileEntry{}, fmt.Errorf("%s: stat %s: the server answered %q", s.proto, relPath, out)
+	case r.err != "":
+		return model.FileEntry{}, fmt.Errorf("%s: stat %s: %s", s.proto, relPath, r.err)
+	}
+	e := r.entry
+	e.RelPath, e.Name = relPath, path.Base(relPath)
+	if relPath == "" {
+		e.Name = ""
+	}
+	return e, nil
+}
+
+// statRecord reads the one record a stat prints. One whose size is not a
+// number is not a record, such as a login banner ahead of it: a listing
+// takes that as size 0 (S10).
+func statRecord(out string) (listRecord, bool) {
+	rec := strings.TrimSuffix(out, "\x00")
+	r, ok := parseListRecord(rec)
+	if !ok || r.err != "" {
+		return r, ok
+	}
+	size, _, _ := strings.Cut(rec, "\t")
+	_, err := strconv.ParseInt(size, 10, 64)
+	return r, err == nil
+}
+
 func (s *sshShell) listCmd(dir string, recursive bool) string {
 	if s.usePerl.Load() {
 		flag := "0"

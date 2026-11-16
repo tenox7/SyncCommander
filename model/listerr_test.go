@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -22,6 +23,15 @@ func (b *stubBackend) List(_ context.Context, relDir string) ([]FileEntry, error
 		return nil, errors.New("connection reset")
 	}
 	return b.dirs[relDir], nil
+}
+
+func (b *stubBackend) Stat(_ context.Context, relPath string) (FileEntry, error) {
+	for _, e := range b.dirs[DirOf(relPath)] {
+		if e.RelPath == relPath {
+			return e, nil
+		}
+	}
+	return FileEntry{}, fs.ErrNotExist
 }
 
 func (b *stubBackend) Checksum(context.Context, string) (string, error) { return "", nil }

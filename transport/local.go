@@ -68,18 +68,35 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 		}
 		// A link, pipe or device is listed with its type, so the tree shows
 		// it and a copy does not take its name for free; nothing reads it.
-		entry := model.FileEntry{
-			RelPath: path.Join(relDir, d.Name()),
-			Name:    d.Name(),
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-			IsDir:   d.IsDir(),
-			Mode:    info.Mode(),
-		}
-		fillTimes(&entry, info)
-		result = append(result, entry)
+		result = append(result, localEntry(path.Join(relDir, d.Name()), info))
 	}
 	return result, nil
+}
+
+// Stat reports relPath as the disk holds it now, a link as a link.
+func (b *LocalBackend) Stat(_ context.Context, relPath string) (model.FileEntry, error) {
+	info, err := os.Lstat(b.LocalPath(relPath))
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	return localEntry(relPath, info), nil
+}
+
+// localEntry is the row of relPath, whose lstat is info.
+func localEntry(relPath string, info fs.FileInfo) model.FileEntry {
+	e := model.FileEntry{
+		RelPath: relPath,
+		Name:    path.Base(relPath),
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+		IsDir:   info.IsDir(),
+		Mode:    info.Mode(),
+	}
+	if relPath == "" {
+		e.Name = ""
+	}
+	fillTimes(&e, info)
+	return e
 }
 
 func (b *LocalBackend) Checksum(ctx context.Context, relPath string) (string, error) {

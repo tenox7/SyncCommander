@@ -139,20 +139,37 @@ func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileE
 			return nil, ctx.Err()
 		}
 		// Links, pipes and devices are listed with their type (L2, L9).
-		entry := model.FileEntry{
-			RelPath: path.Join(relDir, info.Name()),
-			Name:    info.Name(),
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-			IsDir:   info.IsDir(),
-			Mode:    info.Mode(),
-		}
-		if stat, ok := info.Sys().(*sftp.FileStat); ok && stat != nil {
-			entry.ATime = time.Unix(int64(stat.Atime), 0)
-		}
-		result = append(result, entry)
+		result = append(result, sftpEntry(path.Join(relDir, info.Name()), info))
 	}
 	return result, nil
+}
+
+// Stat lstats relPath on the server: one request, no listing.
+func (b *SFTPBackend) Stat(_ context.Context, relPath string) (model.FileEntry, error) {
+	info, err := b.sftp.Lstat(b.abs(relPath))
+	if err != nil {
+		return model.FileEntry{}, fmt.Errorf("sftp: stat %s: %w", relPath, err)
+	}
+	return sftpEntry(relPath, info), nil
+}
+
+// sftpEntry is the row of relPath, whose attributes are info.
+func sftpEntry(relPath string, info os.FileInfo) model.FileEntry {
+	e := model.FileEntry{
+		RelPath: relPath,
+		Name:    path.Base(relPath),
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+		IsDir:   info.IsDir(),
+		Mode:    info.Mode(),
+	}
+	if relPath == "" {
+		e.Name = ""
+	}
+	if stat, ok := info.Sys().(*sftp.FileStat); ok && stat != nil {
+		e.ATime = time.Unix(int64(stat.Atime), 0)
+	}
+	return e
 }
 
 func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {

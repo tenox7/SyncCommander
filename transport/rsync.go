@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path"
@@ -342,6 +343,74 @@ func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.Fil
 	entries := fileListEntries(relDir, result.FileList)
 	Log.Add("rsync", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
+}
+
+// Stat asks the daemon for relPath alone: a dry run of -d on the path, with
+// no slash at its end, sends the path's own entry, a folder as a folder,
+// and nothing of what is inside. -l and -D make stock rsync send a link or
+// a pipe as what it is; without them it leaves both out, and a link would
+// be "not there". gorsyncd before gorsync cf119b2 follows a link named
+// this way and sends what it points to. A daemon says "not there" only in
+// words: the link_stat message, ENOENT's text.
+func (b *RsyncBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	remote, err := b.modulePath(relPath, relPath == "")
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	label := "STAT " + remote
+	peer := &peerMsgs{}
+	result, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d", "-l", "-D"}, remote, rsyncclient.WithStderr(peer))
+	if err != nil {
+		if probs := peer.problems(); notThere(probs) {
+			err = fmt.Errorf("%s: %w", label, fs.ErrNotExist)
+		} else if len(probs) > 0 {
+			err = fmt.Errorf("%s: %s (%w)", label, strings.Join(probs[:min(len(probs), 3)], "; "), err)
+		}
+		return model.FileEntry{}, err
+	}
+	return statEntry(label, relPath, result, peer)
+}
+
+// statEntry picks relPath's own entry out of a one-path dry run. The root
+// is listed as its "." entry.
+func statEntry(label, relPath string, result *rsyncclient.Result, peer *peerMsgs) (model.FileEntry, error) {
+	want := path.Base(relPath)
+	if relPath == "" {
+		want = "."
+	}
+	for _, fi := range result.FileList {
+		if fi.Name != want {
+			continue
+		}
+		mode := rsyncModeToFileMode(fi.Mode)
+		e := model.FileEntry{RelPath: relPath, Name: path.Base(relPath), Size: fi.Length, ModTime: fi.ModTime, IsDir: mode.IsDir(), Mode: mode}
+		if relPath == "" {
+			e.Name = ""
+		}
+		return e, nil
+	}
+	probs := peer.problems()
+	if notThere(probs) {
+		return model.FileEntry{}, fmt.Errorf("%s: %w", label, fs.ErrNotExist)
+	}
+	if len(probs) == 0 && result.IOErrors&ioErrGeneral == 0 && !peer.missed(result) {
+		return model.FileEntry{}, fmt.Errorf("%s: the server sent no entry and no reason", label)
+	}
+	return model.FileEntry{}, incompleteListing(label, probs)
+}
+
+// notThere reports whether the messages of a one-path run say only that
+// the path is missing: `link_stat "..." failed: No such file or directory
+// (2)` from rsync, the same in Go's lower case from gorsyncd since gorsync
+// cf119b2. An older gorsyncd says nothing and only sets io_error, as for a
+// path it cannot read; that stays an error, never "not there".
+func notThere(msgs []string) bool {
+	for _, m := range msgs {
+		if !strings.Contains(strings.ToLower(m), "no such file or directory") {
+			return false
+		}
+	}
+	return len(msgs) > 0
 }
 
 // PreloadRecursive fires one recursive dry run in the background and feeds
