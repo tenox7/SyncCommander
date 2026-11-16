@@ -137,11 +137,22 @@ func pluralRetries(n int) string {
 	return "retries"
 }
 
+// ErrSizeMismatch fails a copy that moved another number of bytes than the
+// listing gave: a source that ended early without an error, or one that
+// changed since the scan. Another try reads the same file again, so it is
+// final.
+var ErrSizeMismatch = errors.New("size does not match the listing")
+
+// SizeMismatch is the error for a copy of got bytes when the listing gave want.
+func SizeMismatch(got, want int64) error {
+	return fmt.Errorf("%w: %d bytes, the source listed %d (it ended early or changed since the scan)", ErrSizeMismatch, got, want)
+}
+
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

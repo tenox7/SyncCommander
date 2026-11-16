@@ -703,14 +703,45 @@ type ftpReader struct {
 	done func()
 	once sync.Once
 	err  error
+
+	ended   bool      // the data stream ended; only Read uses it
+	shut    sync.Once // closes the data stream and reads the server's reply
+	shutErr error
 }
 
-func (r *ftpReader) Read(p []byte) (int, error) { return r.rc.Read(p) }
+// Read ends with the server's verdict. A server ends the data connection
+// the same way for a whole file and for an aborted one, and says which only
+// on the control connection: 226, or 426 when it gave up half way. Read
+// returns that reply's error in place of io.EOF (L3), and the same again on
+// every later Read.
+func (r *ftpReader) Read(p []byte) (int, error) {
+	if r.ended {
+		return 0, r.endErr()
+	}
+	n, err := r.rc.Read(p)
+	if err == io.EOF {
+		r.ended = true
+		err = r.endErr()
+	}
+	return n, err
+}
+
+func (r *ftpReader) endErr() error {
+	if err := r.shutdown(); err != nil {
+		return err
+	}
+	return io.EOF
+}
+
+func (r *ftpReader) shutdown() error {
+	r.shut.Do(func() { r.shutErr = r.rc.Close() })
+	return r.shutErr
+}
 
 func (r *ftpReader) Close() error {
 	r.once.Do(func() {
 		r.stop()
-		r.err = r.rc.Close()
+		r.err = r.shutdown()
 		r.done()
 	})
 	return r.err

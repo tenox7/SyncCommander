@@ -20,9 +20,15 @@ import (
 // as a name, answering with an empty listing.
 type fakeFTPD struct {
 	ls          map[string][]string // folder -> ls -l lines, dot names too
+	files       map[string]fakeFTPFile
 	dashAIsName bool
 	mu          sync.Mutex
 	lists       []string // LIST arguments, in order
+}
+
+// fakeFTPFile is what RETR of a path sends: the body, then the final reply.
+type fakeFTPFile struct {
+	body, reply string
 }
 
 func lsLine(name string, dir bool) string {
@@ -117,6 +123,22 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			}
 			dc.Close()
 			reply("226 Directory send OK.")
+		case "RETR":
+			file, ok := f.files[path.Clean(arg)]
+			if !ok || pasv == nil {
+				reply("550 Failed to open file.")
+				continue
+			}
+			reply("150 Opening BINARY mode data connection.")
+			dc, err := pasv.Accept()
+			pasv.Close()
+			pasv = nil
+			if err != nil {
+				continue
+			}
+			io.WriteString(dc, file.body)
+			dc.Close()
+			reply(file.reply)
 		case "QUIT":
 			reply("221 Goodbye.")
 			return

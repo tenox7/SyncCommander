@@ -563,6 +563,8 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 }
 
 // spoolTo writes the whole source into path so rsync can send it from disk.
+// A source that gives another number of bytes than its size fails: rsync
+// would send and verify the short copy as if it were the file.
 func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.FileMode) error {
 	rd, err := src.Open(ctx)
 	if err != nil {
@@ -573,9 +575,15 @@ func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.Fi
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, rd)
+	n, err := io.Copy(f, rd)
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if cerr := rd.Close(); err == nil && cerr != nil {
+		err = cerr
+	}
+	if err == nil && n != src.Size() {
+		err = SizeMismatch(n, src.Size())
 	}
 	if err == nil {
 		err = stampModTime(ctx, path)

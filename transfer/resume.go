@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"sync/atomic"
 
@@ -20,18 +21,43 @@ import (
 // against whatever already exists at the destination. Backends implementing
 // LocalSender or LocalReceiver credit progress themselves, so nothing is
 // counted here.
+//
+// The local side must then hold as many bytes as the listing gave: the file
+// sent, or the file received (F14). The transfer itself is checked by rsync.
+// When it does not, the plain copy that follows fails on it too.
 func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry) bool {
 	if lp, ok := src.(model.LocalFS); ok {
 		if r, ok := dst.(model.LocalSender); ok {
-			return r.SendLocalFile(ctx, lp.LocalPath(relPath), relPath, srcEntry.Mode) == nil
+			local := lp.LocalPath(relPath)
+			return r.SendLocalFile(ctx, local, relPath, srcEntry.Mode) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	if lp, ok := dst.(model.LocalFS); ok {
 		if r, ok := src.(model.LocalReceiver); ok {
-			return r.RecvToLocalFile(ctx, relPath, lp.LocalPath(relPath)) == nil
+			local := lp.LocalPath(relPath)
+			return r.RecvToLocalFile(ctx, relPath, local) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	return false
+}
+
+// localSizeIs reports whether the local file holds want bytes, logging why
+// not. A copy of another size is not of the file the user saw, so it must
+// not get the source's times and count as done (F14).
+func localSizeIs(relPath, local string, want int64) bool {
+	if err := sizeOfLocal(local, want); err != nil {
+		transport.Log.Add("copy", transport.DirWarn, "COPY "+relPath+": "+err.Error()+", recopying in full")
+		return false
+	}
+	return true
+}
+
+func sizeOfLocal(local string, want int64) error {
+	fi, err := os.Stat(local)
+	if err == nil && fi.Size() != want {
+		err = transport.SizeMismatch(fi.Size(), want)
+	}
+	return err
 }
 
 // tryResumeCopy appends only the missing tail of srcEntry onto an existing
@@ -182,6 +208,10 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 		rollback()
 		return err
 	}
+	if err := opener.checkSize(offset); err != nil {
+		rollback()
+		return err
+	}
 	if verify == nil {
 		return nil
 	}
@@ -195,6 +225,8 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath string, 
 
 // fullCopyAttempt opens src from byte 0 and writes the whole file via
 // CopyFrom. On failure any progress credited during the attempt is rolled back.
+// A copy succeeds only when CopyFrom took as many bytes as the listing gave,
+// no more and no fewer, and the source closed without an error (F14).
 func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry, counter *atomic.Int64) error {
 	reader, err := src.Open(ctx, relPath)
 	if err != nil {
@@ -211,13 +243,47 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath string
 	if !transport.IsPreCounted(reader) && !dstOwnsProgress {
 		srcReader = &trackedReader{r: srcReader, target: counter, added: &added}
 	}
-	srcReader = &cancelReader{r: srcReader, ctx: ctx}
-	if err := dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode); err != nil {
+	counted := &countingReader{r: srcReader}
+	srcReader = &cancelReader{r: counted, ctx: ctx}
+	err = dst.CopyFrom(ctx, relPath, srcReader, srcEntry.Mode)
+	if err == nil {
+		// A destination that takes the listed number of bytes and stops
+		// (rclone's Put is told the size) leaves the rest of a source that
+		// grew unread: one more read counts it.
+		var probe [1]byte
+		if _, perr := srcReader.Read(probe[:]); perr != nil && perr != io.EOF {
+			err = fmt.Errorf("the source: %w", perr)
+		}
+	}
+	if err == nil {
+		if cerr := reader.Close(); cerr != nil {
+			err = fmt.Errorf("the source: %w", cerr)
+		}
+	}
+	if got := counted.n.Load(); err == nil && got != srcEntry.Size {
+		err = transport.SizeMismatch(got, srcEntry.Size)
+	}
+	if err != nil {
 		counter.Add(-added.Load())
 		return err
 	}
 	return nil
 }
+
+// countingReader counts the bytes read through it. CopyFrom may read on
+// another goroutine (an ssh session's stdin copier).
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReader) Unwrap() io.Reader { return c.r }
 
 // trackedRangeOpener implements model.RangeOpener for resume flows. OpenAt
 // wraps the returned reader so each tail byte read increments Target/Added.
@@ -231,6 +297,33 @@ type trackedRangeOpener struct {
 	Ctx      context.Context
 	Target   *atomic.Int64
 	Added    *atomic.Int64
+
+	// What the destination read, for checkSize.
+	tailRead  atomic.Bool
+	tail      atomic.Int64 // bytes read through OpenAt
+	wholeRead atomic.Bool
+	whole     atomic.Int64 // bytes read through Open
+}
+
+// checkSize compares what the destination read with the listed size: a tail
+// through OpenAt, the whole file through Open (rsync spools it), or else the
+// local file an rsync backend sent by its path (F14).
+func (o *trackedRangeOpener) checkSize(offset int64) error {
+	switch {
+	case o.tailRead.Load():
+		if got := offset + o.tail.Load(); got != o.FileSize {
+			return transport.SizeMismatch(got, o.FileSize)
+		}
+	case o.wholeRead.Load():
+		if got := o.whole.Load(); got != o.FileSize {
+			return transport.SizeMismatch(got, o.FileSize)
+		}
+	case o.LocalPath() != "":
+		return sizeOfLocal(o.LocalPath(), o.FileSize)
+	default:
+		return transport.SizeMismatch(offset, o.FileSize) // nothing was read
+	}
+	return nil
 }
 
 func (o *trackedRangeOpener) Size() int64 { return o.FileSize }
@@ -247,7 +340,8 @@ func (o *trackedRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
+	o.wholeRead.Store(true)
+	return &cancelReadCloser{rc: &countingReadCloser{rc: rd, n: &o.whole}, ctx: o.Ctx}, nil
 }
 
 func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
@@ -272,6 +366,8 @@ func (o *trackedRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadC
 		}
 		rd = r
 	}
+	o.tailRead.Store(true)
+	rd = &countingReadCloser{rc: rd, n: &o.tail}
 	if transport.IsPreCounted(rd) {
 		return &cancelReadCloser{rc: rd, ctx: o.Ctx}, nil
 	}
@@ -298,6 +394,20 @@ func (t *trackedReadCloser) Read(p []byte) (int, error) {
 
 func (t *trackedReadCloser) Close() error      { return t.rc.Close() }
 func (t *trackedReadCloser) Unwrap() io.Reader { return t.rc }
+
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  *atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error      { return c.rc.Close() }
+func (c *countingReadCloser) Unwrap() io.Reader { return c.rc }
 
 type cancelReadCloser struct {
 	rc  io.ReadCloser
