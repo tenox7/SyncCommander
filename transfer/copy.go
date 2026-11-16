@@ -27,39 +27,17 @@ type Request struct {
 	Node         *model.TreeNode
 	RelPath      string
 	LeftToRight  bool
-	Mirror       bool // delete destination-only files once every copy landed
 	Opts         model.CompareOpts
 	Parallel     int  // start value; Progress.Parallel holds the live one
 	Batch        bool // one rsync session for a local subtree when Dst supports it
 	VerifyResume bool
 	Progress     *Progress
-	// Replace holds the destination paths of file/folder conflicts the user
-	// agreed to replace in the confirm dialog. A conflict the copy finds that
-	// is not in it stays, and copying its path fails.
-	Replace []string
-	// CopyUnknown copies the files on both sides that are not compared yet
-	// (no checksum yet), when the user said so (F10). Without it a folder
-	// copy leaves them out and logs how many.
-	CopyUnknown bool
-	// Newer is what the copy does with a file that is newer or larger on
-	// the destination (model.OverwritesNewer). By default it writes none:
-	// each such path fails, and the next copy asks (F16).
-	Newer NewerRule
+	// Plan is what the copy may destroy or write over: what the user was
+	// shown and agreed to (PlanCopy). The zero Plan agrees to nothing: a
+	// conflict or a newer file fails its path, a file not compared yet is
+	// left out, and nothing is deleted.
+	Plan Plan
 }
-
-// NewerRule is what a copy does with a file that is newer or larger on the
-// destination than on the source.
-type NewerRule int
-
-const (
-	// NewerRefuse writes none: the user was asked about none, so each such
-	// path fails, and the next copy asks.
-	NewerRefuse NewerRule = iota
-	// NewerKeep leaves them as they are, as the user chose.
-	NewerKeep
-	// NewerOverwrite writes them, as the user chose.
-	NewerOverwrite
-)
 
 // Result tells the caller what to rescan afterwards and which destination
 // paths changed, so their cached checksums are dropped.
@@ -214,12 +192,14 @@ func Copy(ctx context.Context, req Request) Result {
 
 // enumerate snapshots everything the transfer needs from the live tree in one
 // locked pass; the transfer never touches a node again. leftOut counts the
-// files not compared yet that a folder copy leaves out (CopyUnknown), and
-// keptNewer the files newer or larger on the destination it leaves as they
-// are (NewerKeep). names is how the destination matches names, for the
-// clashes it would make.
+// files not compared yet that a folder copy leaves out (not in Plan.Unknown),
+// and keptNewer the files newer or larger on the destination it leaves as
+// they are (Plan.KeepNewer). names is how the destination matches names, for
+// the clashes it would make.
 func (req Request) enumerate(names model.NameRule) (collisions []entry, files []item, totalBytes int64, leftOut, keptNewer int) {
 	src, dst := model.CopySides(req.LeftToRight)
+	unknown := pathSet(req.Plan.Unknown, func(p string) string { return p })
+	overwrite := pathSet(req.Plan.Newer, func(n Newer) string { return n.RelPath })
 	req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
 			if dstEntry := c.Sides[dst].Entry; dstEntry != nil {
@@ -232,7 +212,7 @@ func (req Request) enumerate(names model.NameRule) (collisions []entry, files []
 			nodes = []*model.TreeNode{req.Node}
 		} else {
 			model.WalkCopyFiles(req.Node, &req.Opts, req.LeftToRight, func(n *model.TreeNode, notCompared bool) {
-				if notCompared && !req.CopyUnknown {
+				if notCompared && !unknown[n.RelPath] {
 					leftOut++
 					return
 				}
@@ -245,9 +225,9 @@ func (req Request) enumerate(names model.NameRule) (collisions []entry, files []
 		for _, f := range nodes {
 			newer := model.OverwritesNewer(f, req.LeftToRight, req.Opts)
 			switch {
-			case newer == "" || req.Newer == NewerOverwrite:
+			case newer == "" || overwrite[f.RelPath]:
 				newer = ""
-			case req.Newer == NewerKeep:
+			case req.Plan.KeepNewer:
 				keptNewer++
 				continue
 			}
@@ -368,10 +348,7 @@ func (req Request) twinSet(collisions []entry) map[string]*twin {
 	if len(collisions) == 0 {
 		return nil
 	}
-	confirmed := make(map[string]bool, len(req.Replace))
-	for _, p := range req.Replace {
-		confirmed[p] = true
-	}
+	confirmed := pathSet(req.Plan.Conflicts, func(c Conflict) string { return c.RelPath })
 	twins := make(map[string]*twin, len(collisions))
 	for _, e := range collisions {
 		twins[e.relPath] = &twin{entry: e, confirmed: confirmed[e.relPath]}
@@ -710,13 +687,17 @@ func (c *copier) copyOne(f item) {
 	finish("")
 }
 
-// mirrorDelete removes destination-only entries. It must only run once every
-// copy landed: a partial copy plus a full delete pass would destroy data the
-// source still holds.
+// mirrorDelete removes the entries only on the destination that the plan
+// holds. It must only run once every copy landed: a partial copy plus a full
+// delete pass would destroy data the source still holds. It deletes what the
+// user was shown, and only while it is still as shown: it read what to
+// delete from the tree after the copy, which by then held what the copy had
+// listed as it ran, and deleted that too, unseen (D6). What the plan does not
+// hold is kept, and the next copy asks about it.
 func (c *copier) mirrorDelete() {
 	failed := c.p.Failed.Load()
 	switch {
-	case !c.req.Mirror:
+	case !c.req.Plan.Mirror:
 		return
 	case c.stopped.Load():
 		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: the copy stopped")
@@ -728,24 +709,19 @@ func (c *copier) mirrorDelete() {
 		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("mirror delete skipped: %d file(s) failed to copy", failed))
 		return
 	}
-	var deletes []entry
-	c.req.Scanner.ReadTree(func(*model.TreeNode) {
-		for _, d := range model.CollectMirrorDeletes(c.req.Node, c.req.LeftToRight) {
-			deletes = append(deletes, entry{relPath: d.RelPath, isDir: d.IsDir})
-		}
-	})
-	// The tree is a snapshot from before the copy. Each folder is listed
-	// again on both sides and a name is deleted only while it is still on the
-	// destination alone; see stillDestOnly.
+	// Each folder is listed again on both sides, and an entry is deleted
+	// only while it is on the destination alone, as the plan has it; see
+	// stillDestOnly.
 	var dirs []string
-	byDir := map[string][]entry{}
-	for _, d := range deletes {
-		dir := model.DirOf(d.relPath)
+	byDir := map[string][]Delete{}
+	for _, d := range c.req.Plan.Deletes {
+		dir := model.DirOf(d.RelPath)
 		if _, ok := byDir[dir]; !ok {
 			dirs = append(dirs, dir)
 		}
 		byDir[dir] = append(byDir[dir], d)
 	}
+	kept := 0 // still only on the destination: the next copy asks
 	for _, dir := range dirs {
 		if c.ctx.Err() != nil {
 			return
@@ -759,22 +735,65 @@ func (c *copier) mirrorDelete() {
 			if c.ctx.Err() != nil {
 				return
 			}
-			if why := keep(path.Base(d.relPath)); why != "" {
-				transport.Log.Add("copy", transport.DirWarn, "mirror delete "+d.relPath+" skipped: "+why)
+			if why, changed := keep(d); why != "" {
+				transport.Log.Add("copy", transport.DirWarn, "mirror delete "+d.RelPath+" skipped: "+why)
+				if changed {
+					kept++
+				}
 				continue
 			}
-			if err := c.remove(d); err != nil {
-				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.relPath+": "+err.Error())
+			if err := c.remove(entry{relPath: d.RelPath, isDir: d.IsDir}); err != nil {
+				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.RelPath+": "+err.Error())
 				continue
 			}
-			transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.relPath)
+			transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.RelPath)
 		}
 	}
+	for _, p := range c.unplannedDeletes() {
+		transport.Log.Add("copy", transport.DirWarn, "mirror delete "+p+" skipped: the dialog did not show it")
+		kept++
+	}
+	if kept > 0 {
+		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("mirror delete: kept %d on %s that the dialog did not show as they are now: copy again to be asked", kept, dstSideName(c.req.LeftToRight)))
+	}
+}
+
+// unplannedDeletes are the entries only on the destination that the tree
+// holds now and the plan does not: in a folder the copy listed as it ran, or
+// found by a rescan after the dialog.
+func (c *copier) unplannedDeletes() []string {
+	planned := pathSet(c.req.Plan.Deletes, func(d Delete) string { return d.RelPath })
+	var extra []string
+	c.req.Scanner.ReadTree(func(*model.TreeNode) {
+		for _, d := range model.CollectMirrorDeletes(c.req.Node, c.req.LeftToRight) {
+			if !planned[d.RelPath] {
+				extra = append(extra, d.RelPath)
+			}
+		}
+	})
+	return extra
+}
+
+// changedSince says how the entry the destination lists now differs from
+// the one the plan read, or "" when it is the same: the same type and, for a
+// file, the same size and time to the second. What a folder holds is not
+// listed again: a folder is deleted with what it holds now.
+func changedSince(d Delete, now model.FileEntry) string {
+	switch {
+	case now.IsDir != d.IsDir:
+		return "it is not the " + map[bool]string{true: "folder", false: "file"}[d.IsDir] + " the dialog showed"
+	case d.IsDir:
+		return ""
+	case now.Size != d.Size || !now.ModTime.Truncate(time.Second).Equal(d.ModTime.Truncate(time.Second)):
+		return "it changed since the dialog showed it"
+	}
+	return ""
 }
 
 // stillDestOnly lists dir on both sides now, after the copy, on the servers
 // rather than from the scan's cached listings, and returns the check a
-// mirror delete in dir must pass: "" to delete name, else why not.
+// mirror delete in dir must pass: "" to delete d, else why not, and whether
+// d is kept because it changed since the plan read it (changedSince).
 //
 // Names are matched byte for byte, but a case-insensitive destination (macOS,
 // Windows, SMB, FAT) stores photo.jpg in the existing Photo.JPG: the copy
@@ -783,7 +802,7 @@ func (c *copier) mirrorDelete() {
 // names (then they are two files). And when a file copied into dir is not
 // listed under its own name or a case variant of it, the destination renames
 // what it stores (Unicode normalization, for one): nothing in dir is deleted.
-func (c *copier) stillDestOnly(dir string) (func(name string) string, error) {
+func (c *copier) stillDestOnly(dir string) (func(d Delete) (why string, changed bool), error) {
 	ctx := model.WithFreshListing(c.ctx) // not the scan's cached listing
 	srcList, err := c.src.List(ctx, dir)
 	if err != nil {
@@ -799,33 +818,41 @@ func (c *copier) stillDestOnly(dir string) (func(name string) string, error) {
 		onSrc[e.Name] = true
 		srcFold[strings.ToLower(e.Name)] = e.Name
 	}
-	onDst := make(map[string]bool, len(dstList))
+	onDst := make(map[string]model.FileEntry, len(dstList))
 	dstFold := make(map[string]bool, len(dstList))
 	for _, e := range dstList {
-		onDst[e.Name] = true
+		onDst[e.Name] = e
 		dstFold[strings.ToLower(e.Name)] = true
 	}
 	c.mu.Lock()
 	var renamed string
 	for p := range c.dstChanged {
-		if name := path.Base(p); model.DirOf(p) == dir && !onDst[name] && !dstFold[strings.ToLower(name)] {
+		name := path.Base(p)
+		if _, listed := onDst[name]; model.DirOf(p) == dir && !listed && !dstFold[strings.ToLower(name)] {
 			renamed = name
 			break
 		}
 	}
 	c.mu.Unlock()
-	return func(name string) string {
+	return func(d Delete) (string, bool) {
+		name := path.Base(d.RelPath)
+		now, listed := onDst[name]
 		switch {
 		case renamed != "":
-			return "the destination does not list the copied " + renamed + " under that name, so names here cannot be matched"
-		case !onDst[name]:
-			return "no longer on the destination"
+			return "the destination does not list the copied " + renamed + " under that name, so names here cannot be matched", false
+		case !listed:
+			return "no longer on the destination", false
 		case onSrc[name]:
-			return "now on the source too"
+			return "now on the source too", false
 		}
-		if twin, ok := srcFold[strings.ToLower(name)]; ok && !onDst[twin] {
-			return "on this destination it is the same file as " + twin + " (the names differ only in letter case)"
+		if twin, ok := srcFold[strings.ToLower(name)]; ok {
+			if _, twinListed := onDst[twin]; !twinListed {
+				return "on this destination it is the same file as " + twin + " (the names differ only in letter case)", false
+			}
 		}
-		return ""
+		if why := changedSince(d, now); why != "" {
+			return why, true
+		}
+		return "", false
 	}, nil
 }

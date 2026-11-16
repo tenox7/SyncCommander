@@ -45,8 +45,12 @@ func TestCopyDialogNamesOnlyTheCopiedFilesConflict(t *testing.T) {
 	if !m.confirm.IsOpen() || m.pendingCopy == nil {
 		t.Fatal("> on the file notes did not ask before deleting the folder notes/")
 	}
-	if !slices.Equal(m.pendingCopy.replace, []string{"notes"}) {
-		t.Errorf("pending copy replaces %q, want [notes]", m.pendingCopy.replace)
+	var replaced []string
+	for _, c := range m.pendingCopy.plan.Conflicts {
+		replaced = append(replaced, c.RelPath)
+	}
+	if !slices.Equal(replaced, []string{"notes"}) {
+		t.Errorf("pending copy replaces %q, want [notes]", replaced)
 	}
 	if body := strings.Join(m.confirm.lines, "\n"); !strings.Contains(body, "notes/  (folder: 1 files, 0 folders)") {
 		t.Errorf("dialog does not name the folder it deletes:\n%s", body)

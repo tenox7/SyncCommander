@@ -19,14 +19,15 @@ func TestNewerDestinationFiles(t *testing.T) {
 	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	later := at.Add(10 * time.Minute)
 	for _, tc := range []struct {
-		rule        NewerRule
-		failed      int64
-		overwritten bool
-		logs        []string
+		name            string
+		keep, overwrite bool
+		failed          int64
+		overwritten     bool
+		logs            []string
 	}{
-		{NewerRefuse, 2, false, []string{"COPY d/newer.txt: refused, it is newer on right", "COPY d/larger.txt: refused, it is larger on right"}},
-		{NewerKeep, 0, false, []string{"COPY d: left out 2 files that are newer or larger on right"}},
-		{NewerOverwrite, 0, true, nil},
+		{"not asked", false, false, 2, false, []string{"COPY d/newer.txt: refused, it is newer on right", "COPY d/larger.txt: refused, it is larger on right"}},
+		{"skip them", true, false, 0, false, []string{"COPY d: left out 2 files that are newer or larger on right"}},
+		{"overwrite them", false, true, 0, true, nil},
 	} {
 		root := t.TempDir()
 		left, right := filepath.Join(root, "l"), filepath.Join(root, "r")
@@ -48,23 +49,27 @@ func TestNewerDestinationFiles(t *testing.T) {
 		}
 		s := scanned(t, left, right, transport.NewLocalBackend(left), transport.NewLocalBackend(right))
 		mark := len(transport.Log.Lines())
+		plan := Plan{KeepNewer: tc.keep}
+		if tc.overwrite {
+			plan.Newer = PlanCopy(s.sc, s.node(t, "d"), true, scenarioOpts).Newer
+		}
 		p := &Progress{}
 		Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: s.node(t, "d"), RelPath: "d",
-			LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Newer: tc.rule})
+			LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Plan: plan})
 		if got := p.Failed.Load(); got != tc.failed {
-			t.Errorf("rule %d: %d failed, want %d", tc.rule, got, tc.failed)
+			t.Errorf("%s: %d failed, want %d", tc.name, got, tc.failed)
 		}
 		if got := readFile(t, filepath.Join(right, "d", "plain.txt")); got != "source" {
-			t.Errorf("rule %d: d/plain.txt, older and smaller on right, holds %q", tc.rule, got)
+			t.Errorf("%s: d/plain.txt, older and smaller on right, holds %q", tc.name, got)
 		}
 		for _, f := range []string{"newer.txt", "larger.txt"} {
 			if got := readFile(t, filepath.Join(right, "d", f)); (got == "source") != tc.overwritten {
-				t.Errorf("rule %d: d/%s holds %q", tc.rule, f, got)
+				t.Errorf("%s: d/%s holds %q", tc.name, f, got)
 			}
 		}
 		for _, l := range tc.logs {
 			if !logged(mark, l) {
-				t.Errorf("rule %d: no log line %q", tc.rule, l)
+				t.Errorf("%s: no log line %q", tc.name, l)
 			}
 		}
 	}

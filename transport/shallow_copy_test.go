@@ -50,7 +50,7 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 	if got := len(model.CollectCopyFiles(node, opts, true, false)); got != 0 {
 		t.Fatalf("shallow tree yields %d files to copy; test needs an unlisted subtree", got)
 	}
-	if f, d := model.CountMirrorDeletes(node, true); f != 0 || d != 0 {
+	if f, d := mirrorDeleteCounts(node); f != 0 || d != 0 {
 		t.Fatalf("shallow tree yields %d/%d mirror deletes; test needs an unlisted subtree", f, d)
 	}
 
@@ -62,13 +62,27 @@ func TestShallowScanHidesSubtreeUntilListed(t *testing.T) {
 	if len(files) != 1 || files[0].RelPath != "a/b/c/deep.txt" {
 		t.Errorf("copy set = %v, want [a/b/c/deep.txt]", relPaths(files))
 	}
-	f, d := model.CountMirrorDeletes(node, true)
+	f, d := mirrorDeleteCounts(node)
 	if f != 2 || d != 1 {
 		t.Errorf("mirror deletes = %d files, %d dirs; want 2, 1", f, d)
 	}
 	if got := relPaths(model.CollectMirrorDeletes(node, true)); len(got) != 2 {
 		t.Errorf("mirror delete roots = %v, want orphan.txt and orphandir", got)
 	}
+}
+
+// mirrorDeleteCounts counts the files and folders a mirror of node deletes
+// left to right, with what the folders hold, as the copy dialog counts them.
+func mirrorDeleteCounts(node *model.TreeNode) (files, dirs int) {
+	for _, d := range model.CollectMirrorDeletes(node, true) {
+		if !d.IsDir {
+			files++
+			continue
+		}
+		f, dd, _ := model.CountDescendants(d)
+		files, dirs = files+f, dirs+dd+1
+	}
+	return files, dirs
 }
 
 func relPaths(nodes []*model.TreeNode) []string {

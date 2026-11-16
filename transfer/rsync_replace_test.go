@@ -92,8 +92,10 @@ func TestRsyncCutOffOverwriteKeepsTheOldFile(t *testing.T) {
 			src, dst = s.rb, s.lb
 		}
 		p := &Progress{}
-		Copy(ctx, Request{Src: src, Dst: dst, Scanner: s.sc, Node: s.node(t, tc.rel), RelPath: tc.rel,
-			LeftToRight: tc.leftToRight, Opts: scenarioOpts, Parallel: 1, Progress: p, Newer: NewerOverwrite})
+		node := s.node(t, tc.rel)
+		Copy(ctx, Request{Src: src, Dst: dst, Scanner: s.sc, Node: node, RelPath: tc.rel,
+			LeftToRight: tc.leftToRight, Opts: scenarioOpts, Parallel: 1, Progress: p,
+			Plan: Plan{Newer: PlanCopy(s.sc, node, tc.leftToRight, scenarioOpts).Newer}})
 		cancel()
 		if p.Failed.Load() == 0 {
 			t.Fatalf("%s: the copy was not cut off; the test needs a slower copy", tc.rel)

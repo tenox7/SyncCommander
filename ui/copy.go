@@ -21,17 +21,13 @@ type copyDoneMsg struct {
 	changed    *model.ChangedPaths
 }
 
+// pendingCopyInfo is a copy waiting in its dialog.
 type pendingCopyInfo struct {
 	node        *model.TreeNode
 	leftToRight bool
 	title       string
-	ask         copyAsk            // the question the dialog shows now
-	replace     []string           // the type conflicts the dialog showed
-	mirror      bool               // the user chose to delete what is only on the destination
-	newer       []newerFile        // the files newer or larger on the destination, the first few
-	newerTotal  int                // how many there are
-	newerRule   transfer.NewerRule // what the user chose for them
-	unknown     int                // files on both sides not compared yet, which the dialog asks about
+	ask         copyAsk       // the question the dialog shows now
+	plan        transfer.Plan // what the copy may destroy or write over: the dialog shows it, the answers trim it
 }
 
 // copyAsk is the question a copy's dialog shows. The questions come in this
@@ -45,17 +41,6 @@ const (
 	askUnknown                // y copies the files not compared yet too, s skips them
 )
 
-// copyChoices are the user's answers that a copy runs with.
-type copyChoices struct {
-	mirror      bool               // delete what is only on the destination (F15)
-	replace     []string           // the type conflicts to replace
-	copyUnknown bool               // copy the files on both sides not compared yet (F10)
-	newer       transfer.NewerRule // the files newer or larger on the destination (F16)
-}
-
-// newerFile is a file the copy would write over a newer or larger one.
-type newerFile struct{ relPath, why string }
-
 // copyMirrorKeys are the answers when the destination folder holds entries
 // the source does not.
 const copyMirrorKeys = "c=copy, keep them  d=copy and delete them  Esc=cancel"
@@ -65,7 +50,9 @@ const copyMirrorKeys = "c=copy, keep them  d=copy and delete them  Esc=cancel"
 // smaller file over a newer or larger one (F16), or would rewrite files on
 // both sides that are not compared yet (F10). What is only on the
 // destination is deleted only when the user picks that: a folder copy was
-// always a mirror, with no way to copy and keep (F15).
+// always a mirror, with no way to copy and keep (F15). The questions show
+// the copy's plan, read from the tree once, and the copy is held to it: it
+// destroys or writes over nothing the dialog did not show (D6).
 func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	node := m.activePanel().CursorNode()
 	blocked := model.PresenceRightOnly
@@ -76,15 +63,13 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	if node == nil || m.presence(node) == blocked {
 		return nil
 	}
-	lines, replace, deletes, destructive := m.copyConfirmLines(node, leftToRight)
-	newer, newerTotal := m.newerCopies(node, leftToRight)
-	unknown := m.unknownCopies(node, leftToRight)
-	if !destructive && newerTotal == 0 && unknown == 0 {
-		return m.runCopy(node, leftToRight, copyChoices{})
+	plan := transfer.PlanCopy(m.scanner, node, leftToRight, *m.cmpOpts)
+	if len(plan.Conflicts) == 0 && len(plan.Deletes) == 0 && len(plan.Newer) == 0 && len(plan.Unknown) == 0 {
+		return m.runCopy(node, leftToRight, plan)
 	}
-	m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight, title: title, replace: replace,
-		newer: newer, newerTotal: newerTotal, unknown: unknown}
-	if deletes {
+	m.pendingCopy = &pendingCopyInfo{node: node, leftToRight: leftToRight, title: title, plan: plan}
+	lines := m.copyConfirmLines(node, leftToRight, plan)
+	if len(plan.Deletes) > 0 {
 		m.pendingCopy.ask = askMirror
 		m.confirm.OpenKeys(title, lines, true, copyMirrorKeys)
 		return nil
@@ -98,23 +83,25 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 func (m *Model) askNextCopy(lines []string) tea.Cmd {
 	pc := m.pendingCopy
 	switch {
-	case pc.newerTotal > 0 && pc.ask < askNewer:
+	case len(pc.plan.Newer) > 0 && pc.ask < askNewer:
 		pc.ask = askNewer
 		m.askNewerCopies(lines)
-	case pc.unknown > 0 && pc.ask < askUnknown:
+	case len(pc.plan.Unknown) > 0 && pc.ask < askUnknown:
 		pc.ask = askUnknown
 		m.askUnknownCopies(lines)
 	case len(lines) > 0:
 		pc.ask = askReplace
 		m.confirm.Open(pc.title, lines, true)
 	default:
-		return m.confirmCopy(false)
+		return m.confirmCopy()
 	}
 	return nil
 }
 
 // answerCopy takes a key in a copy's dialog. Each question has its own
-// keys; any other key does nothing.
+// keys; any other key does nothing. An answer trims the plan: c keeps what
+// is only on the destination, s takes the newer or the not compared files
+// out of it.
 func (m *Model) answerCopy(k string) tea.Cmd {
 	pc := m.pendingCopy
 	switch k {
@@ -124,28 +111,30 @@ func (m *Model) answerCopy(k string) tea.Cmd {
 	}
 	switch k = strings.ToLower(k); {
 	case pc.ask == askReplace && k == "y":
-		return m.confirmCopy(false)
+		return m.confirmCopy()
 	case pc.ask == askMirror && (k == "c" || k == "d"):
-		pc.mirror = k == "d"
+		pc.plan.Mirror = k == "d"
 		return m.askNextCopy(nil)
 	case pc.ask == askNewer && k == "y":
-		pc.newerRule = transfer.NewerOverwrite
 		return m.askNextCopy(nil)
 	case pc.ask == askNewer && k == "s" && pc.node.IsDir:
-		pc.newerRule = transfer.NewerKeep
+		pc.plan.Newer, pc.plan.KeepNewer = nil, true
 		return m.askNextCopy(nil)
-	case pc.ask == askUnknown && (k == "y" || k == "s"):
-		return m.confirmCopy(k == "y")
+	case pc.ask == askUnknown && k == "y":
+		return m.confirmCopy()
+	case pc.ask == askUnknown && k == "s":
+		pc.plan.Unknown = nil
+		return m.confirmCopy()
 	}
 	return nil
 }
 
 // copyLabel is the copied node's name, and a warning when its subtree is
 // not fully listed, for a question that follows another.
-func (m *Model) copyLabel(node *model.TreeNode) []string {
+func (m *Model) copyLabel(node *model.TreeNode, unlisted bool) []string {
 	lines := []string{"", m.nodeLabel(node)}
-	if m.unlisted(node) {
-		lines = append(lines, "", "⚠ subtree not fully scanned - actual counts may be higher")
+	if unlisted {
+		lines = append(lines, unlistedWarning...)
 	}
 	return lines
 }
@@ -157,24 +146,20 @@ func (m *Model) copyLabel(node *model.TreeNode) []string {
 func (m *Model) askNewerCopies(lines []string) {
 	pc := m.pendingCopy
 	if len(lines) == 0 {
-		lines = m.copyLabel(pc.node)
+		lines = m.copyLabel(pc.node, pc.plan.Unlisted)
 	}
 	side := "right"
 	if !pc.leftToRight {
 		side = "left"
 	}
+	newer := pc.plan.Newer
 	if !pc.node.IsDir {
-		lines = append(lines, "", fmt.Sprintf("It is %s on %s:", pc.newer[0].why, side), "the copy would put an older or smaller file over it.")
+		lines = append(lines, "", fmt.Sprintf("It is %s on %s:", newer[0].Why, side), "the copy would put an older or smaller file over it.")
 		m.confirm.OpenKeys(pc.title, lines, true, "y=overwrite it  Esc=cancel")
 		return
 	}
-	lines = append(lines, "", fmt.Sprintf("%d files are newer or larger on %s:", pc.newerTotal, side))
-	for _, f := range pc.newer {
-		lines = append(lines, "  "+f.relPath+"  ("+f.why+")")
-	}
-	if n := pc.newerTotal - len(pc.newer); n > 0 {
-		lines = append(lines, fmt.Sprintf("  ... and %d more", n))
-	}
+	lines = append(lines, "", fmt.Sprintf("%d files are newer or larger on %s:", len(newer), side))
+	lines = appendNamed(lines, len(newer), func(i int) string { return newer[i].RelPath + "  (" + newer[i].Why + ")" })
 	lines = append(lines, "The copy would put older or smaller files over them.")
 	m.confirm.OpenKeys(pc.title, lines, true, "y=overwrite them  s=skip them  Esc=cancel")
 }
@@ -185,30 +170,29 @@ func (m *Model) askNewerCopies(lines []string) {
 func (m *Model) askUnknownCopies(lines []string) {
 	pc := m.pendingCopy
 	if len(lines) == 0 {
-		lines = m.copyLabel(pc.node)
+		lines = m.copyLabel(pc.node, pc.plan.Unlisted)
 	}
 	why := "their checksums are not computed yet."
 	if !m.cmpOpts.Checksum {
 		why = "no compare option is switched on."
 	}
-	lines = append(lines, "", fmt.Sprintf("%d files on both sides are not compared yet:", pc.unknown), why, "Copy them too?")
+	lines = append(lines, "", fmt.Sprintf("%d files on both sides are not compared yet:", len(pc.plan.Unknown)), why, "Copy them too?")
 	m.confirm.OpenKeys(pc.title, lines, true, "y=copy them too  s=skip them  Esc=cancel")
 }
 
-// confirmCopy runs the copy the user just confirmed: the type conflicts the
-// dialog showed, the deletes and the newer files as the user chose, and the
-// files not compared yet when copyUnknown.
-func (m *Model) confirmCopy(copyUnknown bool) tea.Cmd {
+// confirmCopy runs the copy the user just confirmed, held to the plan as
+// the answers left it.
+func (m *Model) confirmCopy() tea.Cmd {
 	pc := m.pendingCopy
 	m.pendingCopy = nil
 	m.confirm.Close()
-	return m.runCopy(pc.node, pc.leftToRight, copyChoices{mirror: pc.mirror, replace: pc.replace, copyUnknown: copyUnknown, newer: pc.newerRule})
+	return m.runCopy(pc.node, pc.leftToRight, pc.plan)
 }
 
-// runCopy starts the copy with the user's answers.
-func (m *Model) runCopy(node *model.TreeNode, leftToRight bool, c copyChoices) tea.Cmd {
+// runCopy starts the copy, held to plan.
+func (m *Model) runCopy(node *model.TreeNode, leftToRight bool, plan transfer.Plan) tea.Cmd {
 	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
-	return m.copyNode(node, leftToRight, c)
+	return m.copyNode(node, leftToRight, plan)
 }
 
 // slotSpin is one in-flight row's liveness: the frame only advances on ticks
@@ -280,7 +264,7 @@ func (m *Model) setCopyParallel(n int) {
 
 // copyNode starts the copy: it hands the transfer engine a snapshot of what
 // it needs, and reports back with the rescan root and the changed paths.
-func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, c copyChoices) tea.Cmd {
+func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, plan transfer.Plan) tea.Cmd {
 	if !m.mayStart(opCopy) {
 		return nil
 	}
@@ -295,9 +279,9 @@ func (m *Model) copyNode(node *model.TreeNode, leftToRight bool, c copyChoices) 
 	m.setCopyParallel(parallel)
 	req := transfer.Request{
 		Src: src, Dst: dst, Scanner: m.scanner, Node: node, RelPath: relPath,
-		LeftToRight: leftToRight, Mirror: c.mirror, Opts: *m.cmpOpts, Parallel: parallel,
+		LeftToRight: leftToRight, Opts: *m.cmpOpts, Parallel: parallel,
 		Batch: m.batchTransfer, VerifyResume: m.verifyResume, Progress: m.copyProgress,
-		Replace: c.replace, CopyUnknown: c.copyUnknown, Newer: c.newer,
+		Plan: plan,
 	}
 	m.copyProgress.Reset(parallel, leftToRight)
 	return m.start(opCopy, func(ctx context.Context, done opDoneMsg) doneMsg {
@@ -314,48 +298,6 @@ func (m *Model) presence(node *model.TreeNode) model.Presence {
 	return p
 }
 
-// unknownCopies counts, under the read lock, the files a copy of a folder
-// would rewrite only because they are not compared yet. A single file the
-// user copies is copied: that is what was asked.
-func (m *Model) unknownCopies(node *model.TreeNode, leftToRight bool) int {
-	n := 0
-	m.readTree(func(*model.TreeNode) {
-		if node.IsDir {
-			n = model.CountUnknownCopies(node, m.cmpOpts, leftToRight)
-		}
-	})
-	return n
-}
-
-// newerCopies returns, under the read lock, the files a copy of node would
-// write over a newer or larger file on the destination: the first few, and
-// how many there are.
-func (m *Model) newerCopies(node *model.TreeNode, leftToRight bool) (first []newerFile, total int) {
-	m.readTree(func(*model.TreeNode) {
-		visit := func(n *model.TreeNode, _ bool) {
-			if why := model.OverwritesNewer(n, leftToRight, *m.cmpOpts); why != "" {
-				total++
-				if len(first) < maxConfirmPaths {
-					first = append(first, newerFile{n.RelPath, why})
-				}
-			}
-		}
-		if node.IsDir {
-			model.WalkCopyFiles(node, m.cmpOpts, leftToRight, visit)
-		} else {
-			visit(node, false)
-		}
-	})
-	return first, total
-}
-
-// unlisted reports, under the read lock, a folder under node not listed yet.
-func (m *Model) unlisted(node *model.TreeNode) bool {
-	var u bool
-	m.readTree(func(*model.TreeNode) { u = model.UnlistedDir(node) != nil })
-	return u
-}
-
 // nodeLabel is node's name as the dialogs show it, under the read lock.
 func (m *Model) nodeLabel(node *model.TreeNode) string {
 	var name string
@@ -368,74 +310,69 @@ func (m *Model) nodeLabel(node *model.TreeNode) string {
 	return name
 }
 
-// copyConfirmLines counts collisions and mirror deletes across the subtree, so
-// it runs the free function of the same name under the read lock.
-func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []string, deletes, ok bool) {
-	m.readTree(func(*model.TreeNode) { lines, replace, deletes, ok = copyConfirmLines(node, leftToRight) })
-	return lines, replace, deletes, ok
-}
-
 // maxConfirmPaths caps how many paths a confirm dialog lists by name.
 const maxConfirmPaths = 5
 
-// copyConfirmLines builds the destructive-copy confirmation body and the
-// destination paths of the type conflicts it names, and reports whether it
-// shows entries only on the destination, which the user may keep or delete;
-// or it reports false when the copy destroys nothing and needs no
-// confirmation. Counts come from the
-// in-memory tree: an unlisted dir reads as empty, so the totals are a lower
-// bound until the copy itself lists the subtree — say so rather than quote a
-// number the delete pass will exceed. A conflict the copy only finds then is
-// not replaced: its path fails and the next copy asks.
-func copyConfirmLines(node *model.TreeNode, leftToRight bool) (lines, replace []string, deletes, ok bool) {
+// unlistedWarning is the dialog's note when a folder under the copied node
+// is not listed yet. The copy lists it as it runs, and what it finds there
+// that the dialog did not show, it does not delete or write over (D6).
+var unlistedWarning = []string{"", "⚠ subtree not fully scanned: the copy may find more there.", "It deletes or writes over only what the dialog shows."}
+
+// copyConfirmLines is the first question's body: the copied node, the
+// destination entries of the other type the copy replaces, and the entries
+// only on the destination, each named up to maxConfirmPaths, then the
+// warning when a folder under the node is not listed yet. It is empty when
+// the plan has neither conflicts nor deletes.
+func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool, plan transfer.Plan) []string {
+	if len(plan.Conflicts) == 0 && len(plan.Deletes) == 0 {
+		return nil
+	}
 	side := "right"
 	if !leftToRight {
 		side = "left"
 	}
-	collisions := model.CollectTypeCollisions(node, leftToRight)
-	_, dst := model.CopySides(leftToRight)
-	var delFiles, delDirs int
-	if node.IsDir {
-		delFiles, delDirs = model.CountMirrorDeletes(node, leftToRight)
-	}
-	deletes = delFiles > 0 || delDirs > 0
-	if len(collisions) == 0 && !deletes {
-		return nil, nil, false, false
-	}
-	name := node.Name
-	if node.IsDir {
-		name += "/"
-	}
-	lines = []string{"", name}
-	if len(collisions) > 0 {
+	lines := []string{"", m.nodeLabel(node)}
+	if len(plan.Conflicts) > 0 {
 		lines = append(lines, fmt.Sprintf("Will delete on %s, to put the other type there:", side))
-		for i, c := range collisions {
-			replace = append(replace, c.RelPath)
-			if i < maxConfirmPaths {
-				lines = append(lines, "  "+describeTwin(c, dst))
-			}
-		}
-		if n := len(collisions) - maxConfirmPaths; n > 0 {
-			lines = append(lines, fmt.Sprintf("  ... and %d more", n))
-		}
+		lines = appendNamed(lines, len(plan.Conflicts), func(i int) string { return describeConflict(plan.Conflicts[i]) })
 	}
-	if deletes {
-		lines = append(lines, fmt.Sprintf("Only on %s: %d files, %d folders", side, delFiles, delDirs))
+	if len(plan.Deletes) > 0 {
+		files, dirs := transfer.DeleteCounts(plan.Deletes)
+		lines = append(lines, fmt.Sprintf("Only on %s: %d files, %d folders", side, files, dirs))
+		lines = appendNamed(lines, len(plan.Deletes), func(i int) string { return describeDelete(plan.Deletes[i]) })
 	}
-	if model.UnlistedDir(node) != nil {
-		lines = append(lines, "", "⚠ subtree not fully scanned - actual counts may be higher")
+	if plan.Unlisted {
+		lines = append(lines, unlistedWarning...)
 	}
-	return lines, replace, deletes, true
+	return lines
 }
 
-// describeTwin names a destination entry a copy replaces with the other type.
-func describeTwin(n *model.TreeNode, dst model.Side) string {
-	if !n.IsDir {
-		kind := "file"
-		if e := n.Sides[dst].Entry; e != nil {
-			kind = e.Kind()
-		}
-		return n.RelPath + "  (" + kind + ")"
+// appendNamed appends, indented, the first maxConfirmPaths of n named
+// items, and how many more there are.
+func appendNamed(lines []string, n int, name func(i int) string) []string {
+	for i := range min(n, maxConfirmPaths) {
+		lines = append(lines, "  "+name(i))
 	}
-	return n.RelPath + "/  (folder: " + describeSubtree(n) + ")"
+	if n > maxConfirmPaths {
+		lines = append(lines, fmt.Sprintf("  ... and %d more", n-maxConfirmPaths))
+	}
+	return lines
+}
+
+// describeConflict names a destination entry a copy replaces with the
+// other type.
+func describeConflict(c transfer.Conflict) string {
+	if !c.IsDir {
+		return c.RelPath + "  (" + c.Kind + ")"
+	}
+	return c.RelPath + "/  (folder: " + describeTally(c.Tally) + ")"
+}
+
+// describeDelete names an entry only on the destination, which a mirror
+// deletes.
+func describeDelete(d transfer.Delete) string {
+	if !d.IsDir {
+		return d.RelPath
+	}
+	return d.RelPath + "/  (folder: " + describeTally(d.Tally) + ")"
 }

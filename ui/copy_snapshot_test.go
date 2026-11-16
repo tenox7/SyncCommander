@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"sc/model"
+	"sc/transfer"
 )
 
 // copyNode works from a snapshot of the tree rather than the live nodes;
@@ -31,7 +32,7 @@ func TestCopyNodeCopiesWholeSubtree(t *testing.T) {
 	}
 	want := int64(len(model.CollectCopyFiles(subtree, m.cmpOpts, true, false)))
 
-	msg := runFirst(m.copyNode(subtree, true, copyChoices{}))
+	msg := runFirst(m.copyNode(subtree, true, transfer.Plan{}))
 	if _, ok := msg.(copyDoneMsg); !ok {
 		t.Fatalf("copy returned %T, want copyDoneMsg", msg)
 	}

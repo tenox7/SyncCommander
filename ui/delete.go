@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"sc/model"
+	"sc/transfer"
 	"sc/transport"
 )
 
@@ -79,13 +80,18 @@ func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
 // describeSubtree summarises what a recursive delete would remove.
 func describeSubtree(node *model.TreeNode) string {
 	files, dirs, complete := model.CountDescendants(node)
+	return describeTally(transfer.Tally{Files: files, Dirs: dirs, Complete: complete})
+}
+
+// describeTally says what a folder holds.
+func describeTally(t transfer.Tally) string {
 	switch {
-	case !complete:
-		return fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", files, dirs)
-	case files == 0 && dirs == 0:
+	case !t.Complete:
+		return fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", t.Files, t.Dirs)
+	case t.Files == 0 && t.Dirs == 0:
 		return "empty folder"
 	}
-	return fmt.Sprintf("%d files, %d folders", files, dirs)
+	return fmt.Sprintf("%d files, %d folders", t.Files, t.Dirs)
 }
 
 // confirmDelete runs the pending delete on side. When a rescan changed the

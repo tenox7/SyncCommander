@@ -106,20 +106,28 @@ func splitRel(relPath string) []string {
 	return parts
 }
 
-// copy runs one copy; replace lists the type conflicts the user confirmed.
-// The user agreed to overwrite newer files: a fixture writes a destination
-// file just after the source's, which makes it a second newer when the two
-// writes fall on two seconds (F16).
+// copy runs one copy as the user agreed to it, on the plan the tree gives
+// now (PlanCopy). replace lists the type conflicts the user confirmed;
+// mirror deletes what the plan has only on the destination. The user agreed
+// to overwrite the newer files: a fixture writes a destination file just
+// after the source's, which makes it a second newer when the two writes
+// fall on two seconds (F16).
 func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, replace ...string) *Progress {
 	t.Helper()
 	src, dst := s.lb, s.rb
 	if !leftToRight {
 		src, dst = s.rb, s.lb
 	}
+	node := s.node(t, relPath)
+	planned := PlanCopy(s.sc, node, leftToRight, scenarioOpts)
+	plan := Plan{Newer: planned.Newer, Deletes: planned.Deletes, Mirror: mirror}
+	for _, r := range replace {
+		plan.Conflicts = append(plan.Conflicts, Conflict{RelPath: r})
+	}
 	p := &Progress{}
-	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: s.node(t, relPath), RelPath: relPath,
-		LeftToRight: leftToRight, Mirror: mirror, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: replace,
-		VerifyResume: s.verifyResume, Newer: NewerOverwrite})
+	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: node, RelPath: relPath,
+		LeftToRight: leftToRight, Opts: scenarioOpts, Parallel: 1, Progress: p, Plan: plan,
+		VerifyResume: s.verifyResume})
 	return p
 }
 
@@ -302,7 +310,7 @@ func TestScenarioReplaceFolderWithFileNeedsConfirmation(t *testing.T) {
 
 	p = &Progress{}
 	Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: file, RelPath: "notes",
-		LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Replace: []string{"notes"}})
+		LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Plan: Plan{Conflicts: []Conflict{{RelPath: "notes"}}}})
 	if p.Failed.Load() != 0 {
 		t.Errorf("confirmed replace: failed=%d, want 0", p.Failed.Load())
 	}

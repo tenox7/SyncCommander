@@ -858,7 +858,7 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 // (NodeStatus unknown: with checksum compare on, a checksum not computed;
 // or no compare option on) goes in only with unknown set: most such files
 // are equal, and copying them silently rewrites them all (F10).
-// CountUnknownCopies counts them, so the user can be asked.
+// WalkCopyFiles names them, so the user can be asked.
 func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight, unknown bool) []*TreeNode {
 	var result []*TreeNode
 	WalkCopyFiles(node, opts, leftToRight, func(n *TreeNode, notCompared bool) {
@@ -867,18 +867,6 @@ func CollectCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight, unknown bo
 		}
 	})
 	return result
-}
-
-// CountUnknownCopies counts the files under node on both sides that a copy
-// writes only when told to copy what is not compared yet.
-func CountUnknownCopies(node *TreeNode, opts *CompareOpts, leftToRight bool) int {
-	n := 0
-	WalkCopyFiles(node, opts, leftToRight, func(_ *TreeNode, notCompared bool) {
-		if notCompared {
-			n++
-		}
-	})
-	return n
 }
 
 // UnlistedDir returns the first directory in node's subtree that was never
@@ -1054,33 +1042,6 @@ func CollectMirrorDeletes(node *TreeNode, leftToRight bool) []*TreeNode {
 		}
 	}
 	return result
-}
-
-func CountMirrorDeletes(node *TreeNode, leftToRight bool) (files, dirs int) {
-	_, dst := CopySides(leftToRight)
-	destOnly := dst.Only()
-	for _, child := range node.Children {
-		if child.Compare.Presence == destOnly {
-			if hasTwinWithSrc(node, child, leftToRight) {
-				continue
-			}
-			if child.IsDir {
-				dirs++
-				cf, cd, _ := CountDescendants(child)
-				files += cf
-				dirs += cd
-			} else {
-				files++
-			}
-			continue
-		}
-		if child.IsDir {
-			cf, cd := CountMirrorDeletes(child, leftToRight)
-			files += cf
-			dirs += cd
-		}
-	}
-	return
 }
 
 // hasTwinWithSrc reports whether child has a sibling with the same Name but

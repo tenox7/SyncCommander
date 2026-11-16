@@ -39,8 +39,11 @@ a connection per file to match. A batch rsync+ssh transfer is one session, so
 
 A folder copy deletes nothing that is only on the destination unless you
 choose it. When the destination folder holds files the source does not, `>`
-and `<` ask: `c` copies and keeps them, `d` copies and deletes them (a
-mirror), `Esc` cancels.
+and `<` name the first few and ask: `c` copies and keeps them, `d` copies
+and deletes them (a mirror), `Esc` cancels. A mirror deletes only what the
+dialog showed, and only while it is still as shown. An entry that came
+later, in a folder the scan had not listed, or that changed since, stays,
+and the next copy asks.
 
 A copy never puts an older or smaller file over a newer or larger one
 without asking. It names such files and asks: `y` overwrites them, `s`
@@ -52,8 +55,8 @@ Deleting a file or folder that is on both sides asks which side: `a` left,
 `l` right, `b` both. Enter does nothing there.
 
 Mirror copy only deletes destination-only files when every copy in the run
-succeeded; a copy also lists any unscanned subtree first so nothing is skipped
-or under-deleted. Resumed (appended) copies are checksum-verified and recopied
+succeeded; a copy also lists any unscanned subtree first, so it skips no
+file there. Resumed (appended) copies are checksum-verified and recopied
 in full on mismatch — disable with `--verify-resume=false`.
 
 A restic repository is a backup: sc deletes nothing in one over restic://,

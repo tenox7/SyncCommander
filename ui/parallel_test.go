@@ -102,7 +102,7 @@ func TestSettingsParallelReachesPoolsAtNextCopy(t *testing.T) {
 	if file == nil {
 		t.Fatal("fake tree has no file")
 	}
-	if _, ok := runFirst(m.copyNode(file, true, copyChoices{})).(copyDoneMsg); !ok {
+	if _, ok := runFirst(m.copyNode(file, true, transfer.Plan{})).(copyDoneMsg); !ok {
 		t.Fatal("copy did not finish")
 	}
 	if left.n != 7 || right.n != 7 {

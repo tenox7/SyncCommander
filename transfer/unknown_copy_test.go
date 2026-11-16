@@ -33,9 +33,14 @@ func TestFolderCopyLeavesOutFilesNotComparedYet(t *testing.T) {
 	}{{false, "right byte"}, {true, "left bytes"}} {
 		s := newScenario(t, left, right)
 		mark := len(transport.Log.Lines())
+		node := s.node(t, "d")
+		var plan Plan
+		if tc.copyUnknown {
+			plan.Unknown = PlanCopy(s.sc, node, true, opts).Unknown
+		}
 		p := &Progress{}
-		Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: s.node(t, "d"), RelPath: "d",
-			LeftToRight: true, Opts: opts, Parallel: 1, Progress: p, CopyUnknown: tc.copyUnknown})
+		Copy(context.Background(), Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: node, RelPath: "d",
+			LeftToRight: true, Opts: opts, Parallel: 1, Progress: p, Plan: plan})
 		if got := readFile(t, filepath.Join(right, "d", "a.txt")); got != tc.want {
 			t.Errorf("CopyUnknown=%v: d/a.txt holds %q, want %q", tc.copyUnknown, got, tc.want)
 		}
