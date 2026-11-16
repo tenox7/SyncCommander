@@ -59,12 +59,13 @@ func (d *LogDialog) window(from, to int) []string {
 func (d *LogDialog) Close() {
 	d.visible = false
 	d.closedAt = time.Now()
-	d.lastSeenErrs = transport.Log.ErrCount()
+	d.lastSeenErrs = problems()
 	d.lastSeenFatal = transport.Log.FatalCount()
 }
 
-// AutoOpen pops the log on new errors, but not within five seconds of the
-// user closing it; a fatal error always opens it in errors-only mode.
+// AutoOpen pops the log on new errors or failures (errCount counts both),
+// but not within five seconds of the user closing it; a fatal error always
+// opens it in errors-only mode.
 func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 	if fatalCount > d.lastSeenFatal {
 		d.lastSeenErrs = errCount

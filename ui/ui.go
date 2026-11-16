@@ -205,10 +205,16 @@ func (m *Model) transferring() bool { return m.copying || m.deleting }
 // the tick loop running.
 func (m *Model) busy() bool { return m.scanning() || m.checksumming() || m.transferring() }
 
-// autoOpenLog pops the log up when new errors have arrived.
+// autoOpenLog pops the log up when new errors or failures have arrived.
 func (m *Model) autoOpenLog() {
-	m.logView.AutoOpen(transport.Log.ErrCount(), transport.Log.FatalCount())
+	m.logView.AutoOpen(problems(), transport.Log.FatalCount())
 }
+
+// problems counts the log lines a user must see: errors, and failures (a
+// retry that gave up, a copy that ended with failures, a delete, rename or
+// touch that failed). The log opened by itself on errors only, and the UI
+// logs its own failures as FAIL (U9).
+func problems() int { return transport.Log.ErrCount() + transport.Log.FailedCount() }
 
 // cancelAll stops every background operation; used on quit.
 func (m *Model) cancelAll() {
