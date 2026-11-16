@@ -19,12 +19,16 @@ type SCPBackend struct {
 	pool *connPool[*ssh.Client]
 }
 
-// newSCPBackend builds an SCPBackend over an already-dialed sshConn. rawURL
-// lets the pool dial fresh connections for parallel transfers (parallel-1 of
-// them).
-func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) *SCPBackend {
+// newSCPBackend builds an SCPBackend over an already-dialed sshConn; on
+// error the caller closes conn.client. rawURL lets the pool dial fresh
+// connections for parallel transfers (parallel-1 of them).
+func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SCPBackend, error) {
 	b := &SCPBackend{sshShell: sshShell{client: conn.client, proto: "scp", listCache: newListCache()}}
-	b.base = expandHome(conn.basePath, b.home)
+	base, err := expandHome(conn.basePath, b.home)
+	if err != nil {
+		return nil, fmt.Errorf("scp: %w", err)
+	}
+	b.base = base
 	b.display = sshDisplayURL(conn, b.base)
 	dial := func() (*ssh.Client, error) {
 		c, err := dialSSH(rawURL, insecure)
@@ -35,7 +39,7 @@ func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) *S
 		return c.client, nil
 	}
 	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
-	return b
+	return b, nil
 }
 
 // SetParallel keeps n-1 extra connections, the primary being the n-th.

@@ -107,7 +107,12 @@ func openSSHBackend(rawURL string, insecure bool, parallel int) (model.Backend, 
 	ver := strings.TrimRight(string(conn.client.ServerVersion()), "\r\n")
 	if !probeSFTP(conn.client) {
 		Log.Add("ssh", DirIn, "SFTP unavailable, falling back to shell backend ("+ver+")")
-		return newSCPBackend(conn, rawURL, insecure, parallel), nil
+		b, err := newSCPBackend(conn, rawURL, insecure, parallel)
+		if err != nil {
+			conn.client.Close()
+			return nil, err
+		}
+		return b, nil
 	}
 	Log.Add("ssh", DirIn, "SFTP available, using SFTP backend ("+ver+")")
 	b, err := newSFTPBackend(conn, rawURL, insecure, parallel)

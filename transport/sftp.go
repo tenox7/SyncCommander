@@ -75,7 +75,10 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 		return nil, fmt.Errorf("sftp: %v", err)
 	}
 	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, sftp: client}
-	b.base = expandHome(conn.basePath, client.Getwd)
+	if b.base, err = expandHome(conn.basePath, client.Getwd); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("sftp: %w", err)
+	}
 	b.display = sshDisplayURL(conn, b.base)
 	dial := func() (*sftpConn, error) {
 		c, err := dialSSH(rawURL, insecure)

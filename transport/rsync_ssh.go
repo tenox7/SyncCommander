@@ -31,7 +31,10 @@ func NewRsyncSSHBackend(rawURL string, insecure bool, parallel int) (*RsyncSSHBa
 		return nil, err
 	}
 	b := &RsyncSSHBackend{sshShell: sshShell{client: conn.client, proto: "rsync+ssh", listCache: newListCache()}}
-	b.base = expandHome(conn.basePath, b.home)
+	if b.base, err = expandHome(conn.basePath, b.home); err != nil {
+		conn.client.Close()
+		return nil, fmt.Errorf("rsync+ssh: %w", err)
+	}
 	if _, err := b.run(context.Background(), "command -v rsync"); err != nil {
 		conn.client.Close()
 		return nil, errors.New("rsync+ssh: remote rsync not found")

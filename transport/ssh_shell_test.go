@@ -32,8 +32,12 @@ func TestParseFindRecordKeepsTabsAndNewlinesInNames(t *testing.T) {
 	}
 }
 
+// S2: when the home cannot be found the connect fails; it used to fall
+// back to "/" (or take a broken answer as the base), and the tree on
+// screen then mapped onto another folder.
 func TestExpandHome(t *testing.T) {
-	home := func() (string, error) { return "/home/u", nil }
+	answer := func(h string) func() (string, error) { return func() (string, error) { return h, nil } }
+	home := answer("/home/u")
 	broken := func() (string, error) { return "", errors.New("no shell") }
 	for _, tc := range []struct {
 		in, want string
@@ -41,10 +45,14 @@ func TestExpandHome(t *testing.T) {
 	}{
 		{"", "/home/u", home}, {"/", "/home/u", home}, {"/~", "/home/u", home},
 		{"/~/x/y", "/home/u/x/y", home}, {"/srv", "/srv", home},
-		{"/", "/", broken}, {"/~/x", "/~/x", broken},
+		{"/srv", "/srv", broken}, {"/srv/~/x", "/srv/~/x", broken},
+		{"/", "", broken}, {"", "", broken}, {"/~", "", broken}, {"/~/x", "", broken},
+		{"/", "", answer("")}, {"/", "", answer("$HOME")},
+		{"/~/x", "", answer("Welcome to nas\n/root")},
 	} {
-		if got := expandHome(tc.in, tc.home); got != tc.want {
-			t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
+		got, err := expandHome(tc.in, tc.home)
+		if got != tc.want || (err != nil) != (tc.want == "") {
+			t.Errorf("expandHome(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
 	}
 }

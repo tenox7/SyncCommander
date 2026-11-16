@@ -83,20 +83,27 @@ func (s *sshShell) home() (string, error) {
 }
 
 // expandHome resolves the URL spellings that mean the login home: "", "/"
-// and "/~" are the home itself, "/~/x" is x below it.
-func expandHome(remotePath string, home func() (string, error)) string {
+// and "/~" are the home itself, "/~/x" is x below it. When the server does
+// not give the home as one absolute path, it fails, and so does the
+// connect, which is then retried. It used to fall back to "/", on a
+// reconnect too, and the tree on screen then mapped onto "/".
+func expandHome(remotePath string, home func() (string, error)) (string, error) {
+	rest := ""
 	switch {
 	case remotePath == "" || remotePath == "/" || remotePath == "/~":
-		if h, err := home(); err == nil {
-			return h
-		}
-		return "/"
 	case strings.HasPrefix(remotePath, "/~/"):
-		if h, err := home(); err == nil {
-			return path.Join(h, remotePath[3:])
-		}
+		rest = remotePath[3:]
+	default:
+		return remotePath, nil
 	}
-	return remotePath
+	h, err := home()
+	if err == nil && (!path.IsAbs(h) || strings.ContainsAny(h, "\r\n")) {
+		err = fmt.Errorf("the server answered %q", h)
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot find the login home folder (%v); write the full remote path in the URL", err)
+	}
+	return path.Join(h, rest), nil
 }
 
 // findRecord lays out size, mtime, atime, ctime, octal mode and type letter;
