@@ -329,6 +329,9 @@ func countGroupFiles(groups []checksumGroup) int64 {
 	return n
 }
 
+// RescanNode lists node again, down to the scanner's maxDepth, and shows
+// what both sides hold now: a rescan never takes a listing from a cache an
+// earlier recursive listing filled (W-H4).
 func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, opts CompareOpts, changed *ChangedPaths) {
 	if node.IsDir {
 		s.rescanDir(ctx, node, opts, s.maxDepth, changed)
@@ -338,7 +341,8 @@ func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, opts CompareOp
 }
 
 // DeepRescanNode rescans a node recursively regardless of the scanner's
-// maxDepth setting. Used by the explicit "deep scan" key.
+// maxDepth setting, from fresh listings like RescanNode. Used by the
+// explicit "deep scan" key.
 func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, opts CompareOpts) {
 	if node.IsDir {
 		s.rescanDir(ctx, node, opts, 0, nil)
@@ -351,7 +355,7 @@ func (s *Scanner) DeepRescanNode(ctx context.Context, node *TreeNode, opts Compa
 // Reuses existing TreeNodes by (name, isDir) so already-listed subtrees keep
 // their Children/Listed/Expanded state; new entries are added, gone entries
 // dropped. Used by the "r" key so new top-level files appear regardless of
-// where the cursor sits.
+// where the cursor sits; the listing is fresh, never from a cache.
 func (s *Scanner) RefreshTopLevel(ctx context.Context, opts CompareOpts) {
 	root := s.Tree()
 	if root == nil {
@@ -359,7 +363,7 @@ func (s *Scanner) RefreshTopLevel(ctx context.Context, opts CompareOpts) {
 	}
 	s.setProgress(phaseProgress(PhaseScanning))
 	defer s.setProgress(phaseProgress(PhaseDone))
-	leftEntries, rightEntries, err := s.listBoth(ctx, "")
+	leftEntries, rightEntries, err := s.listBoth(WithFreshListing(ctx), "")
 	if err != nil {
 		logScanErr(err)
 		s.lockTree()
@@ -410,10 +414,10 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, opts CompareOpts
 	s.unlockTree()
 }
 
-// refreshEntries re-reads node's own entries from its parent listing so its
-// presence reflects the current state of both backends.
+// refreshEntries re-reads node's own entries from a fresh listing of its
+// parent, so its presence reflects the current state of both backends.
 func (s *Scanner) refreshEntries(ctx context.Context, node *TreeNode, opts CompareOpts, changed *ChangedPaths) error {
-	leftEntries, rightEntries, err := s.listBoth(ctx, DirOf(node.RelPath))
+	leftEntries, rightEntries, err := s.listBoth(WithFreshListing(ctx), DirOf(node.RelPath))
 	if err != nil {
 		return err
 	}
@@ -493,8 +497,19 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		return
 	}
 
+	// A rescan shows what the server holds now, not what an earlier
+	// recursive listing left in a backend's cache (W-H4). Its own folder is
+	// listed fresh; on a full-depth rescan a fresh recursive listing, started
+	// right after, serves the rest, so a big tree is not listed folder by
+	// folder. A rescan with a depth limit starts none: each folder it lists
+	// is listed fresh.
+	fresh := WithFreshListing(ctx)
 	walkDirs(ctx, s.listWidth, []dirJob{seed}, func(job dirJob) []dirJob {
-		leftEntries, rightEntries, listErr := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+		lctx := fresh
+		if job.parent != node && depthLimit == 0 {
+			lctx = ctx
+		}
+		leftEntries, rightEntries, listErr := s.listDir(lctx, job.relDir, job.listLeft, job.listRight)
 		if listErr != nil {
 			logScanErr(listErr)
 			s.lockTree()
@@ -525,9 +540,10 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		next := childJobs(children, job.depth+1, filter)
 		// After listing the rescan root, kick off the recursive preload in
 		// the background so the user sees this dir's entries first while
-		// the deep listing fills the cache for the rest of the subtree.
+		// the deep listing fills the cache for the rest of the subtree. It
+		// is fresh: it replaces a run in flight and starts on an empty cache.
 		if job.parent == node && depthLimit == 0 {
-			preloadOnce.Do(func() { s.preloadRecursive(ctx, node.RelPath, seed.listLeft, seed.listRight) })
+			preloadOnce.Do(func() { s.preloadRecursive(fresh, node.RelPath, seed.listLeft, seed.listRight) })
 		}
 		return next
 	})

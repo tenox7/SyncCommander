@@ -83,8 +83,11 @@ type Backend interface {
 type freshListingKey struct{}
 
 // WithFreshListing returns a context under which Backend.List lists the
-// folder on the server, not from a cache a preload filled. A delete decided
-// from listings checks the folder this way first.
+// folder on the server, not from a cache a preload filled, and
+// RecursivePreloader.PreloadRecursive starts a new recursive listing on an
+// empty cache even while one runs. A delete decided from listings checks
+// the folder this way first; a rescan lists this way, so it shows what the
+// server holds now (W-H4).
 func WithFreshListing(ctx context.Context) context.Context {
 	return context.WithValue(ctx, freshListingKey{}, true)
 }

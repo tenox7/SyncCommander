@@ -24,6 +24,8 @@ type listCache struct {
 	active     bool
 	done       bool
 	preloadCtx context.Context
+	runs       int                // runs started; only the latest one feeds the cache
+	stopRun    context.CancelFunc // stops the latest run's listing
 }
 
 func newListCache() *listCache {
@@ -55,24 +57,54 @@ type unreadDirs struct {
 func (e *unreadDirs) Error() string { return e.why }
 
 // start runs one recursive listing in the background, feeding the cache
-// through emit. A preload already in flight is left alone. When run fails
-// the partial contents are dropped, so List falls back to live per-dir calls
-// instead of trusting a truncated tree; an *unreadDirs failure drops only
-// the folders it names.
+// through emit. A preload already in flight is left alone, unless ctx asks
+// for a fresh listing (model.WithFreshListing: a rescan, W-H4): then the
+// cache starts empty, the old run is stopped, and what it still sends is
+// dropped, since it may have listed a folder before the change the rescan
+// is to show. When run fails the partial contents are dropped, so List
+// falls back to live per-dir calls instead of trusting a truncated tree; an
+// *unreadDirs failure drops only the folders it names.
 func (c *listCache) start(ctx context.Context, scope string, run recursiveLister) {
 	c.mu.Lock()
-	if c.active && !c.done {
+	if c.active && !c.done && !model.WantsFreshListing(ctx) {
 		c.mu.Unlock()
 		return
 	}
+	if c.stopRun != nil {
+		c.stopRun()
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	c.runs++
+	id := c.runs
+	c.stopRun = stop
 	c.reset()
 	c.active, c.done = true, false
 	c.preloadCtx = ctx
 	c.mu.Unlock()
 
-	go func() {
-		err := run(ctx, scope, c.emit, c.markComplete)
+	emit := func(parent string, entries []model.FileEntry) {
 		c.mu.Lock()
+		if c.runs == id {
+			c.emitLocked(parent, entries)
+		}
+		c.mu.Unlock()
+	}
+	complete := func(dir string) {
+		c.mu.Lock()
+		if c.runs == id {
+			c.markCompleteLocked(dir)
+		}
+		c.mu.Unlock()
+	}
+	go func() {
+		defer stop()
+		err := run(runCtx, scope, emit, complete)
+		c.mu.Lock()
+		if c.runs != id {
+			// A fresh run replaced this one: the cache is that run's.
+			c.mu.Unlock()
+			return
+		}
 		var unread *unreadDirs
 		switch {
 		case errors.As(err, &unread):
@@ -111,20 +143,28 @@ func (c *listCache) serve(ctx context.Context, relDir string, live func(context.
 // arrive in several batches, so a single emit can be a partial view.
 func (c *listCache) emit(parent string, entries []model.FileEntry) {
 	c.mu.Lock()
-	c.entries[parent] = append(c.entries[parent], entries...)
+	c.emitLocked(parent, entries)
 	c.mu.Unlock()
+}
+
+func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
+	c.entries[parent] = append(c.entries[parent], entries...)
 }
 
 // markComplete releases awaiters of dir and registers it even when nothing
 // was emitted, so an empty dir is a hit rather than a live call.
 func (c *listCache) markComplete(dir string) {
 	c.mu.Lock()
+	c.markCompleteLocked(dir)
+	c.mu.Unlock()
+}
+
+func (c *listCache) markCompleteLocked(dir string) {
 	c.complete[dir] = true
 	if _, ok := c.entries[dir]; !ok {
 		c.entries[dir] = nil
 	}
 	c.cond.Broadcast()
-	c.mu.Unlock()
 }
 
 func (c *listCache) ready(relDir string) bool { return c.done || c.complete[relDir] }

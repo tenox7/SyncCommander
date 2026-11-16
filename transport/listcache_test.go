@@ -218,3 +218,47 @@ func TestListCacheFreshListingGoesLive(t *testing.T) {
 		t.Errorf("fresh listing = %+v, want the server's", got)
 	}
 }
+
+// W-H4: a rescan's recursive listing was ignored while an older one was
+// still running, and List went on serving the old run, which may have
+// listed a folder before the change the rescan is to show. Now a fresh run
+// replaces it: the old run is stopped, and what it still sends is dropped.
+func TestListCacheFreshPreloadReplacesARunInFlight(t *testing.T) {
+	c := newListCache()
+	release, oldDone := make(chan struct{}), make(chan error, 1)
+	c.start(context.Background(), "", func(ctx context.Context, _ string, emit func(string, []model.FileEntry), complete func(string)) error {
+		emit("d", []model.FileEntry{{RelPath: "d/old", Name: "old"}})
+		<-release
+		emit("d", []model.FileEntry{{RelPath: "d/late", Name: "late"}})
+		complete("d")
+		oldDone <- ctx.Err()
+		return ctx.Err()
+	})
+	newRan := make(chan struct{})
+	c.start(model.WithFreshListing(context.Background()), "", func(_ context.Context, _ string, emit func(string, []model.FileEntry), complete func(string)) error {
+		emit("d", []model.FileEntry{{RelPath: "d/new", Name: "new"}})
+		complete("d")
+		close(newRan)
+		return nil
+	})
+	select {
+	case <-newRan:
+	case <-time.After(5 * time.Second):
+		t.Error("the fresh recursive listing did not run while the old one was in flight")
+	}
+	close(release)
+	if err := <-oldDone; err == nil {
+		t.Error("the old run was not stopped")
+	}
+	waitDone(t, c)
+	got, _ := c.serve(context.Background(), "d", func(context.Context, string) ([]model.FileEntry, error) {
+		return []model.FileEntry{{RelPath: "d/live", Name: "live"}}, nil
+	})
+	var names []string
+	for _, e := range got {
+		names = append(names, e.Name)
+	}
+	if !slices.Equal(names, []string{"new"}) {
+		t.Errorf("d is served as %q, want the fresh run's [new]", names)
+	}
+}
