@@ -197,3 +197,24 @@ func TestEmitGrouperCompletesDirsDepthFirst(t *testing.T) {
 	}
 	mustServe(t, serveAsync(c, "c"), 0, false)
 }
+
+// D9: a fresh listing asks the server even when the cache holds the folder.
+func TestListCacheFreshListingGoesLive(t *testing.T) {
+	c := newListCache()
+	ctx := context.Background()
+	c.start(ctx, "", func(_ context.Context, _ string, emit func(string, []model.FileEntry), complete func(string)) error {
+		emit("d", []model.FileEntry{{RelPath: "d/old", Name: "old"}})
+		complete("d")
+		return nil
+	})
+	waitDone(t, c)
+	live := func(context.Context, string) ([]model.FileEntry, error) {
+		return []model.FileEntry{{RelPath: "d/new", Name: "new"}}, nil
+	}
+	if got, _ := c.serve(ctx, "d", live); len(got) != 1 || got[0].Name != "old" {
+		t.Errorf("cached listing = %+v", got)
+	}
+	if got, _ := c.serve(model.WithFreshListing(ctx), "d", live); len(got) != 1 || got[0].Name != "new" {
+		t.Errorf("fresh listing = %+v, want the server's", got)
+	}
+}

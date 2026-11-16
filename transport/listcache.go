@@ -89,8 +89,12 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 }
 
 // serve answers List from the cache: a hit returns at once, an in-flight
-// preload is awaited, anything else goes live.
+// preload is awaited, anything else goes live. A fresh listing
+// (model.WithFreshListing) always goes live.
 func (c *listCache) serve(ctx context.Context, relDir string, live func(context.Context, string) ([]model.FileEntry, error)) ([]model.FileEntry, error) {
+	if model.WantsFreshListing(ctx) {
+		return live(ctx, relDir)
+	}
 	entries, hit, active, done := c.lookup(relDir)
 	if hit {
 		return entries, nil

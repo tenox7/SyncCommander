@@ -532,8 +532,9 @@ func (c *copier) mirrorDelete() {
 	}
 }
 
-// stillDestOnly lists dir on both sides now, after the copy, and returns the
-// check a mirror delete in dir must pass: "" to delete name, else why not.
+// stillDestOnly lists dir on both sides now, after the copy, on the servers
+// rather than from the scan's cached listings, and returns the check a
+// mirror delete in dir must pass: "" to delete name, else why not.
 //
 // Names are matched byte for byte, but a case-insensitive destination (macOS,
 // Windows, SMB, FAT) stores photo.jpg in the existing Photo.JPG: the copy
@@ -543,11 +544,12 @@ func (c *copier) mirrorDelete() {
 // listed under its own name or a case variant of it, the destination renames
 // what it stores (Unicode normalization, for one): nothing in dir is deleted.
 func (c *copier) stillDestOnly(dir string) (func(name string) string, error) {
-	srcList, err := c.src.List(c.ctx, dir)
+	ctx := model.WithFreshListing(c.ctx) // not the scan's cached listing
+	srcList, err := c.src.List(ctx, dir)
 	if err != nil {
 		return nil, fmt.Errorf("listing the source: %w", err)
 	}
-	dstList, err := c.dst.List(c.ctx, dir)
+	dstList, err := c.dst.List(ctx, dir)
 	if err != nil {
 		return nil, fmt.Errorf("listing the destination: %w", err)
 	}

@@ -19,6 +19,10 @@ type FileEntry struct {
 	Mode      os.FileMode
 }
 
+// Backend is one side of a sync. List returns every entry of relDir, or an
+// error when it cannot vouch for that: a listing that is short without an
+// error makes mirror delete what it left out. Under a context from
+// WithFreshListing, List asks the server and never answers from a cache.
 type Backend interface {
 	BasePath() string
 	List(ctx context.Context, relDir string) ([]FileEntry, error)
@@ -30,6 +34,21 @@ type Backend interface {
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
+}
+
+type freshListingKey struct{}
+
+// WithFreshListing returns a context under which Backend.List lists the
+// folder on the server, not from a cache a preload filled. A delete decided
+// from listings checks the folder this way first.
+func WithFreshListing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, freshListingKey{}, true)
+}
+
+// WantsFreshListing reports whether ctx came from WithFreshListing.
+func WantsFreshListing(ctx context.Context) bool {
+	fresh, _ := ctx.Value(freshListingKey{}).(bool)
+	return fresh
 }
 
 // ChecksumProber is implemented by backends that support content checksums.
