@@ -32,7 +32,7 @@ func main() {
 	cksum := flag.Bool("checksum", false, "compare checksums")
 	subsec := flag.Bool("subsec", false, "sub-second time precision")
 	grace := flag.Bool("grace", true, "allow ±1s time grace")
-	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences (hour-modulo)")
+	tzdst := flag.Bool("tzdst", true, "ignore TZ/DST differences: mtimes 1 to 14 whole hours apart are equal")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate and ssh host key verification")
 	maxRetries := flag.Int("max-retries", 5, "max retry attempts for remote ops")
 	stallTimeout := flag.Duration("stall-timeout", 60*time.Second, "abort and retry a transfer with no progress for this long (0 = never)")

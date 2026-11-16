@@ -120,7 +120,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		{Label: "Checksum", Value: &m.cmpOpts.Checksum},
 		{Label: "Sub-second time precision", Value: &m.cmpOpts.SubSecond},
 		{Label: "Time grace ±1s", Value: &m.cmpOpts.TimeGrace},
-		{Label: "Ignore TZ/DST (hour-modulo)", Value: &m.cmpOpts.IgnoreTZDST},
+		{Label: "Ignore TZ/DST (1-14 whole hours)", Value: &m.cmpOpts.IgnoreTZDST},
 		{Label: "Batch rsync+ssh transfer", Value: &m.batchTransfer},
 		{Label: "Verify resumed copies (checksum)", Value: &m.verifyResume},
 		{Label: "Parallel copies", IntValue: &m.copyParallel, IntMin: 1, IntMax: m.parallelMax},

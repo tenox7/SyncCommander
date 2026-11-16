@@ -233,7 +233,9 @@ func (p *Panel) renderRow(r model.Row) string {
 }
 
 // eqPrefix is the right panel's leading glyph summarising how the row
-// compares: ≡/≢ once checksums are known, =/≠ before that.
+// compares: ≡/≢ once checksums are known, =/≠ before that. A file equal
+// only because its mtimes are whole hours apart (the time-zone rule) shows
+// ≈, so that equal is not taken for the plain one (F4).
 func (p *Panel) eqPrefix(node *model.TreeNode) string {
 	if p.side == model.SideLeft {
 		return ""
@@ -254,6 +256,9 @@ func (p *Panel) eqPrefix(node *model.TreeNode) string {
 				return styleDifferent.Render("≢")
 			}
 			return styleEqual.Render("≡")
+		}
+		if zoneShifted(node, p.cmpOpts) {
+			return styleEqual.Render("≈")
 		}
 		return " "
 	}
@@ -277,6 +282,16 @@ func (p *Panel) eqPrefix(node *model.TreeNode) string {
 		return styleDifferent.Render("≠")
 	}
 	return " "
+}
+
+// zoneShifted reports a file that compares equal, its mtimes equal only by
+// the time-zone rule (model.ZoneShiftHours).
+func zoneShifted(n *model.TreeNode, opts *model.CompareOpts) bool {
+	if opts == nil || !opts.ModTime || fileOtherAttrsDiffer(n, opts) {
+		return false
+	}
+	l, r := n.Sides[model.SideLeft].Entry, n.Sides[model.SideRight].Entry
+	return l != nil && r != nil && model.ZoneShiftHours(l.ModTime, r.ModTime, *opts) > 0
 }
 
 // fileOtherAttrsDiffer reports a difference in any enabled attribute other
@@ -311,13 +326,15 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 	label := activeStyle.Render(fmt.Sprintf("%-5s", a.Label))
 
 	var st string
-	switch a.Status {
-	case model.AttrNA:
+	switch {
+	case a.Status == model.AttrNA:
 		st = styleUnknown.Render("-")
-	case model.AttrScanning:
+	case a.Status == model.AttrScanning:
 		st = styleScanning.Render("=")
-	case model.AttrDifferent:
+	case a.Status == model.AttrDifferent:
 		st = activeStyle.Render("≠")
+	case a.Shift > 0:
+		st = activeStyle.Render("≈")
 	default:
 		st = activeStyle.Render("=")
 	}
@@ -338,6 +355,9 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 	}
 	if raw != "" && val != "-" {
 		val += styleChrome.Render(" [" + raw + "]")
+	}
+	if a.Shift > 0 {
+		val += styleChrome.Render(fmt.Sprintf("  %dh apart: time-zone rule", a.Shift))
 	}
 	return fmt.Sprintf("%s %s %s  %s", chrome, label, st, val)
 }

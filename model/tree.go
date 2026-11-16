@@ -187,6 +187,7 @@ type AttrRow struct {
 	Status   AttrStatus
 	Inactive bool
 	Winner   int // -1 when the left value is newer or larger, 1 for the right, 0 neither
+	Shift    int // times equal only by the time-zone rule: how many whole hours apart
 	Guides   uint64
 	IsLast   bool
 	Depth    int
@@ -466,16 +467,19 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 	n.Compare.Mode = cmpAttr(l.Mode == r.Mode)
 }
 
+// maxZoneShift is the largest gap between two clocks that are both right
+// in their own time zone: the zone offsets run from UTC-12 to UTC+14, and a
+// file system that keeps local time (FAT, SMB) is read with one offset and
+// written with another, or across a change to or from daylight saving time.
+const maxZoneShift = 14 * time.Hour
+
 func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
-	if !opts.SubSecond {
-		a = a.Truncate(time.Second)
-		b = b.Truncate(time.Second)
-	}
-	diff := a.Sub(b)
-	if diff < 0 {
-		diff = -diff
-	}
-	if opts.IgnoreTZDST {
+	diff := timeDiff(a, b, opts)
+	// With IgnoreTZDST, times a whole number of hours apart are one moment
+	// in two zones: up to maxZoneShift. Further apart, they are two moments
+	// (F4): a disk image rewritten daily at the same size is not equal to
+	// yesterday's.
+	if opts.IgnoreTZDST && diff <= maxZoneShift+30*time.Minute {
 		diff %= time.Hour
 		if diff > 30*time.Minute {
 			diff = time.Hour - diff
@@ -485,6 +489,29 @@ func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
 		return cmpAttr(diff <= time.Second)
 	}
 	return cmpAttr(diff == 0)
+}
+
+// timeDiff is how far apart a and b are, to the second unless SubSecond.
+func timeDiff(a, b time.Time, opts CompareOpts) time.Duration {
+	if !opts.SubSecond {
+		a = a.Truncate(time.Second)
+		b = b.Truncate(time.Second)
+	}
+	if diff := a.Sub(b); diff >= 0 {
+		return diff
+	}
+	return b.Sub(a)
+}
+
+// ZoneShiftHours returns how many whole hours apart a and b are when they
+// compare equal only by the time-zone rule (IgnoreTZDST), else 0. The UI
+// marks such times, so an equal that rests on the rule can be told from an
+// equal that does not.
+func ZoneShiftHours(a, b time.Time, opts CompareOpts) int {
+	if !opts.IgnoreTZDST || cmpTime(a, b, opts) != AttrEqual {
+		return 0
+	}
+	return int((timeDiff(a, b, opts) + 30*time.Minute) / time.Hour)
 }
 
 func cmpAttr(equal bool) AttrStatus {
@@ -716,6 +743,7 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 		status   AttrStatus
 		inactive bool
 		winner   int
+		shift    int
 	}
 
 	tf := "2006-01-02 15:04:05 MST"
@@ -781,11 +809,14 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 		})
 		bothValid := l != nil && r != nil && isTimeValid(get(l)) && isTimeValid(get(r))
 		inactive := !optEnabled || !bothValid
-		w := 0
+		w, shift := 0, 0
 		if !inactive {
 			w = timeWin(get(l), get(r))
+			if status == AttrEqual {
+				shift = ZoneShiftHours(get(l), get(r), *opts)
+			}
 		}
-		attrs = append(attrs, attr{label, lv, rv, lraw, rraw, status, inactive, w})
+		attrs = append(attrs, attr{label, lv, rv, lraw, rraw, status, inactive, w, shift})
 	}
 
 	ls, rs := val(func(e *FileEntry) string { return FormatSize(e.Size) })
@@ -794,14 +825,14 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 		rs = fmt.Sprintf("%d", r.Size)
 	}
 	lsraw, rsraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("%d", e.Size) })
-	attrs = append(attrs, attr{"size", ls, rs, lsraw, rsraw, node.Compare.Size, false, sizeWin})
+	attrs = append(attrs, attr{"size", ls, rs, lsraw, rsraw, node.Compare.Size, false, sizeWin, 0})
 	addTime("mtime", func(e *FileEntry) time.Time { return e.ModTime }, node.Compare.ModTime, opts != nil && opts.ModTime)
 	addTime("atime", func(e *FileEntry) time.Time { return e.ATime }, node.Compare.ATime, opts != nil && opts.ATime)
 	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime }, node.Compare.CTime, opts != nil && opts.CTime)
 	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime, opts != nil && opts.BirthTime)
 	lv, rv := val(func(e *FileEntry) string { return e.Mode.String() })
 	lpraw, rpraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("0%o", e.Mode.Perm()) })
-	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0})
+	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0, 0})
 	lc, rc := node.Sides[SideLeft].Checksum, node.Sides[SideRight].Checksum
 	if lc == "" {
 		lc = "-"
@@ -809,12 +840,12 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	if rc == "" {
 		rc = "-"
 	}
-	attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0})
+	attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0, 0})
 
 	for i, a := range attrs {
 		*flat = append(*flat, Row{Node: node, Attr: &AttrRow{
 			Label: a.label, Val: [2]string{a.leftVal, a.rightVal}, Raw: [2]string{a.leftRaw, a.rightRaw},
-			Status: a.status, Inactive: a.inactive, Winner: a.winner,
+			Status: a.status, Inactive: a.inactive, Winner: a.winner, Shift: a.shift,
 			Guides: kg, IsLast: i == len(attrs)-1, Depth: node.Depth + 1,
 		}})
 	}
