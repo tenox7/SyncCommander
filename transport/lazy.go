@@ -69,7 +69,13 @@ type lazyBackend struct {
 	inner    model.Backend
 	closed   bool
 	parallel int // last SetParallel, reapplied to every redialed inner; 0 = never set
-	dialMu   sync.Mutex
+	// The checksum the scanner negotiated, replayed on every redialed inner:
+	// a new connection is a new backend object, which knows neither what
+	// the probe found (an ssh remote's commands) nor the algorithm (F6).
+	probed  bool
+	algo    string
+	algoSet bool
+	dialMu  sync.Mutex
 }
 
 // NewLazyBackend connects through factory on first use. The factory gets
@@ -107,6 +113,13 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		return nil, err
 	}
 	b.mu.Lock()
+	probed := b.probed
+	b.mu.Unlock()
+	cp, hasSums := inner.(model.ChecksumProber)
+	if probed && hasSums {
+		cp.ProbeChecksums() // on the server, so not under mu
+	}
+	b.mu.Lock()
 	closed := b.closed
 	if !closed {
 		b.inner = inner
@@ -114,6 +127,9 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		// moved it since.
 		if b.parallel > 0 {
 			SetParallel(inner, b.parallel)
+		}
+		if b.algoSet && hasSums {
+			cp.SetChecksumAlgo(b.algo)
 		}
 	}
 	b.mu.Unlock()
@@ -319,11 +335,19 @@ func (b *lazyBackend) ProbeChecksums() []string {
 	if err != nil {
 		return nil
 	}
+	b.mu.Lock()
+	b.probed = true
+	b.mu.Unlock()
 	return p.ProbeChecksums()
 }
 
+// SetChecksumAlgo sets the algorithm on the connected backend and keeps it
+// for every redial. It holds mu so a redial cannot miss it.
 func (b *lazyBackend) SetChecksumAlgo(algo string) {
-	if p, ok := b.current().(model.ChecksumProber); ok {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.algo, b.algoSet = algo, true
+	if p, ok := b.inner.(model.ChecksumProber); ok {
 		p.SetChecksumAlgo(algo)
 	}
 }

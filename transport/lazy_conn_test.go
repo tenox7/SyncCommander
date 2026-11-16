@@ -3,7 +3,9 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -90,6 +92,71 @@ func TestLateErrorLeavesTheNewConnectionAlone(t *testing.T) {
 	}
 	if _, err := b.List(ctx, ""); err != nil {
 		t.Errorf("List after the late error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(conns) != 2 {
+		t.Errorf("%d connections dialed, want 2", len(conns))
+	}
+}
+
+// sumStub checksums like an ssh remote: only after a probe found the
+// commands and the scanner set the algorithm.
+type sumStub struct {
+	connStub
+	cmds    map[string]string
+	algo    string
+	dropSum atomic.Bool // the next Checksum finds the connection dead
+}
+
+func (s *sumStub) ProbeChecksums() []string {
+	s.cmds = map[string]string{"md5": "md5sum"}
+	return []string{"md5"}
+}
+
+func (s *sumStub) SetChecksumAlgo(algo string) { s.algo = algo }
+
+func (s *sumStub) Checksum(_ context.Context, relPath string) (string, error) {
+	if s.dropSum.Swap(false) {
+		return "", io.ErrUnexpectedEOF
+	}
+	if s.cmds[s.algo] == "" {
+		return "", fmt.Errorf("sftp: no %q checksum command on the remote", s.algo)
+	}
+	return "sum of " + relPath, nil
+}
+
+// F6: after one dropped connection, the wrapper dialed a new backend
+// object that knew neither the probed commands nor the algorithm: every
+// checksum failed from then on, each after its retries.
+func TestChecksumsWorkAfterAReconnect(t *testing.T) {
+	SetMaxRetries(1)
+	defer SetMaxRetries(5)
+	var mu sync.Mutex
+	var conns []*sumStub
+	b := NewLazyBackend("sftp://host/x", func(context.Context) (model.Backend, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		s := &sumStub{}
+		conns = append(conns, s)
+		return s, nil
+	})
+	ctx := context.Background()
+	p := b.(model.ChecksumProber)
+	if got := p.ProbeChecksums(); !slices.Equal(got, []string{"md5"}) {
+		t.Fatalf("probe = %q", got)
+	}
+	p.SetChecksumAlgo("md5")
+	if sum, err := b.Checksum(ctx, "a"); err != nil || sum != "sum of a" {
+		t.Fatalf("checksum before the drop = %q, %v", sum, err)
+	}
+	mu.Lock()
+	conns[0].dropSum.Store(true)
+	mu.Unlock()
+	for _, f := range []string{"b", "c"} {
+		if sum, err := b.Checksum(ctx, f); err != nil || sum != "sum of "+f {
+			t.Errorf("checksum of %s after the drop = %q, %v", f, sum, err)
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
