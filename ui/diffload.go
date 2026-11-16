@@ -42,7 +42,7 @@ func (m *Model) loadDiffContent(node *model.TreeNode) tea.Cmd {
 	m.diffCancel = cancel
 	m.diffGen++
 	gen := m.diffGen
-	left, right, relPath := m.left, m.right, node.RelPath
+	left, right, relPath := m.left.backend, m.right.backend, node.RelPath
 	leftEntry, rightEntry := node.Entries()
 	hasLeft, hasRight := leftEntry != nil, rightEntry != nil
 	return func() tea.Msg {

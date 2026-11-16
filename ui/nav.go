@@ -10,16 +10,16 @@ import (
 
 func (m *Model) activePanel() *Panel {
 	if m.activeLeft {
-		return m.leftPanel
+		return m.left.panel
 	}
-	return m.rightPanel
+	return m.right.panel
 }
 
 func (m *Model) inactivePanel() *Panel {
 	if m.activeLeft {
-		return m.rightPanel
+		return m.right.panel
 	}
-	return m.leftPanel
+	return m.left.panel
 }
 
 // syncPanels keeps the inactive panel on the same row as the active one.
@@ -30,8 +30,8 @@ func (m *Model) syncPanels() {
 
 func (m *Model) switchPanel() {
 	m.activeLeft = !m.activeLeft
-	m.leftPanel.active = m.activeLeft
-	m.rightPanel.active = !m.activeLeft
+	m.left.panel.active = m.activeLeft
+	m.right.panel.active = !m.activeLeft
 }
 
 // move applies a cursor motion to the active panel and mirrors it.

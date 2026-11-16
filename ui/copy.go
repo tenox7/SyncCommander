@@ -155,8 +155,8 @@ func (m *Model) adjustCopyParallel(delta int) {
 // its connection allowed.
 func (m *Model) setCopyParallel(n int) {
 	m.copyParallel = n
-	transport.SetParallel(m.left, n)
-	transport.SetParallel(m.right, n)
+	transport.SetParallel(m.left.backend, n)
+	transport.SetParallel(m.right.backend, n)
 }
 
 // copyNode hands the transfer engine a snapshot of what it needs and reports
@@ -164,9 +164,9 @@ func (m *Model) setCopyParallel(n int) {
 func (m *Model) copyNode(node *model.TreeNode, leftToRight, mirror bool, replace []string, copyUnknown bool) tea.Cmd {
 	var relPath string
 	m.readTree(func(*model.TreeNode) { relPath = node.RelPath })
-	src, dst := m.left, m.right
+	src, dst := m.left.backend, m.right.backend
 	if !leftToRight {
-		src, dst = m.right, m.left
+		src, dst = m.right.backend, m.left.backend
 	}
 	parallel := max(m.copyParallel, 1)
 	// The settings dialog may have moved the value since the pools were sized.

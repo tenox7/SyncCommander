@@ -74,7 +74,7 @@ func renameTaken(node *model.TreeNode, newName string) string {
 // the parent is re-listed, so the tree shows what is really there instead of
 // the old row.
 func (m *Model) renameNode(node *model.TreeNode, newName string) tea.Cmd {
-	left, right, scanner, opts := m.left, m.right, m.scanner, *m.cmpOpts
+	left, right, scanner, opts := m.left.backend, m.right.backend, m.scanner, *m.cmpOpts
 	var oldRel string
 	var presence model.Presence
 	m.readTree(func(*model.TreeNode) { oldRel, presence = node.RelPath, node.Compare.Presence })
@@ -139,7 +139,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 	if node == nil || m.presence(node) != model.PresenceBoth {
 		return nil
 	}
-	left, right, scanner, opts := m.left, m.right, m.scanner, *m.cmpOpts
+	left, right, scanner, opts := m.left.backend, m.right.backend, m.scanner, *m.cmpOpts
 	return func() tea.Msg {
 		var l, r *model.FileEntry
 		var relPath string

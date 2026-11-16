@@ -20,12 +20,12 @@ func TestWheelMovesCursorOnlyWhereArrowsScroll(t *testing.T) {
 	mouse(m, tea.MouseButtonWheelDown, 0, 0)
 	mouse(m, tea.MouseButtonWheelDown, 0, 0)
 	mouse(m, tea.MouseButtonWheelUp, 0, 0)
-	if m.leftPanel.cursor != 1 || m.rightPanel.cursor != 1 {
-		t.Fatalf("cursors %d/%d after wheel down, down, up; want 1/1", m.leftPanel.cursor, m.rightPanel.cursor)
+	if m.left.panel.cursor != 1 || m.right.panel.cursor != 1 {
+		t.Fatalf("cursors %d/%d after wheel down, down, up; want 1/1", m.left.panel.cursor, m.right.panel.cursor)
 	}
 	press(m, "?")
 	mouse(m, tea.MouseButtonWheelDown, 0, 0)
-	if m.leftPanel.cursor != 1 {
+	if m.left.panel.cursor != 1 {
 		t.Fatal("wheel moved the cursor under the help dialog")
 	}
 }
@@ -53,13 +53,13 @@ func TestClickSelectsRowAndArrowToggles(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	dir := topDir(m)
 	mouse(m, tea.MouseButtonLeft, 5, 0)
-	if m.leftPanel.cursor != 0 {
+	if m.left.panel.cursor != 0 {
 		t.Fatal("a click on the top bar moved the cursor")
 	}
-	for _, p := range []*Panel{m.rightPanel, m.leftPanel} {
+	for _, p := range []*Panel{m.right.panel, m.left.panel} {
 		x0 := 0
-		if p == m.rightPanel {
-			x0 = m.leftPanel.width
+		if p == m.right.panel {
+			x0 = m.left.panel.width
 		}
 		i := rowOf(p, dir)
 		y, col := i-p.offset+1, arrowCol(p, i)
@@ -83,7 +83,7 @@ func TestClickSelectsRowAndArrowToggles(t *testing.T) {
 func TestDoubleClickOnNameToggles(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	dir := topDir(m)
-	p := m.leftPanel
+	p := m.left.panel
 	i := rowOf(p, dir)
 	arrow, y := arrowCol(p, i), i-p.offset+1
 	for n, want := range []bool{false, true, true, false} {

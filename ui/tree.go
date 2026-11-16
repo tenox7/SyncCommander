@@ -38,8 +38,8 @@ func (m *Model) refreshTree() {
 		}
 		flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
 		m.lastFlatLen = len(flat)
-		m.leftPanel.SetRows(flat)
-		m.rightPanel.SetRows(flat)
+		m.left.panel.SetRows(flat)
+		m.right.panel.SetRows(flat)
 	})
 }
 
@@ -58,16 +58,16 @@ func (m *Model) openInfo() {
 		return
 	}
 	cl, cr := m.scanner.ChecksumInfo()
-	m.info.Open(*m.cachedStats, "L: "+m.left.BasePath(), "R: "+m.right.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
+	m.info.Open(*m.cachedStats, "L: "+m.left.backend.BasePath(), "R: "+m.right.backend.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
 }
 
+// swapSides moves each pane, backend, open argument and panel, to the
+// other side, and the tree and the scanner with them.
 func (m *Model) swapSides() {
-	m.leftPanel, m.rightPanel = m.rightPanel, m.leftPanel
-	m.leftPanel.side, m.rightPanel.side = model.SideLeft, model.SideRight
-	m.leftPanel.active = m.activeLeft
-	m.rightPanel.active = !m.activeLeft
-
 	m.left, m.right = m.right, m.left
+	m.left.panel.side, m.right.panel.side = model.SideLeft, model.SideRight
+	m.left.panel.active = m.activeLeft
+	m.right.panel.active = !m.activeLeft
 
 	m.scanner.SwapSides()
 

@@ -44,9 +44,9 @@ func (m *Model) click(x, y int) tea.Cmd {
 	if m.openModal() != nil || m.transferring() {
 		return nil
 	}
-	p := m.leftPanel
+	p := m.left.panel
 	if x >= p.width {
-		p, x = m.rightPanel, x-p.width
+		p, x = m.right.panel, x-p.width
 	}
 	i := p.offset + y - 1 // the top bar is screen row 0
 	if y < 1 || y > p.height || i >= len(p.rows) {

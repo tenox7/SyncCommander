@@ -107,7 +107,7 @@ func TestViewShowsOnlyTheOpenModal(t *testing.T) {
 		t.Fatal("View with help open is not the help view")
 	}
 	m.help.Close()
-	if !strings.Contains(ansi.Strip(m.View()), m.leftPanel.title) {
+	if !strings.Contains(ansi.Strip(m.View()), m.left.panel.title) {
 		t.Fatal("main view lacks the panel title")
 	}
 }

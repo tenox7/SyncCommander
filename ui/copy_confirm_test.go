@@ -31,14 +31,14 @@ func TestCopyDialogNamesOnlyTheCopiedFilesConflict(t *testing.T) {
 	writeTestFile(t, filepath.Join(right, "notes", "2024.txt"), "a folder on the right")
 
 	m := scannedModel(t, left, right)
-	m.leftPanel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "a.txt" }))
+	m.left.panel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "a.txt" }))
 	press(m, ">")
 	if m.confirm.IsOpen() || m.pendingCopy != nil {
 		t.Errorf("> on a.txt opened a dialog: %q", m.confirm.lines)
 	}
 
 	m = scannedModel(t, left, right)
-	m.leftPanel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "notes" && !n.IsDir }))
+	m.left.panel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "notes" && !n.IsDir }))
 	press(m, ">")
 	if !m.confirm.IsOpen() || m.pendingCopy == nil {
 		t.Fatal("> on the file notes did not ask before deleting the folder notes/")
@@ -77,7 +77,7 @@ func TestCopyDialogAsksAboutFilesNotComparedYet(t *testing.T) {
 		}
 		m := scannedModel(t, left, right)
 		m.cmpOpts.Checksum = true // switched on, nothing summed yet
-		m.leftPanel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "d" }))
+		m.left.panel.jumpTo(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "d" }))
 		press(m, ">")
 		if !m.confirm.IsOpen() || m.pendingCopy == nil {
 			t.Fatal("> on a folder with a file not compared yet did not ask")

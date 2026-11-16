@@ -55,7 +55,7 @@ func TestDeleteAsksAgainWhenSidesChangeUnderTheDialog(t *testing.T) {
 	}
 	m := scannedModel(t, left, right)
 	node := firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.Name == "x.txt" })
-	m.leftPanel.jumpTo(node)
+	m.left.panel.jumpTo(node)
 	press(m, "d")
 	if !m.confirm.IsOpen() || m.confirm.choiceMode {
 		t.Fatal("d on a left-only file did not open the one-side dialog")

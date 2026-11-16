@@ -105,8 +105,8 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 			m.swapSides()
 		}
 	case "w":
-		m.leftPanel.wrap = !m.leftPanel.wrap
-		m.rightPanel.wrap = !m.rightPanel.wrap
+		m.left.panel.wrap = !m.left.panel.wrap
+		m.right.panel.wrap = !m.right.panel.wrap
 	case "ctrl+l":
 		return tea.ClearScreen
 	case "?":

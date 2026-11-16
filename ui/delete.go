@@ -130,10 +130,10 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 	})
 	var sides []deleteSide
 	if side != model.PresenceRightOnly {
-		sides = append(sides, deleteSide{m.left, "left"})
+		sides = append(sides, deleteSide{m.left.backend, "left"})
 	}
 	if side != model.PresenceLeftOnly {
-		sides = append(sides, deleteSide{m.right, "right"})
+		sides = append(sides, deleteSide{m.right.backend, "right"})
 	}
 	label := "BOTH"
 	switch side {

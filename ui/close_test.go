@@ -23,16 +23,16 @@ func (c *closeRecorder) Close() error {
 // its work, such as dropbox's batched uploads, only when it is.
 func TestModelCloseClosesWhatThePanesHoldNow(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
-	started := m.right
-	if _, errMsg := m.reopenBackends(m.leftArg, "fake://small"); errMsg != "" {
+	started := m.right.backend
+	if _, errMsg := m.reopenBackends(m.left.arg, "fake://small"); errMsg != "" {
 		t.Fatal(errMsg)
 	}
 	m.cancelOps()
-	if m.right == started {
+	if m.right.backend == started {
 		t.Fatal("the reopen kept the right pane's backend")
 	}
-	left, right := &closeRecorder{Backend: m.left}, &closeRecorder{Backend: m.right}
-	m.left, m.right = left, right
+	left, right := &closeRecorder{Backend: m.left.backend}, &closeRecorder{Backend: m.right.backend}
+	m.left.backend, m.right.backend = left, right
 	m.Close()
 	if !left.closed || !right.closed {
 		t.Errorf("Close closed left=%v right=%v; want both backends the panes hold", left.closed, right.closed)

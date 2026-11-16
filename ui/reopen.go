@@ -12,13 +12,13 @@ import (
 
 // openLocations shows both open arguments for editing.
 func (m *Model) openLocations() {
-	m.openDlg.Open(transport.MaskURLPassword(m.leftArg), transport.MaskURLPassword(m.rightArg))
+	m.openDlg.Open(transport.MaskURLPassword(m.left.arg), transport.MaskURLPassword(m.right.arg))
 }
 
 // openParent reopens both sides one directory up.
 func (m *Model) openParent() tea.Cmd {
-	leftPath, rightPath := transport.ParentPath(m.leftArg), transport.ParentPath(m.rightArg)
-	if leftPath == m.leftArg && rightPath == m.rightArg {
+	leftPath, rightPath := transport.ParentPath(m.left.arg), transport.ParentPath(m.right.arg)
+	if leftPath == m.left.arg && rightPath == m.right.arg {
 		return nil
 	}
 	return m.reopenOrExplain(leftPath, rightPath)
@@ -31,7 +31,7 @@ func (m *Model) descendCursor() tea.Cmd {
 	if node == nil || !node.IsDir {
 		return nil
 	}
-	leftPath, rightPath := m.leftArg, m.rightArg
+	leftPath, rightPath := m.left.arg, m.right.arg
 	descend := false
 	m.readTree(func(*model.TreeNode) {
 		l, r := node.Entries()
@@ -53,8 +53,8 @@ func (m *Model) descendCursor() tea.Cmd {
 // the ones the program started with, and an rclone remote finishes its work
 // (dropbox's batched uploads) only when it is closed.
 func (m *Model) Close() {
-	transport.CloseBackend(m.left)
-	transport.CloseBackend(m.right)
+	transport.CloseBackend(m.left.backend)
+	transport.CloseBackend(m.right.backend)
 }
 
 // reopenOrExplain reopens both sides or, when one cannot be opened, shows the
@@ -75,22 +75,22 @@ func (m *Model) reopenOrExplain(leftPath, rightPath string) tea.Cmd {
 // was gone): opening it again is how it tries again (F7). The change dialog
 // shows masked arguments, so a value equal to the mask means "unchanged".
 func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
-	if leftPath == transport.MaskURLPassword(m.leftArg) {
-		leftPath = m.leftArg
+	if leftPath == transport.MaskURLPassword(m.left.arg) {
+		leftPath = m.left.arg
 	}
-	if rightPath == transport.MaskURLPassword(m.rightArg) {
-		rightPath = m.rightArg
+	if rightPath == transport.MaskURLPassword(m.right.arg) {
+		rightPath = m.right.arg
 	}
 	var newLeft, newRight model.Backend
 	var err error
 
-	if leftPath != m.leftArg || transport.NotConnecting(m.left) {
+	if leftPath != m.left.arg || transport.NotConnecting(m.left.backend) {
 		newLeft, err = transport.TryOpenBackend(leftPath, m.insecure, m.copyParallel)
 		if err != nil {
 			return nil, "left: " + err.Error()
 		}
 	}
-	if rightPath != m.rightArg || transport.NotConnecting(m.right) {
+	if rightPath != m.right.arg || transport.NotConnecting(m.right.backend) {
 		newRight, err = transport.TryOpenBackend(rightPath, m.insecure, m.copyParallel)
 		if err != nil {
 			if newLeft != nil {
@@ -103,21 +103,21 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	m.cancelOps()
 
 	if newLeft != nil {
-		oldLeft := m.left
+		oldLeft := m.left.backend
 		go func() { transport.CloseBackend(oldLeft) }()
-		m.left, m.leftArg = newLeft, leftPath
+		m.left.backend, m.left.arg = newLeft, leftPath
 	}
 	if newRight != nil {
-		oldRight := m.right
+		oldRight := m.right.backend
 		go func() { transport.CloseBackend(oldRight) }()
-		m.right, m.rightArg = newRight, rightPath
+		m.right.backend, m.right.arg = newRight, rightPath
 	}
 
-	m.scanner = model.NewScanner(m.left, m.right, 4, m.scanParallel, m.deepScan)
-	m.leftPanel.title = m.left.BasePath()
-	m.rightPanel.title = m.right.BasePath()
-	m.leftPanel.SetRows(nil)
-	m.rightPanel.SetRows(nil)
+	m.scanner = model.NewScanner(m.left.backend, m.right.backend, 4, m.scanParallel, m.deepScan)
+	m.left.panel.title = m.left.backend.BasePath()
+	m.right.panel.title = m.right.backend.BasePath()
+	m.left.panel.SetRows(nil)
+	m.right.panel.SetRows(nil)
 	return m.startScan(), ""
 }
 

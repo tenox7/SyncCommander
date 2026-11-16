@@ -11,12 +11,12 @@ import (
 
 func (m *Model) layoutPanels() {
 	panelWidth, panelHeight := m.width/2, m.height-2
-	m.leftPanel.width, m.leftPanel.height = panelWidth, panelHeight
-	m.rightPanel.width, m.rightPanel.height = m.width-panelWidth, panelHeight
-	m.leftPanel.active = m.activeLeft
-	m.rightPanel.active = !m.activeLeft
-	m.leftPanel.clampOffset()
-	m.rightPanel.clampOffset()
+	m.left.panel.width, m.left.panel.height = panelWidth, panelHeight
+	m.right.panel.width, m.right.panel.height = m.width-panelWidth, panelHeight
+	m.left.panel.active = m.activeLeft
+	m.right.panel.active = !m.activeLeft
+	m.left.panel.clampOffset()
+	m.right.panel.clampOffset()
 }
 
 func (m *Model) View() string {
@@ -41,12 +41,12 @@ func (m *Model) View() string {
 		operation = spinner + " checksumming..."
 	}
 	m.setPanelSpinners(spinner, progress)
-	topBar := RenderPanelTopBar(m.cachedStats, true, operation, m.leftPanel.width) +
-		RenderPanelTopBar(m.cachedStats, false, operation, m.rightPanel.width)
+	topBar := RenderPanelTopBar(m.cachedStats, true, operation, m.left.panel.width) +
+		RenderPanelTopBar(m.cachedStats, false, operation, m.right.panel.width)
 	status := m.buildStatus(progress)
 	status.Spinner = spinner
 	var left, right string
-	m.readTree(func(*model.TreeNode) { left, right = m.leftPanel.View(), m.rightPanel.View() })
+	m.readTree(func(*model.TreeNode) { left, right = m.left.panel.View(), m.right.panel.View() })
 	panels := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	screen := lipgloss.JoinVertical(lipgloss.Left, topBar, panels, RenderStatusBar(status, m.width))
 
@@ -72,7 +72,7 @@ func (m *Model) setPanelSpinners(spinner string, progress model.ScanProgress) {
 			right = spinner
 		}
 	}
-	m.leftPanel.spinner, m.rightPanel.spinner = left, right
+	m.left.panel.spinner, m.right.panel.spinner = left, right
 }
 
 // copyPopupFixedRows is what the copy popup and the screen need besides the

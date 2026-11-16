@@ -41,7 +41,7 @@ func firstNode(n *model.TreeNode, want func(*model.TreeNode) bool) *model.TreeNo
 func TestTabSwitchesActivePanel(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	press(m, "tab")
-	if m.activeLeft || m.leftPanel.active || !m.rightPanel.active || m.activePanel() != m.rightPanel {
+	if m.activeLeft || m.left.panel.active || !m.right.panel.active || m.activePanel() != m.right.panel {
 		t.Fatal("tab did not make the right panel active")
 	}
 }
@@ -51,13 +51,13 @@ func TestCursorKeysMoveBothPanels(t *testing.T) {
 	press(m, "down")
 	press(m, "down")
 	press(m, "up")
-	if m.leftPanel.cursor != 1 || m.rightPanel.cursor != 1 {
-		t.Fatalf("cursors %d/%d after down, down, up; want 1/1", m.leftPanel.cursor, m.rightPanel.cursor)
+	if m.left.panel.cursor != 1 || m.right.panel.cursor != 1 {
+		t.Fatalf("cursors %d/%d after down, down, up; want 1/1", m.left.panel.cursor, m.right.panel.cursor)
 	}
 	press(m, "pgdown")
-	p := m.leftPanel
-	if want := min(1+p.height, len(p.rows)-1); p.cursor != want || m.rightPanel.cursor != want || m.rightPanel.offset != p.offset {
-		t.Fatalf("pgdown: cursors %d/%d offsets %d/%d, want cursor %d", p.cursor, m.rightPanel.cursor, p.offset, m.rightPanel.offset, want)
+	p := m.left.panel
+	if want := min(1+p.height, len(p.rows)-1); p.cursor != want || m.right.panel.cursor != want || m.right.panel.offset != p.offset {
+		t.Fatalf("pgdown: cursors %d/%d offsets %d/%d, want cursor %d", p.cursor, m.right.panel.cursor, p.offset, m.right.panel.offset, want)
 	}
 }
 
@@ -65,19 +65,19 @@ func TestExpandAllAndCollapseAllKeys(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	top := 1 + len(m.scanner.Tree().Children)
 	press(m, "}")
-	if len(m.leftPanel.rows) <= top {
-		t.Fatalf("} left %d rows, want more than %d", len(m.leftPanel.rows), top)
+	if len(m.left.panel.rows) <= top {
+		t.Fatalf("} left %d rows, want more than %d", len(m.left.panel.rows), top)
 	}
 	press(m, "{")
-	if len(m.leftPanel.rows) != top {
-		t.Fatalf("{ left %d rows, want %d", len(m.leftPanel.rows), top)
+	if len(m.left.panel.rows) != top {
+		t.Fatalf("{ left %d rows, want %d", len(m.left.panel.rows), top)
 	}
 }
 
 func TestEnterExpandsDirAndLeftCollapsesIt(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	dir := firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.IsDir && n.Depth == 1 })
-	p := m.leftPanel
+	p := m.left.panel
 	p.jumpTo(dir)
 	before := len(p.rows)
 	press(m, "enter")
@@ -98,13 +98,13 @@ func TestModalKeysDoNotReachTheTree(t *testing.T) {
 		t.Fatal("? did not open help")
 	}
 	press(m, "j")
-	if m.leftPanel.cursor != 0 {
+	if m.left.panel.cursor != 0 {
 		t.Fatal("j moved the cursor under an open dialog")
 	}
 	press(m, "esc")
 	press(m, "j")
-	if m.help.IsOpen() || m.leftPanel.cursor != 1 {
-		t.Fatalf("after esc: help open=%v cursor=%d", m.help.IsOpen(), m.leftPanel.cursor)
+	if m.help.IsOpen() || m.left.panel.cursor != 1 {
+		t.Fatalf("after esc: help open=%v cursor=%d", m.help.IsOpen(), m.left.panel.cursor)
 	}
 }
 
@@ -120,22 +120,22 @@ func TestSearchKeyJumpsToFirstMatch(t *testing.T) {
 	}
 	m.input.ed.set(re.String())
 	press(m, "enter")
-	if m.input.IsOpen() || m.leftPanel.CursorNode() != want || !want.Parent.Expanded {
-		t.Fatalf("search: input open=%v cursor on %v (want %s), parent expanded=%v", m.input.IsOpen(), m.leftPanel.CursorNode(), want.RelPath, want.Parent.Expanded)
+	if m.input.IsOpen() || m.left.panel.CursorNode() != want || !want.Parent.Expanded {
+		t.Fatalf("search: input open=%v cursor on %v (want %s), parent expanded=%v", m.input.IsOpen(), m.left.panel.CursorNode(), want.RelPath, want.Parent.Expanded)
 	}
 }
 
 func TestNextDiffKeyLandsOnADifference(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny?diff=0.3&drop=0.2")
 	press(m, "n")
-	node := m.leftPanel.CursorNode()
+	node := m.left.panel.CursorNode()
 	if node == nil || node.Depth == 0 {
 		t.Fatalf("n did not move to a difference: %v", node)
 	}
 	if node.Compare.Presence == model.PresenceBoth && model.NodeStatus(node, m.cmpOpts) != model.AttrDifferent {
 		t.Fatalf("n stopped on %s, which does not differ", node.RelPath)
 	}
-	if m.rightPanel.cursor != m.leftPanel.cursor {
+	if m.right.panel.cursor != m.left.panel.cursor {
 		t.Fatal("panels out of sync after n")
 	}
 }
@@ -146,21 +146,21 @@ func TestSwapSidesMirrorsTreeAndPanels(t *testing.T) {
 	if leftOnly == nil {
 		t.Fatal("fixture has no left-only node")
 	}
-	oldLeft, oldRight := m.left, m.right
-	leftTitle, rightTitle := m.leftPanel.title, m.rightPanel.title
+	oldLeft, oldRight := m.left.backend, m.right.backend
+	leftTitle, rightTitle := m.left.panel.title, m.right.panel.title
 	press(m, "s")
-	if m.left != oldRight || m.right != oldLeft {
+	if m.left.backend != oldRight || m.right.backend != oldLeft {
 		t.Fatal("backends not swapped")
 	}
-	if m.leftPanel.title != rightTitle || m.rightPanel.title != leftTitle || m.leftPanel.side != model.SideLeft || m.rightPanel.side != model.SideRight {
-		t.Fatalf("panels after swap: %q/%q sides %v/%v", m.leftPanel.title, m.rightPanel.title, m.leftPanel.side, m.rightPanel.side)
+	if m.left.panel.title != rightTitle || m.right.panel.title != leftTitle || m.left.panel.side != model.SideLeft || m.right.panel.side != model.SideRight {
+		t.Fatalf("panels after swap: %q/%q sides %v/%v", m.left.panel.title, m.right.panel.title, m.left.panel.side, m.right.panel.side)
 	}
 	if leftOnly.Compare.Presence != model.PresenceRightOnly || leftOnly.Sides[model.SideLeft].Entry != nil {
 		t.Fatalf("tree not mirrored: presence=%v", leftOnly.Compare.Presence)
 	}
 	m.copying = true
 	press(m, "s")
-	if m.left != oldRight {
+	if m.left.backend != oldRight {
 		t.Fatal("swap ran while a copy was in progress")
 	}
 }
@@ -170,7 +170,7 @@ func TestRenameAndDeleteKeysOpenDialogs(t *testing.T) {
 	file := firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool {
 		return !n.IsDir && n.Depth == 1 && n.Compare.Presence == model.PresenceBoth
 	})
-	m.leftPanel.jumpTo(file)
+	m.left.panel.jumpTo(file)
 	press(m, "e")
 	if !m.input.IsOpen() || m.input.ed.String() != file.Name {
 		t.Fatalf("e: input open=%v text=%q", m.input.IsOpen(), m.input.ed.String())
@@ -195,8 +195,8 @@ func TestOpenDialogKeyShowsCurrentArgs(t *testing.T) {
 	if !m.openDlg.IsOpen() {
 		t.Fatal("y did not open the location dialog")
 	}
-	if l, r := m.openDlg.Values(); l != m.leftArg || r != m.rightArg {
-		t.Fatalf("dialog shows %q/%q, want %q/%q", l, r, m.leftArg, m.rightArg)
+	if l, r := m.openDlg.Values(); l != m.left.arg || r != m.right.arg {
+		t.Fatalf("dialog shows %q/%q, want %q/%q", l, r, m.left.arg, m.right.arg)
 	}
 	press(m, "esc")
 	if m.openDlg.IsOpen() {
@@ -206,16 +206,16 @@ func TestOpenDialogKeyShowsCurrentArgs(t *testing.T) {
 
 func TestReopenBackendsKeepsUnchangedSide(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
-	left := m.left
-	if _, errMsg := m.reopenBackends("fake://tiny?dirs=abc", m.rightArg); !strings.HasPrefix(errMsg, "left: ") || m.left != left {
-		t.Fatalf("bad left path: err=%q replaced=%v", errMsg, m.left != left)
+	left := m.left.backend
+	if _, errMsg := m.reopenBackends("fake://tiny?dirs=abc", m.right.arg); !strings.HasPrefix(errMsg, "left: ") || m.left.backend != left {
+		t.Fatalf("bad left path: err=%q replaced=%v", errMsg, m.left.backend != left)
 	}
-	cmd, errMsg := m.reopenBackends(m.leftArg, "fake://small")
+	cmd, errMsg := m.reopenBackends(m.left.arg, "fake://small")
 	if errMsg != "" || cmd == nil || !m.scanning() {
 		t.Fatalf("reopen right: err=%q cmd=%v scanning=%v", errMsg, cmd != nil, m.scanning())
 	}
-	if m.left != left || m.right.BasePath() != "fake://small" || m.rightArg != "fake://small" || m.rightPanel.title != "fake://small" {
-		t.Fatalf("after reopen: left replaced=%v right=%q arg=%q title=%q", m.left != left, m.right.BasePath(), m.rightArg, m.rightPanel.title)
+	if m.left.backend != left || m.right.backend.BasePath() != "fake://small" || m.right.arg != "fake://small" || m.right.panel.title != "fake://small" {
+		t.Fatalf("after reopen: left replaced=%v right=%q arg=%q title=%q", m.left.backend != left, m.right.backend.BasePath(), m.right.arg, m.right.panel.title)
 	}
 	m.cancelOps()
 }
@@ -227,7 +227,7 @@ func TestCancelKeyStopsTransfersAndBlocksTreeKeys(t *testing.T) {
 	m.copyProgress.Cancel.Store(&cancel)
 	m.copying = true
 	press(m, "j")
-	if m.leftPanel.cursor != 0 {
+	if m.left.panel.cursor != 0 {
 		t.Fatal("j moved the cursor during a copy")
 	}
 	press(m, "x")

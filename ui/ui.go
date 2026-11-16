@@ -20,10 +20,19 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // higher.
 const maxCopyParallel = 64
 
+// pane is one side of the screen: the backend, what it was opened with,
+// and the panel that draws it. A swap moves whole panes. It moved the
+// backends and the panels but not the open arguments, so the next reopen
+// (u, b, the location dialog) put the sides back without notice (U6).
+type pane struct {
+	backend model.Backend
+	arg     string // what the backend was opened with; BasePath is display only
+	panel   *Panel
+}
+
 type Model struct {
-	left, right       model.Backend
-	leftArg, rightArg string // what the backends were opened with; BasePath is display only
-	insecure          bool
+	left, right pane
+	insecure    bool
 
 	scanner       *model.Scanner
 	cmpOpts       *model.CompareOpts
@@ -45,17 +54,16 @@ type Model struct {
 	batchTransfer  bool
 	verifyResume   bool
 
-	leftPanel, rightPanel *Panel
-	activeLeft            bool
-	lastSelect            time.Time // last click that only moved the cursor, for double-click
-	width, height         int
-	spinFrame             int
-	copySpinFrame         int
-	lastCopyBytes         int64
-	lastCopyTick          time.Time
-	slotSpins             map[string]slotSpin
-	speed                 speedHistory
-	tickActive            bool
+	activeLeft    bool
+	lastSelect    time.Time // last click that only moved the cursor, for double-click
+	width, height int
+	spinFrame     int
+	copySpinFrame int
+	lastCopyBytes int64
+	lastCopyTick  time.Time
+	slotSpins     map[string]slotSpin
+	speed         speedHistory
+	tickActive    bool
 
 	settings   *SettingsDialog
 	input      *InputDialog
@@ -80,12 +88,8 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 	lp := NewPanel(left.BasePath(), model.SideLeft)
 	rp := NewPanel(right.BasePath(), model.SideRight)
 	m := &Model{
-		leftPanel:      lp,
-		rightPanel:     rp,
-		left:           left,
-		right:          right,
-		leftArg:        leftArg,
-		rightArg:       rightArg,
+		left:           pane{backend: left, arg: leftArg, panel: lp},
+		right:          pane{backend: right, arg: rightArg, panel: rp},
 		scanner:        model.NewScanner(left, right, 4, scanParallel, deepScan),
 		activeLeft:     true,
 		cmpOpts:        cmpOpts,
