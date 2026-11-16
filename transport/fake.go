@@ -591,7 +591,8 @@ func (b *FakeBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 	return nil
 }
 
-func (b *FakeBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *FakeBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
+	mode := p.Mode
 	var size int64
 	var buf []byte
 	if b.noData {

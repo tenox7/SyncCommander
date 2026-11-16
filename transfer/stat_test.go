@@ -50,9 +50,9 @@ func (s *liveStub) Stat(_ context.Context, relPath string) (model.FileEntry, err
 	return model.FileEntry{Name: "f.bin", RelPath: "f.bin", Size: s.size.Load(), Mode: s.kind | 0o644}, nil
 }
 
-func (s *liveStub) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (s *liveStub) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	s.offset.Store(offset)
-	return s.sumStub.AppendFrom(ctx, relPath, src, mode, offset)
+	return s.sumStub.AppendFrom(ctx, relPath, src, p, offset)
 }
 
 // livePair is a source of body and a destination that holds have bytes of

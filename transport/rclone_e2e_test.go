@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"os"
@@ -80,14 +79,13 @@ func TestRcloneLocalE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sized := sizedRd{Reader: bytes.NewReader([]byte("hello world")), n: 11}
-	if err := d.CopyFrom(ctx, "x/y/a.txt", sized, 0644); err != nil {
+	if err := d.CopyFrom(ctx, "x/y/a.txt", strings.NewReader("hello world"), model.PutParams{Size: 11, Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(dstDir, "x/y/a.txt")); string(got) != "hello world" {
 		t.Fatalf("copy sized: %q", got)
 	}
-	if err := d.CopyFrom(ctx, "unsized.txt", strings.NewReader("nnnn"), 0644); err != nil {
+	if err := d.CopyFrom(ctx, "unsized.txt", strings.NewReader("nnnn"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(dstDir, "unsized.txt")); string(got) != "nnnn" {
@@ -119,13 +117,6 @@ func TestRcloneLocalE2E(t *testing.T) {
 	}
 }
 
-type sizedRd struct {
-	io.Reader
-	n int64
-}
-
-func (s sizedRd) Size() int64 { return s.n }
-
 // Memory backend is bucket-based with ListR, exercising the preload path.
 func TestRclonePreloadRecursive(t *testing.T) {
 	b, err := NewRcloneBackend("rclone://:memory:bkt", false)
@@ -134,7 +125,7 @@ func TestRclonePreloadRecursive(t *testing.T) {
 	}
 	ctx := context.Background()
 	for _, p := range []string{"a.txt", "sub/b.txt", "sub/deep/c.txt"} {
-		if err := b.CopyFrom(ctx, p, sizedRd{Reader: strings.NewReader("data"), n: 4}, 0644); err != nil {
+		if err := b.CopyFrom(ctx, p, strings.NewReader("data"), model.PutParams{Size: 4, Mode: 0o644}); err != nil {
 			t.Fatal(err)
 		}
 	}

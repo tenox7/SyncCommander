@@ -28,7 +28,7 @@ func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath stri
 	if lp, ok := src.(model.LocalFS); ok {
 		if r, ok := dst.(model.LocalSender); ok {
 			local := lp.LocalPath(relPath)
-			return r.SendLocalFile(ctx, local, relPath, srcEntry.Mode) == nil && localSizeIs(relPath, local, srcEntry.Size)
+			return r.SendLocalFile(ctx, local, relPath, putParams(srcEntry, srcEntry.Mode)) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	if lp, ok := dst.(model.LocalFS); ok {
@@ -38,6 +38,12 @@ func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath stri
 		}
 	}
 	return false
+}
+
+// putParams is what dst is told about the file it takes: the size and mtime
+// the listing gave the source, and mode (the source's, or a part file's).
+func putParams(srcEntry *model.FileEntry, mode os.FileMode) model.PutParams {
+	return model.PutParams{Size: srcEntry.Size, Mode: mode, ModTime: srcEntry.ModTime}
 }
 
 // localSizeIs reports whether the local file holds want bytes, logging why
@@ -210,7 +216,7 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath
 		bytes.Add(-added.Load())
 		baseBytes.Add(-offset)
 	}
-	if err := resumer.AppendFrom(ctx, dstPath, opener, mode, offset); err != nil {
+	if err := resumer.AppendFrom(ctx, dstPath, opener, putParams(srcEntry, mode), offset); err != nil {
 		rollback()
 		return err
 	}
@@ -261,7 +267,7 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPa
 	srcReader = &cancelReader{r: counted, ctx: ctx}
 	// This try opened the source itself, so a failure after the first byte
 	// is the copy layer's to retry, with the source opened again (F29).
-	err = transport.Unconsumed(dst.CopyFrom(ctx, dstPath, srcReader, mode))
+	err = transport.Unconsumed(dst.CopyFrom(ctx, dstPath, srcReader, putParams(srcEntry, mode)))
 	if err == nil {
 		// A destination that takes the listed number of bytes and stops
 		// (rclone's Put is told the size) leaves the rest of a source that

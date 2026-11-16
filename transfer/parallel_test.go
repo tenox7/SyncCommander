@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,7 +29,7 @@ type gateDst struct {
 	peak    atomic.Int32
 }
 
-func (b *gateDst) CopyFrom(ctx context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (b *gateDst) CopyFrom(ctx context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	n := b.running.Add(1)
 	defer b.running.Add(-1)
 	b.started.Add(1)

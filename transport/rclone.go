@@ -312,12 +312,12 @@ func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, ati
 	return nil
 }
 
-func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		return err
 	}
-	size, ok := fileSizeFromContext(ctx)
-	if !ok {
+	size := p.Size
+	if !p.SizeKnown() {
 		size = -1
 	}
 	put := b.f.Put
@@ -337,8 +337,8 @@ func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	}
 	// Stamping the source mtime here makes the later SetTimes a no-op on
 	// stores that would otherwise implement it as a copy of the object.
-	mtime, ok := modTimeFromContext(ctx)
-	if !ok {
+	mtime := p.ModTime
+	if mtime.IsZero() {
 		mtime = time.Now()
 	}
 	info := &rcObjectInfo{fs: b.f, remote: relPath, size: size, modTime: mtime}

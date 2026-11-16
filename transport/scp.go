@@ -80,14 +80,14 @@ func exitCode(err error) int {
 	return -1
 }
 
-func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	fullPath := b.abs(relPath)
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(path.Dir(fullPath))); err != nil {
 		return err
 	}
 	client, release := b.pool.acquire(ctx)
 	defer release()
-	err := b.exec(ctx, client, fmt.Sprintf("cat > %s && chmod %04o %s", shellQuote(fullPath), mode.Perm(), shellQuote(fullPath)), src, nil)
+	err := b.exec(ctx, client, fmt.Sprintf("cat > %s && chmod %04o %s", shellQuote(fullPath), p.Mode.Perm(), shellQuote(fullPath)), src, nil)
 	b.listCache.invalidateAncestors(relPath)
 	return err
 }
@@ -96,7 +96,7 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 // file must be there and hold exactly offset bytes, checked on the server
 // before anything is written (L14, S8): a dd seek used to extend a missing
 // or shorter file with zeros.
-func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	fp := shellQuote(b.abs(relPath))
 	rd, err := src.OpenAt(ctx, offset)
 	if err != nil {
@@ -106,7 +106,7 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 	client, release := b.pool.acquire(ctx)
 	defer release()
 	cmd := fmt.Sprintf("n=$(wc -c 2>/dev/null < %[1]s) && [ ! -L %[1]s ] && [ $n -eq %[2]d ] || exit %[3]d; cat >> %[1]s && chmod %04[4]o %[1]s",
-		fp, offset, exitNotAtOffset, mode.Perm())
+		fp, offset, exitNotAtOffset, p.Mode.Perm())
 	err = b.exec(ctx, client, cmd, rd, nil)
 	b.listCache.invalidateAncestors(relPath)
 	if exitCode(err) == exitNotAtOffset {

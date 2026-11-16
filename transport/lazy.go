@@ -390,10 +390,10 @@ func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, 
 // Once bytes have been consumed the reader cannot be rewound and a second
 // attempt would write a truncated file, so the failure is made permanent and
 // the caller re-opens src and retries at a higher level instead.
-func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *lazyBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	counted := &countingReader{r: src}
 	return b.do(ctx, "copy "+relPath, func(in model.Backend) error {
-		err := in.CopyFrom(ctx, relPath, counted, mode)
+		err := in.CopyFrom(ctx, relPath, counted, p)
 		if err != nil && counted.n.Load() > 0 {
 			return &consumedError{err}
 		}
@@ -505,7 +505,7 @@ func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error 
 
 // AppendFrom is not retried here: the source has been consumed from offset,
 // so the copy layer re-probes the destination size and resumes again itself.
-func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	inner, err := b.ensureConnected(ctx)
 	if err != nil {
 		return err
@@ -514,7 +514,7 @@ func (b *lazyBackend) AppendFrom(ctx context.Context, relPath string, src model.
 	if !ok {
 		return ErrUnsupported
 	}
-	return b.markBrokenIf(inner, b.noteResult(ctx, r.AppendFrom(ctx, relPath, src, mode, offset)))
+	return b.markBrokenIf(inner, b.noteResult(ctx, r.AppendFrom(ctx, relPath, src, p, offset)))
 }
 
 func (b *lazyBackend) PartSize(ctx context.Context, relPath string) (int64, error) {
@@ -560,8 +560,8 @@ func (b *lazyBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 	})
 }
 
-func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error {
-	return doAs(b, ctx, "send "+relPath, func(s model.LocalSender) error { return s.SendLocalFile(ctx, srcPath, relPath, mode) })
+func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, p model.PutParams) error {
+	return doAs(b, ctx, "send "+relPath, func(s model.LocalSender) error { return s.SendLocalFile(ctx, srcPath, relPath, p) })
 }
 
 func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {

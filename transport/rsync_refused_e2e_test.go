@@ -10,12 +10,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sc/model"
 )
 
 // refusable is what the R4 cases call on both rsync backends.
 type refusable interface {
-	CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error
-	SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error
+	CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error
+	SendLocalFile(ctx context.Context, srcPath, relPath string, p model.PutParams) error
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
 	Mkdir(ctx context.Context, relPath string, mode os.FileMode) error
@@ -106,11 +108,11 @@ func checkRefusedTransfers(t *testing.T, b refusable, mod string) {
 		}
 	}
 
-	err := b.CopyFrom(ctx, "report", strings.NewReader("a file named report"), 0o644)
+	err := b.CopyFrom(ctx, "report", strings.NewReader("a file named report"), model.PutParams{Mode: 0o644})
 	check("CopyFrom(report) over a folder that holds files", err, content(mod, "report") == "a file named report", fmt.Sprintf("still a folder=%v", isDir(mod, "report")))
-	err = b.CopyFrom(ctx, "locked.bin", strings.NewReader("NEW CONTENT"), 0o644)
+	err = b.CopyFrom(ctx, "locked.bin", strings.NewReader("NEW CONTENT"), model.PutParams{Mode: 0o644})
 	check("CopyFrom(locked.bin) over a read-only file", err, content(mod, "locked.bin") == "NEW CONTENT", "server holds "+content(mod, "locked.bin"))
-	err = b.CopyFrom(ctx, "ro/new.txt", strings.NewReader("new"), 0o644)
+	err = b.CopyFrom(ctx, "ro/new.txt", strings.NewReader("new"), model.PutParams{Mode: 0o644})
 	check("CopyFrom(ro/new.txt) into a read-only folder", err, content(mod, "ro/new.txt") == "new", "server holds "+content(mod, "ro/new.txt"))
 	err = b.Mkdir(ctx, "ro/newdir", 0o755)
 	check("Mkdir(ro/newdir) in a read-only folder", err, isDir(mod, "ro/newdir"), "no folder")
@@ -132,7 +134,7 @@ func checkRefusedTransfers(t *testing.T, b refusable, mod string) {
 
 	writeTestFile(t, local, "secret.txt", "client cannot read this")
 	chmodTest(t, filepath.Join(local, "secret.txt"), 0o000)
-	err = b.SendLocalFile(ctx, filepath.Join(local, "secret.txt"), "up/secret.txt", 0o644)
+	err = b.SendLocalFile(ctx, filepath.Join(local, "secret.txt"), "up/secret.txt", model.PutParams{Mode: 0o644})
 	check("SendLocalFile of a file the client cannot read", err, content(mod, "up/secret.txt") == "client cannot read this", "server holds "+content(mod, "up/secret.txt"))
 
 	// An upload leaves the dates of the folders above it alone: sc never
@@ -142,7 +144,7 @@ func checkRefusedTransfers(t *testing.T, b refusable, mod string) {
 	if err := os.Chtimes(filepath.Join(mod, "a"), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.CopyFrom(ctx, "a/b/new.txt", strings.NewReader("new"), 0o644); err != nil {
+	if err := b.CopyFrom(ctx, "a/b/new.txt", strings.NewReader("new"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Errorf("CopyFrom(a/b/new.txt): %v", err)
 	}
 	if fi, err := os.Stat(filepath.Join(mod, "a")); err != nil || !fi.ModTime().Equal(old) {
@@ -207,7 +209,7 @@ func TestRsyncSSHRemoteExitStatusFails(t *testing.T) {
 	if err := b.RecvToLocalFile(ctx, "f.txt", dst); err == nil || !strings.Contains(err.Error(), "23") {
 		t.Errorf("RecvToLocalFile with the remote rsync exiting 23: %v, want an error naming status 23", err)
 	}
-	if err := b.CopyFrom(ctx, "g.txt", strings.NewReader("up"), 0o644); err == nil {
+	if err := b.CopyFrom(ctx, "g.txt", strings.NewReader("up"), model.PutParams{Mode: 0o644}); err == nil {
 		t.Error("CopyFrom with the remote rsync exiting 23: no error")
 	}
 }

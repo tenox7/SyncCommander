@@ -550,7 +550,7 @@ func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder 
 // hardlinked under its full relPath and the top component sent with -r so the
 // daemon recreates the leading dirs; across filesystems the link fails and a
 // Mkdir plus flat send takes over.
-func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
+func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, p model.PutParams) error {
 	tmpDir, err := os.MkdirTemp("", "rsync-send-*")
 	if err != nil {
 		return err
@@ -568,7 +568,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 		return err
 	}
 	var adder *CappedAdder
-	fileSize, _ := fileSizeFromContext(ctx)
+	fileSize := max(p.Size, 0)
 	if counter := progressFromContext(ctx); counter != nil && fileSize > 0 {
 		adder = NewCappedAdder(counter, fileSize)
 	}
@@ -598,7 +598,7 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 	})
 }
 
-func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	tmpDir, err := os.MkdirTemp("", "rsync-upload-*")
 	if err != nil {
 		return err
@@ -612,7 +612,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err != nil {
 		return err
 	}
-	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, mode)
+	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, p)
 	if err != nil {
 		return err
 	}
@@ -632,7 +632,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 // kept. A local source already carrying the destination name is sent from
 // its own path, anything else is hardlinked or spooled under that name first.
 // Progress covers the tail only; the engine has credited the prefix.
-func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	dest, err := b.pushTarget(ctx, parentDir(relPath))
 	if err != nil {
 		return err
@@ -647,7 +647,7 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 		defer os.RemoveAll(tmpDir)
 		staged := filepath.Join(tmpDir, name)
 		if srcPath == "" || os.Link(srcPath, staged) != nil {
-			if err := spoolTo(ctx, src, staged, mode); err != nil {
+			if err := spoolTo(ctx, src, staged, p); err != nil {
 				return err
 			}
 		}

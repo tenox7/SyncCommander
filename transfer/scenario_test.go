@@ -394,7 +394,7 @@ func TestScenarioMirrorCaseSensitiveDestination(t *testing.T) {
 	if err := rb.Mkdir(ctx, "album", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := rb.CopyFrom(ctx, "album/Photo.JPG", strings.NewReader("the picture"), 0o644); err != nil {
+	if err := rb.CopyFrom(ctx, "album/Photo.JPG", strings.NewReader("the picture"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	sc := model.NewScanner(lb, rb, 1, 1, true)

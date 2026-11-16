@@ -47,7 +47,7 @@ func (s *resumeStub) SetTimes(context.Context, string, time.Time, time.Time, tim
 	return nil
 }
 
-func (s *resumeStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (s *resumeStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	_, err := io.Copy(io.Discard, src)
 	return err
 }
@@ -61,7 +61,7 @@ func (s *resumeStub) Open(context.Context, string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(s.body)), nil
 }
 
-func (s *resumeStub) AppendFrom(ctx context.Context, _ string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+func (s *resumeStub) AppendFrom(ctx context.Context, _ string, src model.RangeOpener, _ model.PutParams, offset int64) error {
 	s.appends++
 	s.appendFrom = offset
 	rc, err := src.OpenAt(ctx, offset)

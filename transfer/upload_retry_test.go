@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -21,7 +20,7 @@ type dropStub struct {
 	got     atomic.Pointer[string]
 }
 
-func (d *dropStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (d *dropStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	if d.uploads.Add(1) == 1 {
 		_, _ = io.CopyN(io.Discard, src, 4)
 		return errors.New("write tcp 10.0.0.2:50000->10.0.0.1:22: write: connection reset by peer")

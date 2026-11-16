@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -24,7 +23,7 @@ type goneStub struct {
 	uploads atomic.Int64
 }
 
-func (g *goneStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (g *goneStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	g.uploads.Add(1)
 	if g.gone.Load() {
 		return io.ErrUnexpectedEOF

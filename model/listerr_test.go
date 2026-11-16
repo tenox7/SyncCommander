@@ -38,12 +38,12 @@ func (b *stubBackend) Checksum(context.Context, string) (string, error) { return
 func (b *stubBackend) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }
-func (b *stubBackend) CopyFrom(context.Context, string, io.Reader, os.FileMode) error { return nil }
-func (b *stubBackend) Mkdir(context.Context, string, os.FileMode) error               { return nil }
-func (b *stubBackend) Rename(context.Context, string, string) error                   { return nil }
-func (b *stubBackend) Remove(context.Context, string) error                           { return nil }
-func (b *stubBackend) RemoveAll(context.Context, string) error                        { return nil }
-func (b *stubBackend) Open(context.Context, string) (io.ReadCloser, error)            { return nil, nil }
+func (b *stubBackend) CopyFrom(context.Context, string, io.Reader, PutParams) error { return nil }
+func (b *stubBackend) Mkdir(context.Context, string, os.FileMode) error             { return nil }
+func (b *stubBackend) Rename(context.Context, string, string) error                 { return nil }
+func (b *stubBackend) Remove(context.Context, string) error                         { return nil }
+func (b *stubBackend) RemoveAll(context.Context, string) error                      { return nil }
+func (b *stubBackend) Open(context.Context, string) (io.ReadCloser, error)          { return nil, nil }
 
 func dirEntry(rel, name string) FileEntry {
 	return FileEntry{RelPath: rel, Name: name, IsDir: true}

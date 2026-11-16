@@ -443,7 +443,7 @@ func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int6
 	if counter == nil {
 		return func(bool) {}
 	}
-	size, known := fileSizeFromContext(ctx)
+	size, known := progressBudgetFromContext(ctx)
 	if known = known && size > 0; !known {
 		size = 1 << 62
 	}
@@ -573,13 +573,13 @@ func appendVerifySilence(offset int64) time.Duration { return 2 * HashTime(offse
 // stageUpload spools src into tmpFile so rsync can send from disk, crediting
 // half the progress budget for the read (the push credits the rest). Returns
 // the push-phase adder and its budget, nil without progress.
-func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.FileMode) (*CappedAdder, int64, error) {
-	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.PutParams) (*CappedAdder, int64, error) {
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, p.Mode)
 	if err != nil {
 		return nil, 0, err
 	}
 	counter := progressFromContext(ctx)
-	fileSize, _ := fileSizeFromContext(ctx)
+	fileSize := max(p.Size, 0)
 	var readAdder, pushAdder *CappedAdder
 	var pushBudget int64
 	if counter != nil && fileSize > 0 && !IsPreCounted(src) {
@@ -597,7 +597,7 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 		err = cerr
 	}
 	if err == nil {
-		err = stampModTime(ctx, tmpFile)
+		err = stampModTime(tmpFile, p.ModTime)
 	}
 	if err != nil {
 		if readAdder != nil {
@@ -613,13 +613,13 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, mode os.Fil
 // would send and verify the short copy as if it were the file. No progress
 // shows it (the engine credited the prefix, the push credits the rest), so
 // each read tells the stall guard it works (R7).
-func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.FileMode) error {
+func spoolTo(ctx context.Context, src model.RangeOpener, path string, p model.PutParams) error {
 	rd, err := src.Open(ctx)
 	if err != nil {
 		return err
 	}
 	defer rd.Close()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, p.Mode)
 	if err != nil {
 		return err
 	}
@@ -634,16 +634,16 @@ func spoolTo(ctx context.Context, src model.RangeOpener, path string, mode os.Fi
 		err = SizeMismatch(n, src.Size())
 	}
 	if err == nil {
-		err = stampModTime(ctx, path)
+		err = stampModTime(path, p.ModTime)
 	}
 	return err
 }
 
 // stampModTime gives a staged upload the source's mtime, so -t sends that
-// instead of the moment it was staged.
-func stampModTime(ctx context.Context, file string) error {
-	mtime, ok := modTimeFromContext(ctx)
-	if !ok {
+// instead of the moment it was staged. A zero mtime is not known: the file
+// keeps the time it was staged, and SetTimes follows.
+func stampModTime(file string, mtime time.Time) error {
+	if mtime.IsZero() {
 		return nil
 	}
 	return os.Chtimes(file, mtime, mtime)

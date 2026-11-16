@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"sc/model"
 )
 
 // The limit has to bite on a live socket, not just on a wrapped buffer, so
@@ -56,7 +58,7 @@ func TestBandwidthOverRsyncDaemon(t *testing.T) {
 	SetBandwidthOut(1 << 20)
 	defer SetBandwidthOut(0)
 	start := time.Now()
-	if err := b.CopyFrom(context.Background(), "up.bin", bytes.NewReader(body), 0644); err != nil {
+	if err := b.CopyFrom(context.Background(), "up.bin", bytes.NewReader(body), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	up := time.Since(start)
@@ -104,7 +106,7 @@ func TestBandwidthOverWebDAV(t *testing.T) {
 	SetBandwidthOut(1 << 20)
 	defer SetBandwidthOut(0)
 	start = time.Now()
-	if err := b.CopyFrom(context.Background(), "up.bin", bytes.NewReader(body), 0644); err != nil {
+	if err := b.CopyFrom(context.Background(), "up.bin", bytes.NewReader(body), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	up := time.Since(start)

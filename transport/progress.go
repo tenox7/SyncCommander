@@ -14,7 +14,7 @@ import (
 
 type progressKey struct{}
 type baseProgressKey struct{}
-type fileSizeKey struct{}
+type progressBudgetKey struct{}
 
 func ContextWithProgress(ctx context.Context, counter *atomic.Int64) context.Context {
 	if counter == nil {
@@ -44,29 +44,18 @@ func baseProgressFromContext(ctx context.Context) *atomic.Int64 {
 	return b
 }
 
-// ContextWithFileSize attaches the size of the file currently being copied so
-// backends can size their per-file CappedAdders correctly.
-func ContextWithFileSize(ctx context.Context, size int64) context.Context {
-	return context.WithValue(ctx, fileSizeKey{}, size)
+// ContextWithProgressBudget attaches the most the progress counter may be
+// credited for the file being read: the size the listing gave it. A source
+// that downloads the file before it gives it (rsync) caps its count there
+// and, once the download worked, credits the rest. It is progress only: a
+// put is told the file's size and mtime in model.PutParams (D1).
+func ContextWithProgressBudget(ctx context.Context, size int64) context.Context {
+	return context.WithValue(ctx, progressBudgetKey{}, size)
 }
 
-func fileSizeFromContext(ctx context.Context) (int64, bool) {
-	s, ok := ctx.Value(fileSizeKey{}).(int64)
+func progressBudgetFromContext(ctx context.Context) (int64, bool) {
+	s, ok := ctx.Value(progressBudgetKey{}).(int64)
 	return s, ok
-}
-
-type modTimeKey struct{}
-
-func ContextWithModTime(ctx context.Context, mtime time.Time) context.Context {
-	if mtime.IsZero() {
-		return ctx
-	}
-	return context.WithValue(ctx, modTimeKey{}, mtime)
-}
-
-func modTimeFromContext(ctx context.Context) (time.Time, bool) {
-	t, ok := ctx.Value(modTimeKey{}).(time.Time)
-	return t, ok
 }
 
 type PreCounted interface {

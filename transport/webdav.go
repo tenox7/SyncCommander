@@ -653,7 +653,7 @@ func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, 
 // Content-Length are served and nothing is chunked needlessly. The parent
 // walk is skipped for collections already seen; a MKCOL failure is only a
 // warning here because the PUT's own status is the verdict.
-func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
 	}
@@ -661,11 +661,11 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	if err != nil {
 		return err
 	}
-	if sz, ok := fileSizeFromContext(ctx); ok && sz >= 0 {
-		req.ContentLength = sz
+	if p.SizeKnown() {
+		req.ContentLength = p.Size
 	}
-	if mt, ok := modTimeFromContext(ctx); ok {
-		req.Header.Set("X-OC-Mtime", strconv.FormatInt(mt.Unix(), 10))
+	if !p.ModTime.IsZero() {
+		req.Header.Set("X-OC-Mtime", strconv.FormatInt(p.ModTime.Unix(), 10))
 	}
 	resp, err := b.doReq(req)
 	if err != nil {

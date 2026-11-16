@@ -80,13 +80,33 @@ type Backend interface {
 	Stat(ctx context.Context, relPath string) (FileEntry, error)
 	Checksum(ctx context.Context, relPath string) (string, error)
 	SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error
-	CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error
+	CopyFrom(ctx context.Context, relPath string, src io.Reader, p PutParams) error
 	Mkdir(ctx context.Context, relPath string, mode os.FileMode) error
 	Rename(ctx context.Context, oldRelPath, newRelPath string) error
 	Remove(ctx context.Context, relPath string) error
 	RemoveAll(ctx context.Context, relPath string) error
 	Open(ctx context.Context, relPath string) (io.ReadCloser, error)
 }
+
+// PutParams is what a backend is told about a file it takes. Size and
+// ModTime travelled in the context, where the compiler cannot see a caller
+// or a wrapper leave one out (D1).
+type PutParams struct {
+	// Size is the number of bytes src gives. 0 or less is taken as not
+	// known: a backend that needs the size up front (a Content-Length, an
+	// object store's put) measures the data or streams it. A caller that
+	// leaves the size out costs a spool, never a short file.
+	Size int64
+	// Mode is the new file's mode, for a backend that sets one; its
+	// permission bits are used.
+	Mode os.FileMode
+	// ModTime is the source's modification time, zero when not known. A
+	// backend that stores it with the data does; SetTimes follows anyway.
+	ModTime time.Time
+}
+
+// SizeKnown reports whether Size says how many bytes src gives.
+func (p PutParams) SizeKnown() bool { return p.Size > 0 }
 
 type freshListingKey struct{}
 
@@ -176,7 +196,7 @@ type RegionChecksummer interface {
 // the tail; protocol-aware backends (rsync --append) call src.Open() and let
 // the protocol negotiate the prefix.
 type Resumer interface {
-	AppendFrom(ctx context.Context, relPath string, src RangeOpener, mode os.FileMode, offset int64) error
+	AppendFrom(ctx context.Context, relPath string, src RangeOpener, p PutParams, offset int64) error
 }
 
 // SeekableOpener is implemented by backends that can open a file for reading
@@ -199,12 +219,12 @@ type LocalFS interface {
 // intermediate tmp file (e.g. rsync invoked with the local path as source).
 //
 // Implementations MUST credit progress.Bytes during the push and top up to
-// fileSize on success, so the stall guard sees movement on long transfers and
+// p.Size on success, so the stall guard sees movement on long transfers and
 // the byte counter ends correctly even under delta-sync. On error the
 // implementation MUST roll back any in-band credit. The caller does not
 // top-up after the call. See RsyncSSHBackend.SendLocalFile for the pattern.
 type LocalSender interface {
-	SendLocalFile(ctx context.Context, srcPath, relPath string, mode os.FileMode) error
+	SendLocalFile(ctx context.Context, srcPath, relPath string, p PutParams) error
 }
 
 // LocalReceiver is implemented by backends that can write directly to a local

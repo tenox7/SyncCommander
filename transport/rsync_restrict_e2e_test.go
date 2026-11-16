@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"sc/model"
 )
 
 // R6: on Linux a gorsync client that is not told otherwise puts the whole
@@ -57,7 +59,7 @@ func TestRsyncRunsLeaveProcessUnrestricted(t *testing.T) {
 		t.Fatalf("rsync+ssh Open read %q", got)
 	}
 	check("an rsync+ssh Open")
-	if err := sb.CopyFrom(ctx, "up.txt", strings.NewReader("up"), 0o644); err != nil {
+	if err := sb.CopyFrom(ctx, "up.txt", strings.NewReader("up"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("rsync+ssh CopyFrom: %v", err)
 	}
 	check("an rsync+ssh upload")
@@ -68,7 +70,7 @@ func TestRsyncRunsLeaveProcessUnrestricted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CopyFrom(ctx, "dir/up.txt", strings.NewReader("up"), 0o644); err != nil {
+	if err := db.CopyFrom(ctx, "dir/up.txt", strings.NewReader("up"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("rsync:// CopyFrom: %v", err)
 	}
 	check("an rsync:// upload")

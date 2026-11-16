@@ -174,7 +174,7 @@ func TestRsyncDeepUploadIntoEmptyModule(t *testing.T) {
 	if err := os.WriteFile(srcFile, []byte("hello-send"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SendLocalFile(ctx, srcFile, "foo/bar/baz.tgz", 0644); err != nil {
+	if err := b.SendLocalFile(ctx, srcFile, "foo/bar/baz.tgz", model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("SendLocalFile deep path: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(moduleDir, "foo/bar/baz.tgz"))
@@ -183,7 +183,7 @@ func TestRsyncDeepUploadIntoEmptyModule(t *testing.T) {
 	}
 
 	// CopyFrom: streamed deep path into another empty subtree.
-	if err := b.CopyFrom(ctx, "a/b/c/qux.txt", strings.NewReader("hello-copy"), 0644); err != nil {
+	if err := b.CopyFrom(ctx, "a/b/c/qux.txt", strings.NewReader("hello-copy"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom deep path: %v", err)
 	}
 	got, err = os.ReadFile(filepath.Join(moduleDir, "a/b/c/qux.txt"))
@@ -192,7 +192,7 @@ func TestRsyncDeepUploadIntoEmptyModule(t *testing.T) {
 	}
 
 	// Root-level file still works (no leading dirs).
-	if err := b.CopyFrom(ctx, "top.txt", strings.NewReader("root"), 0644); err != nil {
+	if err := b.CopyFrom(ctx, "top.txt", strings.NewReader("root"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom root: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(moduleDir, "top.txt")); string(got) != "root" {
@@ -247,7 +247,7 @@ func TestRsyncDaemonPerBackendAuth(t *testing.T) {
 	if _, err := a.fetchMD4(ctx, "", true); err != nil {
 		t.Fatalf("MD4 dry run as alice: %v", err)
 	}
-	if err := a.CopyFrom(ctx, "up.txt", strings.NewReader("up"), 0644); err != nil {
+	if err := a.CopyFrom(ctx, "up.txt", strings.NewReader("up"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom as alice: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "moda", "up.txt")); err != nil {
@@ -309,8 +309,8 @@ func TestRsyncAppendFrom(t *testing.T) {
 				t.Fatal(err)
 			}
 			var counter atomic.Int64
-			ctx := ContextWithProgress(ContextWithFileSize(context.Background(), size), &counter)
-			if err := b.AppendFrom(ctx, tc.rel, tc.src, 0644, offset); err != nil {
+			ctx := ContextWithProgress(context.Background(), &counter)
+			if err := b.AppendFrom(ctx, tc.rel, tc.src, model.PutParams{Size: size, Mode: 0o644}, offset); err != nil {
 				t.Fatalf("AppendFrom: %v", err)
 			}
 			got, err := os.ReadFile(dst)
@@ -334,7 +334,7 @@ func TestRsyncUploadSendsSourceMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 	mtime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	ctx := ContextWithModTime(context.Background(), mtime)
+	ctx := context.Background()
 	local := filepath.Join(t.TempDir(), "local.txt")
 	if err := os.WriteFile(local, []byte("local"), 0644); err != nil {
 		t.Fatal(err)
@@ -342,10 +342,10 @@ func TestRsyncUploadSendsSourceMtime(t *testing.T) {
 	if err := os.Chtimes(local, mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SendLocalFile(ctx, local, "up/local.txt", 0644); err != nil {
+	if err := b.SendLocalFile(ctx, local, "up/local.txt", model.PutParams{Mode: 0o644, ModTime: mtime}); err != nil {
 		t.Fatalf("SendLocalFile: %v", err)
 	}
-	if err := b.CopyFrom(ctx, "up/streamed.txt", strings.NewReader("streamed"), 0644); err != nil {
+	if err := b.CopyFrom(ctx, "up/streamed.txt", strings.NewReader("streamed"), model.PutParams{Mode: 0o644, ModTime: mtime}); err != nil {
 		t.Fatalf("CopyFrom: %v", err)
 	}
 	for _, rel := range []string{"up/local.txt", "up/streamed.txt"} {

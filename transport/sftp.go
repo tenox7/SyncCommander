@@ -251,9 +251,9 @@ func syncSFTP(f *sftp.File) error {
 	return err
 }
 
-func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	Log.Add("sftp", DirOut, "STOR "+relPath)
-	err := b.put(ctx, relPath, -1, mode, func() (io.ReadCloser, error) { return io.NopCloser(src), nil })
+	err := b.put(ctx, relPath, -1, p.Mode, func() (io.ReadCloser, error) { return io.NopCloser(src), nil })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
@@ -263,9 +263,9 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 
 // AppendFrom writes the source from offset on at the end of relPath, which
 // must hold exactly offset bytes (see put).
-func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	Log.Add("sftp", DirOut, fmt.Sprintf("APPEND %s @%d", relPath, offset))
-	err := b.put(ctx, relPath, offset, mode, func() (io.ReadCloser, error) { return src.OpenAt(ctx, offset) })
+	err := b.put(ctx, relPath, offset, p.Mode, func() (io.ReadCloser, error) { return src.OpenAt(ctx, offset) })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())

@@ -84,7 +84,7 @@ func TestRsyncOpenAt(t *testing.T) {
 	}
 	offset := size/2 + 4099
 	var counter atomic.Int64
-	ctx := ContextWithProgress(ContextWithFileSize(context.Background(), size), &counter)
+	ctx := ContextWithProgress(ContextWithProgressBudget(context.Background(), size), &counter)
 	rc, err := b.OpenAt(ctx, "dl/big.bin", offset)
 	if err != nil {
 		t.Fatalf("OpenAt: %v", err)
@@ -149,7 +149,7 @@ func TestRsyncAppendVerifyHealsChangedPrefix(t *testing.T) {
 				t.Fatal(err)
 			}
 			errs := Log.ErrCount()
-			if err := b.AppendFrom(context.Background(), "v/big.bin", src, 0644, offset); err != nil {
+			if err := b.AppendFrom(context.Background(), "v/big.bin", src, model.PutParams{Mode: 0o644}, offset); err != nil {
 				t.Fatalf("append onto a changed prefix: %v", err)
 			}
 			if got, _ := os.ReadFile(dst); !bytes.Equal(got, body) {

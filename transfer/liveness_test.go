@@ -52,7 +52,7 @@ func (s *sumStub) SetChecksumAlgo(string)   {}
 func (s *sumStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }
-func (s *sumStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (s *sumStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	s.fullCopies.Add(1)
 	n, err := io.Copy(io.Discard, src)
 	if err == nil {
@@ -67,7 +67,7 @@ func (s *sumStub) RemoveAll(context.Context, string) error          { return nil
 func (s *sumStub) Open(context.Context, string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(s.body)), nil
 }
-func (s *sumStub) AppendFrom(ctx context.Context, _ string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+func (s *sumStub) AppendFrom(ctx context.Context, _ string, src model.RangeOpener, _ model.PutParams, offset int64) error {
 	s.appends.Add(1)
 	rc, err := src.OpenAt(ctx, offset)
 	if err != nil {

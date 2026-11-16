@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"sc/model"
 )
 
 func TestFakeDeterministic(t *testing.T) {
@@ -125,7 +127,7 @@ func TestFakeOverlay(t *testing.T) {
 	ctx := context.Background()
 	b, _ := NewFakeBackend("fake://tiny")
 
-	if err := b.CopyFrom(ctx, "d00000/new.txt", strings.NewReader("hello"), 0644); err != nil {
+	if err := b.CopyFrom(ctx, "d00000/new.txt", strings.NewReader("hello"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := b.List(ctx, "d00000")

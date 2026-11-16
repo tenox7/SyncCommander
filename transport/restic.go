@@ -341,15 +341,16 @@ func (b *ResticBackend) SetTimes(context.Context, string, time.Time, time.Time, 
 // CopyFrom uploads an object with a single POST. restic objects are immutable
 // and addressed by content hash, so a partial upload can't be appended to; the
 // copy path falls back here to a full upload when resume isn't possible. An
-// explicit Content-Length (from the copy context) avoids chunked encoding.
-func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+// explicit Content-Length (the size the copy was given) avoids chunked
+// encoding.
+func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	req, err := b.newReq(ctx, "POST", b.objectURL(relPath), src)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if sz, ok := fileSizeFromContext(ctx); ok && sz >= 0 {
-		req.ContentLength = sz
+	if p.SizeKnown() {
+		req.ContentLength = p.Size
 	}
 	resp, err := b.doReq(req)
 	if err != nil {

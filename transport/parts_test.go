@@ -66,7 +66,7 @@ func TestAppendNeverFillsAGap(t *testing.T) {
 			if tc.before != "<missing>" {
 				writeFile(t, filepath.Join(dir, rel), tc.before)
 			}
-			err := r.AppendFrom(ctx, rel, src, 0o644, 20)
+			err := r.AppendFrom(ctx, rel, src, model.PutParams{Mode: 0o644}, 20)
 			if !errors.Is(err, ErrAppendOffset) {
 				t.Errorf("%s: append at 20 onto %s: err = %v, want ErrAppendOffset", name, tc.file, err)
 			}
@@ -76,7 +76,7 @@ func TestAppendNeverFillsAGap(t *testing.T) {
 		}
 		rel := name + "-exact"
 		writeFile(t, filepath.Join(dir, rel), string(src[:20]))
-		if err := r.AppendFrom(ctx, rel, src, 0o644, 20); err != nil {
+		if err := r.AppendFrom(ctx, rel, src, model.PutParams{Mode: 0o644}, 20); err != nil {
 			t.Errorf("%s: append at 20 onto 20 bytes: %v", name, err)
 		}
 		if got := readOr(t, filepath.Join(dir, rel)); got != string(src) {
@@ -112,7 +112,7 @@ func TestCommitPartReplacesTheNameOnly(t *testing.T) {
 			if n, err := pw.PartSize(ctx, rel); n != 0 || err != nil {
 				t.Errorf("%s: PartSize(%s) with no part = %d, %v", name, rel, n, err)
 			}
-			if err := b.CopyFrom(ctx, model.PartPath(rel), strings.NewReader("new "+rel), model.PartMode(0o644)); err != nil {
+			if err := b.CopyFrom(ctx, model.PartPath(rel), strings.NewReader("new "+rel), model.PutParams{Mode: model.PartMode(0o644)}); err != nil {
 				t.Fatalf("%s: writing the part of %s: %v", name, rel, err)
 			}
 			if n, err := pw.PartSize(ctx, rel); n != int64(len("new "+rel)) || err != nil {
@@ -221,21 +221,21 @@ func TestFTPParts(t *testing.T) {
 	}
 	for _, rel := range []string{"missing", "shorter"} {
 		before := stored("/srv/" + rel)
-		if err := b.AppendFrom(ctx, rel, src, 0, 20); !errors.Is(err, ErrAppendOffset) {
+		if err := b.AppendFrom(ctx, rel, src, model.PutParams{}, 20); !errors.Is(err, ErrAppendOffset) {
 			t.Errorf("append at 20 onto %s: err = %v, want ErrAppendOffset", rel, err)
 		}
 		if got := stored("/srv/" + rel); got != before {
 			t.Errorf("append at 20 onto %s left %q, want %q", rel, got, before)
 		}
 	}
-	if err := b.AppendFrom(ctx, "exact", src, 0, 20); err != nil || stored("/srv/exact") != string(src) {
+	if err := b.AppendFrom(ctx, "exact", src, model.PutParams{}, 20); err != nil || stored("/srv/exact") != string(src) {
 		t.Errorf("append at 20 onto 20 bytes: %v, file %q", err, stored("/srv/exact"))
 	}
 
 	if n, err := b.PartSize(ctx, "a.txt"); n != 0 || err != nil {
 		t.Errorf("PartSize with no part = %d, %v", n, err)
 	}
-	if err := b.CopyFrom(ctx, model.PartPath("a.txt"), strings.NewReader("new a"), 0); err != nil {
+	if err := b.CopyFrom(ctx, model.PartPath("a.txt"), strings.NewReader("new a"), model.PutParams{}); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := b.PartSize(ctx, "a.txt"); n != 5 || err != nil {
@@ -247,7 +247,7 @@ func TestFTPParts(t *testing.T) {
 	f.mu.Lock()
 	f.noRenameOver = true
 	f.mu.Unlock()
-	if err := b.CopyFrom(ctx, model.PartPath("b.txt"), strings.NewReader("new b"), 0); err != nil {
+	if err := b.CopyFrom(ctx, model.PartPath("b.txt"), strings.NewReader("new b"), model.PutParams{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.CommitPart(ctx, "b.txt", 0); err != nil || stored("/srv/b.txt") != "new b" {

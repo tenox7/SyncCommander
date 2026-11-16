@@ -3,7 +3,6 @@ package transfer
 import (
 	"context"
 	"io"
-	"os"
 	"sync/atomic"
 	"testing"
 
@@ -12,7 +11,7 @@ import (
 
 type failingAppender struct{ *resumeStub }
 
-func (f *failingAppender) AppendFrom(context.Context, string, model.RangeOpener, os.FileMode, int64) error {
+func (f *failingAppender) AppendFrom(context.Context, string, model.RangeOpener, model.PutParams, int64) error {
 	return io.ErrUnexpectedEOF
 }
 

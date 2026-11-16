@@ -360,7 +360,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.Parallel.Store(1)
 	p.Batched.Store(true)
 	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("BATCH %s (%d files, %s)", c.req.RelPath, batchFiles, model.FormatSize(batchBytes)))
-	err := bs.SendLocalTree(transport.ContextWithFileSize(c.ctx, batchBytes), srcRoot, c.req.RelPath, func(name string) {
+	err := bs.SendLocalTree(c.ctx, srcRoot, c.req.RelPath, func(name string) {
 		p.File.Store(name)
 		if p.Done.Load() < p.Total.Load() {
 			p.Done.Add(1)
@@ -496,8 +496,7 @@ func (c *copier) copyOne(f item) {
 
 	fileCtx := transport.ContextWithProgress(ctx, slotBytes)
 	fileCtx = transport.ContextWithBaseProgress(fileCtx, slotBase)
-	fileCtx = transport.ContextWithFileSize(fileCtx, srcEntry.Size)
-	fileCtx = transport.ContextWithModTime(fileCtx, srcEntry.ModTime)
+	fileCtx = transport.ContextWithProgressBudget(fileCtx, srcEntry.Size)
 
 	verify := resumeVerifier(c.req.VerifyResume, c.req.Scanner, c.src, c.dst, f.relPath, srcEntry.Size)
 	finish := func(how string) {

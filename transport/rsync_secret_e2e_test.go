@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"sc/model"
 )
 
 // R5: the daemon password stays out of error text and the log. Transfers
@@ -46,7 +48,7 @@ func TestRsyncDaemonPasswordStaysSecret(t *testing.T) {
 
 	// The password works, odd characters and all.
 	b := open(secret, "priv")
-	if err := b.CopyFrom(ctx, "dir/up.txt", strings.NewReader("up"), 0o644); err != nil {
+	if err := b.CopyFrom(ctx, "dir/up.txt", strings.NewReader("up"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(mod, "dir", "up.txt")); string(got) != "up" {
@@ -68,9 +70,9 @@ func TestRsyncDaemonPasswordStaysSecret(t *testing.T) {
 
 	// Failures say what went wrong, without the password.
 	writeTestFile(t, mod, "report/2024.txt", "a folder that holds a file")
-	err := b.CopyFrom(ctx, "report", strings.NewReader("a file named report"), 0o644)
+	err := b.CopyFrom(ctx, "report", strings.NewReader("a file named report"), model.PutParams{Mode: 0o644})
 	leaks("CopyFrom over a folder that holds files", err, "report")
-	leaks("CopyFrom to a module that is not there", open(secret, "nosuchmod").CopyFrom(ctx, "x.txt", strings.NewReader("x"), 0o644), "nosuchmod")
+	leaks("CopyFrom to a module that is not there", open(secret, "nosuchmod").CopyFrom(ctx, "x.txt", strings.NewReader("x"), model.PutParams{Mode: 0o644}), "nosuchmod")
 	leaks("Mkdir with a wrong password", open("Sekr1t-wrong", "priv").Mkdir(ctx, "other", 0o755), "auth failed")
 	leaks("RecvToLocalFile of a file that is not there", b.RecvToLocalFile(ctx, "missing.txt", filepath.Join(t.TempDir(), "missing.txt")), "missing.txt")
 
@@ -104,7 +106,7 @@ func TestRsyncReadOnlyModuleAbortsOperation(t *testing.T) {
 	for name, b := range map[string]*RsyncBackend{"stock rsync": stock, "gorsyncd": gb} {
 		ctx, cancel := context.WithCancel(context.Background())
 		ctx = ContextWithFatalCancel(ctx, cancel)
-		err := b.CopyFrom(ctx, "x.txt", strings.NewReader("x"), 0o644)
+		err := b.CopyFrom(ctx, "x.txt", strings.NewReader("x"), model.PutParams{Mode: 0o644})
 		switch {
 		case err == nil:
 			t.Errorf("%s: CopyFrom to a read-only module: no error", name)

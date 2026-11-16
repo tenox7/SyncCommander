@@ -15,6 +15,8 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"sc/model"
 )
 
 // startSFTPServer runs an in-process sshd offering only the sftp subsystem:
@@ -98,7 +100,7 @@ func TestSFTPBackendE2E(t *testing.T) {
 	ctx := context.Background()
 
 	data := bytes.Repeat([]byte("sftp 255K packets\n"), 60000)
-	if err := b.CopyFrom(ctx, "dir/a.bin", bytes.NewReader(data), 0644); err != nil {
+	if err := b.CopyFrom(ctx, "dir/a.bin", bytes.NewReader(data), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	rc, err := b.Open(ctx, "dir/a.bin")

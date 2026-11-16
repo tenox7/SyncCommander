@@ -180,8 +180,8 @@ func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime,
 	return setTimes(b.LocalPath(relPath), mtime, atime, btime)
 }
 
-func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
-	f, err := b.create(relPath, mode)
+func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
+	f, err := b.create(relPath, p.Mode)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 
 // AppendFrom writes the source from offset on at the end of relPath, which
 // must hold exactly offset bytes (see openEnd).
-func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ model.PutParams, offset int64) error {
 	f, err := b.openEnd(relPath, offset)
 	if err != nil {
 		return err

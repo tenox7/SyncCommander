@@ -108,7 +108,7 @@ func TestSpoolIsSeenWorking(t *testing.T) {
 	var counter atomic.Int64
 	dst := filepath.Join(t.TempDir(), "f")
 	err := WithStallGuard(context.Background(), &counter, time.Second, func(ctx context.Context) error {
-		return spoolTo(ctx, &slowSource{n: 10}, dst, 0o644)
+		return spoolTo(ctx, &slowSource{n: 10}, dst, model.PutParams{Mode: 0o644})
 	})
 	if err != nil {
 		t.Fatalf("a 3 s spool of a slow source = %v, want it to finish", err)
@@ -124,7 +124,7 @@ func TestSpoolIsSeenWorking(t *testing.T) {
 func TestSelfCountedDownloadIsSeenRead(t *testing.T) {
 	var counter atomic.Int64
 	err := WithStallGuard(context.Background(), &counter, time.Second, func(ctx context.Context) error {
-		ctx = ContextWithFileSize(ContextWithProgress(ctx, &counter), 10)
+		ctx = ContextWithProgressBudget(ContextWithProgress(ctx, &counter), 10)
 		rc, err := rsyncOpenViaTemp(ctx, "f.bin", 0, func(dstDir string) error {
 			return os.WriteFile(filepath.Join(dstDir, "f.bin"), []byte("0123456789"), 0o644)
 		})
@@ -162,8 +162,8 @@ func TestUncreditedPushIsSeenMoving(t *testing.T) {
 	body := strings.Repeat("z", 400<<10) // 3 s at 100 KiB/s after a 1 s burst
 	var counter atomic.Int64
 	err = WithStallGuard(context.Background(), &counter, time.Second, func(ctx context.Context) error {
-		ctx = ContextWithFileSize(ContextWithProgress(ctx, &counter), int64(len(body)))
-		return b.CopyFrom(ctx, "f.bin", WrapPreCounted(io.NopCloser(strings.NewReader(body))), 0o644)
+		ctx = ContextWithProgress(ctx, &counter)
+		return b.CopyFrom(ctx, "f.bin", WrapPreCounted(io.NopCloser(strings.NewReader(body))), model.PutParams{Size: int64(len(body)), Mode: 0o644})
 	})
 	if err != nil {
 		t.Fatalf("a 3 s push = %v, want it to finish", err)
@@ -181,9 +181,9 @@ type ownerStub struct {
 }
 
 func (s *ownerStub) OwnsCopyProgress() bool { return true }
-func (s *ownerStub) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (s *ownerStub) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	s.sawPreCounted = IsPreCounted(src)
-	return s.copyStub.CopyFrom(ctx, relPath, src, mode)
+	return s.copyStub.CopyFrom(ctx, relPath, src, p)
 }
 
 // F21: every remote backend runs inside the reconnecting wrapper, which
@@ -201,7 +201,7 @@ func TestWrapperPassesOnProgressOwnership(t *testing.T) {
 	if owner, ok := b.(ProgressOwner); !ok || !owner.OwnsCopyProgress() {
 		t.Error("the wrapper does not say its backend counts its own copy progress")
 	}
-	if err := b.CopyFrom(ctx, "f", WrapPreCounted(io.NopCloser(strings.NewReader("abc"))), 0o644); err != nil {
+	if err := b.CopyFrom(ctx, "f", WrapPreCounted(io.NopCloser(strings.NewReader("abc"))), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	if !inner.sawPreCounted {

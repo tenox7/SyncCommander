@@ -35,12 +35,12 @@ func (b *listStub) Checksum(context.Context, string) (string, error) { return ""
 func (b *listStub) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
 	return nil
 }
-func (b *listStub) CopyFrom(context.Context, string, io.Reader, os.FileMode) error { return nil }
-func (b *listStub) Mkdir(context.Context, string, os.FileMode) error               { return nil }
-func (b *listStub) Rename(context.Context, string, string) error                   { return nil }
-func (b *listStub) Remove(context.Context, string) error                           { return nil }
-func (b *listStub) RemoveAll(context.Context, string) error                        { return nil }
-func (b *listStub) Open(context.Context, string) (io.ReadCloser, error)            { return nil, nil }
+func (b *listStub) CopyFrom(context.Context, string, io.Reader, model.PutParams) error { return nil }
+func (b *listStub) Mkdir(context.Context, string, os.FileMode) error                   { return nil }
+func (b *listStub) Rename(context.Context, string, string) error                       { return nil }
+func (b *listStub) Remove(context.Context, string) error                               { return nil }
+func (b *listStub) RemoveAll(context.Context, string) error                            { return nil }
+func (b *listStub) Open(context.Context, string) (io.ReadCloser, error)                { return nil, nil }
 
 // A copy whose subtree cannot be listed is abandoned; that must show up as a
 // failure in the progress counters, not only as a log line.

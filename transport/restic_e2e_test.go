@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"sc/model"
 )
 
 func startRcloneRestic(t *testing.T, root string) (port int, stop func()) {
@@ -56,8 +58,7 @@ func sha256hex(b []byte) string {
 
 func resticPut(t *testing.T, b *ResticBackend, relPath string, content []byte) {
 	t.Helper()
-	ctx := ContextWithFileSize(context.Background(), int64(len(content)))
-	if err := b.CopyFrom(ctx, relPath, bytes.NewReader(content), 0644); err != nil {
+	if err := b.CopyFrom(context.Background(), relPath, bytes.NewReader(content), model.PutParams{Size: int64(len(content)), Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom %s: %v", relPath, err)
 	}
 }

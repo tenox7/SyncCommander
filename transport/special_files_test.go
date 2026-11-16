@@ -100,7 +100,7 @@ func TestLocalRefusesLinksAndPipes(t *testing.T) {
 		}
 	}
 	within(t, "CopyFrom onto a link", 5*time.Second, pipe, func() {
-		refused("CopyFrom onto a link", b.CopyFrom(ctx, "link.txt", strings.NewReader("NEW DATA"), 0o644))
+		refused("CopyFrom onto a link", b.CopyFrom(ctx, "link.txt", strings.NewReader("NEW DATA"), model.PutParams{Mode: 0o644}))
 	})
 	within(t, "CopyFrom into a link to a folder", 5*time.Second, pipe, func() {
 		refused("Mkdir at a link to a folder", b.Mkdir(ctx, "dirlink", 0o755))
@@ -110,7 +110,7 @@ func TestLocalRefusesLinksAndPipes(t *testing.T) {
 		refused("Checksum of a link", err)
 	})
 	within(t, "CopyFrom onto a named pipe", 5*time.Second, pipe, func() {
-		refused("CopyFrom onto a named pipe", b.CopyFrom(ctx, "pipe", strings.NewReader("x"), 0o644))
+		refused("CopyFrom onto a named pipe", b.CopyFrom(ctx, "pipe", strings.NewReader("x"), model.PutParams{Mode: 0o644}))
 	})
 	within(t, "Open of a named pipe", 5*time.Second, pipe, func() {
 		r, err := b.Open(ctx, "pipe")

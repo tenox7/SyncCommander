@@ -128,7 +128,7 @@ func TestRcloneS3E2E(t *testing.T) {
 		t.Fatalf("openat: %q", got)
 	}
 
-	if err := b.CopyFrom(ctx, "new/dir/up.txt", sizedRd{Reader: strings.NewReader("uploaded"), n: 8}, 0644); err != nil {
+	if err := b.CopyFrom(ctx, "new/dir/up.txt", strings.NewReader("uploaded"), model.PutParams{Size: 8, Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
 	rd, _ = b.Open(ctx, "new/dir/up.txt")

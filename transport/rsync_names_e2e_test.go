@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/gokrazy/rsync/rsyncd"
+
+	"sc/model"
 )
 
 // R1: a stock rsync daemon reads each part of a path argument that holds *,
@@ -198,7 +200,7 @@ func checkDaemonNames(t *testing.T, url, mod string) {
 		t.Errorf("md4 of s2/d[1]/victim.txt = %q, %v; of the same bytes in plain/victim.txt %q, %v", sum, err1, same, err2)
 	}
 
-	if err := b.AppendFrom(ctx, "s2/d[1]/grow.bin", memRangeOpener(body), 0o644, 4000); err != nil {
+	if err := b.AppendFrom(ctx, "s2/d[1]/grow.bin", memRangeOpener(body), model.PutParams{Mode: 0o644}, 4000); err != nil {
 		t.Errorf("AppendFrom: %v", err)
 	}
 	if got := read("s2/d[1]/grow.bin"); got != string(body) {
@@ -241,7 +243,7 @@ func checkDaemonNames(t *testing.T, url, mod string) {
 	if err := b.Remove(ctx, "gone[1]/x.txt"); err == nil {
 		t.Error("Remove(gone[1]/x.txt) with no gone[1] folder succeeded")
 	}
-	if err := b.AppendFrom(ctx, "gone[1]/grow.bin", memRangeOpener(body), 0o644, 4000); err == nil {
+	if err := b.AppendFrom(ctx, "gone[1]/grow.bin", memRangeOpener(body), model.PutParams{Mode: 0o644}, 4000); err == nil {
 		t.Error("AppendFrom(gone[1]/grow.bin) with no gone[1] folder succeeded")
 	}
 	names, _ := os.ReadDir(mod)

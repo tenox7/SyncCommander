@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"sc/model"
 )
 
 const wdCollectionBody = `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`
@@ -173,7 +175,7 @@ func TestWebDAVEnsureDirOnceUnderRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := b.CopyFrom(context.Background(), fmt.Sprintf("a/b/c/f%d", i), strings.NewReader("x"), 0644); err != nil {
+			if err := b.CopyFrom(context.Background(), fmt.Sprintf("a/b/c/f%d", i), strings.NewReader("x"), model.PutParams{Mode: 0o644}); err != nil {
 				t.Error(err)
 			}
 		}()

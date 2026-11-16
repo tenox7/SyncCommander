@@ -34,7 +34,7 @@ func (s *copyStub) Remove(context.Context, string) error                { return
 func (s *copyStub) RemoveAll(context.Context, string) error             { return nil }
 func (s *copyStub) Open(context.Context, string) (io.ReadCloser, error) { return nil, nil }
 
-func (s *copyStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ os.FileMode) error {
+func (s *copyStub) CopyFrom(_ context.Context, _ string, src io.Reader, _ model.PutParams) error {
 	s.calls++
 	if s.calls <= s.failFor {
 		if s.consume > 0 {
@@ -63,7 +63,7 @@ func TestLazyCopyFromRetriesUntouchedStream(t *testing.T) {
 
 	inner := &copyStub{failFor: 1}
 	b := newLazyFor(inner)
-	if err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), 0o644); err != nil {
+	if err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), model.PutParams{Mode: 0o644}); err != nil {
 		t.Fatalf("CopyFrom = %v, want nil after retry", err)
 	}
 	if inner.calls != 2 {
@@ -83,7 +83,7 @@ func TestLazyCopyFromDoesNotRetryConsumedStream(t *testing.T) {
 
 	inner := &copyStub{failFor: 1, consume: 3}
 	b := newLazyFor(inner)
-	err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), 0o644)
+	err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), model.PutParams{Mode: 0o644})
 	if err == nil {
 		t.Fatal("CopyFrom = nil, want the error to surface")
 	}
@@ -101,7 +101,7 @@ func TestLazyCopyFromGivesUpAfterMaxRetries(t *testing.T) {
 
 	inner := &copyStub{failFor: 99}
 	b := newLazyFor(inner)
-	if err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), 0o644); err == nil {
+	if err := b.CopyFrom(context.Background(), "f", strings.NewReader("hello"), model.PutParams{Mode: 0o644}); err == nil {
 		t.Fatal("CopyFrom = nil, want an error")
 	}
 	if inner.calls != 2 {

@@ -378,9 +378,9 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 // SendLocalFile sends an existing local file directly, no tmp copy. The push
 // credits progress as data flows so the stall guard sees movement, and the
 // final top-up covers whatever delta-sync did not send.
-func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, _ os.FileMode) error {
+func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, p model.PutParams) error {
 	var adder *CappedAdder
-	fileSize, _ := fileSizeFromContext(ctx)
+	fileSize := max(p.Size, 0)
 	if counter := progressFromContext(ctx); counter != nil && fileSize > 0 {
 		adder = NewCappedAdder(counter, fileSize)
 	}
@@ -393,7 +393,7 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 // the append. The dst is first sized to offset so a remote that shrank
 // between the size probe and the upload cannot leave a hole. A source without
 // a local path is spooled to a tmpfile.
-func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, mode os.FileMode, offset int64) error {
+func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	srcPath := src.LocalPath()
 	if srcPath == "" {
 		tmpDir, err := os.MkdirTemp("", "rsync-ssh-append-*")
@@ -402,7 +402,7 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src mo
 		}
 		defer os.RemoveAll(tmpDir)
 		srcPath = filepath.Join(tmpDir, filepath.Base(relPath))
-		if err := spoolTo(ctx, src, srcPath, mode); err != nil {
+		if err := spoolTo(ctx, src, srcPath, p); err != nil {
 			return err
 		}
 	}
@@ -416,14 +416,14 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src mo
 	return b.sendFile(ctx, label, srcPath, relPath, truncateCmd(b.abs(relPath), offset), []string{"--append-verify"}, adder, tailSize)
 }
 
-func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, mode os.FileMode) error {
+func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	tmpDir, err := os.MkdirTemp("", "rsync-ssh-ul-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 	tmpFile := filepath.Join(tmpDir, filepath.Base(relPath))
-	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, mode)
+	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, p)
 	if err != nil {
 		return err
 	}

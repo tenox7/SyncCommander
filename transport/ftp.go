@@ -720,7 +720,7 @@ func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, raw net.
 	return err
 }
 
-func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ os.FileMode) error {
+func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, _ model.PutParams) error {
 	Log.Add("ftp", DirOut, "STOR "+relPath)
 	return b.store(ctx, relPath, src, 0)
 }
@@ -728,7 +728,7 @@ func (b *FTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 // AppendFrom writes the source from offset on at the end of relPath, which
 // must hold exactly offset bytes by SIZE (L14, S8): REST past the end of a
 // shorter file leaves a gap of zeros. A server without SIZE gets no append.
-func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ os.FileMode, offset int64) error {
+func (b *FTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, _ model.PutParams, offset int64) error {
 	size, err := b.size(ctx, relPath)
 	if err != nil {
 		return fmt.Errorf("ftp: size of %s: %v: %w", relPath, err, ErrAppendOffset)
