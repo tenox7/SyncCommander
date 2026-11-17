@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,22 +18,37 @@ import (
 // startRsyncd runs a stock rsync daemon with one writable module, backups.
 func startRsyncd(t *testing.T) (url, moduleDir string) {
 	t.Helper()
+	port, root := startRsyncdWith(t, func(root string) string {
+		return "[backups]\n  path = " + filepath.Join(root, "module") + "\n  read only = no\n"
+	})
+	return fmt.Sprintf("rsync://127.0.0.1:%d/backups", port), filepath.Join(root, "module")
+}
+
+// startRsyncdWith runs a stock rsync daemon with the modules modules gives
+// for root, the daemon's own folder. Each module's folder is made, so a
+// module path must be under root.
+func startRsyncdWith(t *testing.T, modules func(root string) string) (port int, root string) {
+	t.Helper()
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("no rsync binary")
 	}
-	root := t.TempDir()
+	root = t.TempDir()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
+	port = l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	moduleDir = filepath.Join(root, "module")
-	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
-		t.Fatal(err)
+	mods := modules(root)
+	for _, line := range strings.Split(mods, "\n") {
+		if dir, ok := strings.CutPrefix(strings.TrimSpace(line), "path = "); ok {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	conf := filepath.Join(root, "rsyncd.conf")
-	cfg := fmt.Sprintf("use chroot = no\nport = %d\n[backups]\n  path = %s\n  read only = no\n", port, moduleDir)
+	cfg := fmt.Sprintf("use chroot = no\nport = %d\n%s", port, mods)
 	if err := os.WriteFile(conf, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -44,12 +60,12 @@ func startRsyncd(t *testing.T) (url, moduleDir string) {
 	for range 250 {
 		if c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
 			c.Close()
-			return fmt.Sprintf("rsync://127.0.0.1:%d/backups", port), moduleDir
+			return port, root
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("rsync daemon did not come up")
-	return "", ""
+	return 0, ""
 }
 
 // R3, end to end as the program runs it (lazy wrapper, deep scan): a folder
