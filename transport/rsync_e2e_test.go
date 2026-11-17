@@ -261,6 +261,24 @@ func TestRsyncDaemonPerBackendAuth(t *testing.T) {
 	}
 }
 
+// localRangeOpener is a source with a local path: rel under a local base,
+// read at an offset by a seek, as the copy engine's opener reads a local
+// file (transfer's trackedRangeOpener).
+type localRangeOpener struct {
+	b    *LocalBackend
+	rel  string
+	size int64
+}
+
+func (o localRangeOpener) Size() int64       { return o.size }
+func (o localRangeOpener) LocalPath() string { return o.b.LocalPath(o.rel) }
+func (o localRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
+	return o.b.Open(ctx, o.rel)
+}
+func (o localRangeOpener) OpenAt(ctx context.Context, off int64) (io.ReadCloser, error) {
+	return o.b.OpenAt(ctx, o.rel, off)
+}
+
 // memRangeOpener is a source with no local path, forcing the spool branch.
 type memRangeOpener []byte
 
@@ -289,7 +307,7 @@ func TestRsyncAppendFrom(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srcDir, "big.bin"), body, 0644); err != nil {
 		t.Fatal(err)
 	}
-	local := &model.BackendRangeOpener{Backend: NewLocalBackend(srcDir), RelPath: "big.bin", FileSize: size}
+	local := localRangeOpener{NewLocalBackend(srcDir), "big.bin", size}
 	cases := []struct {
 		name, rel string
 		src       model.RangeOpener

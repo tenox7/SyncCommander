@@ -326,57 +326,6 @@ type BatchSender interface {
 	SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error
 }
 
-// BackendRangeOpener adapts a Backend + relPath into a RangeOpener. OpenAt
-// uses the backend's SeekableOpener path when its Caps has it, otherwise
-// opens from byte 0 and discards the prefix.
-type BackendRangeOpener struct {
-	Backend  Backend
-	RelPath  string
-	FileSize int64
-}
-
-func (r *BackendRangeOpener) Size() int64 { return r.FileSize }
-
-func (r *BackendRangeOpener) LocalPath() string {
-	if lp, ok := r.Backend.(LocalFS); ok {
-		return lp.LocalPath(r.RelPath)
-	}
-	return ""
-}
-
-func (r *BackendRangeOpener) Open(ctx context.Context) (io.ReadCloser, error) {
-	return r.Backend.Open(ctx, r.RelPath)
-}
-
-func (r *BackendRangeOpener) OpenAt(ctx context.Context, offset int64) (io.ReadCloser, error) {
-	if offset == 0 {
-		return r.Backend.Open(ctx, r.RelPath)
-	}
-	if seeker, ok := r.Backend.(SeekableOpener); ok && seeks(ctx, r.Backend) {
-		rd, err := seeker.OpenAt(ctx, r.RelPath, offset)
-		if err == nil {
-			return rd, nil
-		}
-		// Fall back below on any error.
-	}
-	rd, err := r.Backend.Open(ctx, r.RelPath)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := io.CopyN(io.Discard, rd, offset); err != nil {
-		rd.Close()
-		return nil, err
-	}
-	return rd, nil
-}
-
-// seeks reports whether b opens a file at an offset (Caps.OpenAt); false
-// when that cannot be told: the Open that follows says why.
-func seeks(ctx context.Context, b Backend) bool {
-	caps, err := b.Capabilities(ctx)
-	return err == nil && caps.OpenAt
-}
-
 // RecursivePreloader is implemented by backends where one recursive listing
 // call is dramatically cheaper than per-directory List calls (e.g. rsync over
 // the network). When triggered, the backend kicks off a single recursive list

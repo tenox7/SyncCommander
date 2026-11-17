@@ -133,7 +133,7 @@ func TestRsyncAppendVerifyHealsChangedPrefix(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srcDir, "big.bin"), body, 0644); err != nil {
 		t.Fatal(err)
 	}
-	src := &model.BackendRangeOpener{Backend: NewLocalBackend(srcDir), RelPath: "big.bin", FileSize: size}
+	src := localRangeOpener{NewLocalBackend(srcDir), "big.bin", size}
 	offset := size/2 + 4099
 	corrupt := slices.Clone(body[:offset])
 	corrupt[offset/2] ^= 0xff
