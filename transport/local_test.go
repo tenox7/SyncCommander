@@ -32,8 +32,8 @@ func TestLocalSetTimesZeroAtimeFallsBackToMtime(t *testing.T) {
 	if !info.ModTime().Equal(mtime) {
 		t.Errorf("mtime = %v, want %v", info.ModTime(), mtime)
 	}
-	if !e.ATime.IsZero() && !e.ATime.Equal(mtime) {
-		t.Errorf("atime = %v, want %v", e.ATime, mtime)
+	if !e.ATime.IsZero() && !e.ATime.Time().Equal(mtime) {
+		t.Errorf("atime = %v, want %v", e.ATime.Time(), mtime)
 	}
 }
 

@@ -8,14 +8,17 @@ import (
 	"time"
 )
 
+// A FileEntry is one listed file or folder; a tree keeps two for each node.
+// ModTime, which every compare reads, is a time.Time; the access, change
+// and birth times, rarely compared, take a third of the room (F13).
 type FileEntry struct {
 	RelPath   string
 	Name      string
 	Size      int64
 	ModTime   time.Time
-	ATime     time.Time
-	CTime     time.Time
-	BirthTime time.Time
+	ATime     UnixNano
+	CTime     UnixNano
+	BirthTime UnixNano
 	IsDir     bool
 	Mode      os.FileMode
 }

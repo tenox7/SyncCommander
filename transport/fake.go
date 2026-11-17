@@ -306,9 +306,9 @@ func (b *FakeBackend) genEntries(relDir string) []model.FileEntry {
 func (b *FakeBackend) fillTimes(e *model.FileEntry, rel string) {
 	h := b.hash(rel, fakeSaltTime)
 	e.ModTime = fakeEpoch.Add(time.Duration(h%(5*365*24*3600)) * time.Second)
-	e.ATime = e.ModTime.Add(time.Duration(h%86400) * time.Second)
-	e.CTime = e.ModTime
-	e.BirthTime = e.ModTime.Add(-time.Duration(h%(30*24*3600)) * time.Second)
+	e.ATime = model.NanoOf(e.ModTime.Add(time.Duration(h%86400) * time.Second))
+	e.CTime = model.NanoOf(e.ModTime)
+	e.BirthTime = model.NanoOf(e.ModTime.Add(-time.Duration(h%(30*24*3600)) * time.Second))
 }
 
 func (b *FakeBackend) hash(relPath string, salt uint64) uint64 {
@@ -566,10 +566,10 @@ func (b *FakeBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 		e.ModTime = mtime
 	}
 	if !atime.IsZero() {
-		e.ATime = atime
+		e.ATime = model.NanoOf(atime)
 	}
 	if !btime.IsZero() {
-		e.BirthTime = btime
+		e.BirthTime = model.NanoOf(btime)
 	}
 	b.putMut(relPath, &fakeMut{entry: e})
 	return nil
@@ -596,10 +596,11 @@ func (b *FakeBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 		mode = 0644
 	}
 	now := time.Now()
+	stamp := model.NanoOf(now)
 	name := strings.TrimPrefix(relPath[len(model.DirOf(relPath)):], "/")
 	b.putMut(relPath, &fakeMut{entry: model.FileEntry{
 		RelPath: relPath, Name: name, Size: size, Mode: mode,
-		ModTime: now, ATime: now, CTime: now, BirthTime: now,
+		ModTime: now, ATime: stamp, CTime: stamp, BirthTime: stamp,
 	}})
 	if !b.noData {
 		b.mu.Lock()
@@ -618,10 +619,11 @@ func (b *FakeBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMod
 			break
 		}
 		now := time.Now()
+		stamp := model.NanoOf(now)
 		name := strings.TrimPrefix(p[len(model.DirOf(p)):], "/")
 		b.putMut(p, &fakeMut{entry: model.FileEntry{
 			RelPath: p, Name: name, IsDir: true, Mode: os.ModeDir | mode.Perm(),
-			ModTime: now, ATime: now, CTime: now, BirthTime: now,
+			ModTime: now, ATime: stamp, CTime: stamp, BirthTime: stamp,
 		}})
 	}
 	return nil

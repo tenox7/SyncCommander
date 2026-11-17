@@ -24,7 +24,9 @@ type CompareOpts struct {
 	IgnoreTZDST bool
 }
 
-type AttrStatus int
+// AttrStatus and Presence are a byte each: every node keeps eight of them
+// (F13).
+type AttrStatus uint8
 
 const (
 	AttrUnknown AttrStatus = iota
@@ -34,7 +36,7 @@ const (
 	AttrNA
 )
 
-type Presence int
+type Presence uint8
 
 const (
 	PresenceBoth Presence = iota
@@ -89,7 +91,7 @@ type SideState struct {
 	// preserving merge keeps the sum only while that fingerprint still holds.
 	Checksum        string
 	ChecksumSize    int64
-	ChecksumModTime time.Time
+	ChecksumModTime UnixNano
 	ChecksumDone    bool // file: this side's pass finished
 	ChecksumErr     bool
 	ChecksumPending bool // dir: checksum work is scheduled on this side
@@ -98,7 +100,7 @@ type SideState struct {
 
 // dropChecksum forgets the cached sum and its fingerprint.
 func (st *SideState) dropChecksum() {
-	st.Checksum, st.ChecksumSize, st.ChecksumModTime = "", 0, time.Time{}
+	st.Checksum, st.ChecksumSize, st.ChecksumModTime = "", 0, 0
 }
 
 // SideTotals is a directory's subtree rollup on one side.
@@ -112,41 +114,76 @@ func (t *SideTotals) add(o SideTotals) {
 	t.Size, t.Files, t.Dirs = t.Size+o.Size, t.Files+o.Files, t.Dirs+o.Dirs
 }
 
+// A TreeNode is one file or folder of the tree, which holds one for each:
+// at ten million files every byte of it is ten megabytes. The fields go from
+// the largest to the smallest, so the small ones pack together, and what
+// only a folder needs a file does not carry (F13).
 type TreeNode struct {
-	RelPath string
-	Name    string
-	IsDir   bool
-	// IsSpecial marks a row of links, pipes or devices (FileEntry.IsSpecial):
-	// its own kind, so a file of the same name is a twin, as a folder is.
-	IsSpecial      bool
-	Sides          [2]SideState // indexed by Side
-	Parent         *TreeNode
-	Compare        CompareResult
-	Children       []*TreeNode
-	Expanded       bool
-	Listed         bool
-	ListErr        bool
-	SubtreePending bool
-	// ChecksumInFlight counts files under this dir being summed on each side.
-	// Workers bump it without the tree lock, so it stays outside Sides to keep
-	// that array assignable.
-	ChecksumInFlight       [2]atomic.Int32
-	ChecksumCountedDone    bool
-	SubtreeBothFiles       int
-	SubtreeChecksumPending int
-	SubtreeChecksumAnyDiff bool
-	Depth                  int
-	ChildStatus            AttrStatus
-	// Totals and the SubtreeXxx, ChildStatus, Guides and IsLast fields are
+	RelPath  string
+	Name     string
+	Sides    [2]SideState // indexed by Side
+	Parent   *TreeNode
+	Children []*TreeNode
+	Depth    int
+	// The totals, the SubtreeXxx fields, ChildStatus, Guides and IsLast are
 	// written only by PropagateStatus and FlattenTree on the UI goroutine.
 	// The scanner never touches them, which is why the UI may refresh them
 	// while holding only Scanner.ReadTree's shared lock.
-	Totals [2]SideTotals
+	//
 	// Guides is a bitmask of the vertical tree-guide columns to the left of
 	// this row: bit i is set when the ancestor at depth i has more siblings
 	// below it. Valid bits are [0, Depth); depths past 64 render unguided.
 	Guides uint64
-	IsLast bool
+	// totals is what a folder holds on each side (Totals): nil for a file,
+	// and for a folder that holds nothing.
+	totals *[2]SideTotals
+	// ChecksumInFlight counts files under this dir being summed on each side.
+	// Workers bump it without the tree lock, so it stays outside Sides to keep
+	// that array assignable.
+	ChecksumInFlight       [2]atomic.Int32
+	SubtreeBothFiles       int32
+	SubtreeChecksumPending int32
+	Compare                CompareResult
+	IsDir                  bool
+	// IsSpecial marks a row of links, pipes or devices (FileEntry.IsSpecial):
+	// its own kind, so a file of the same name is a twin, as a folder is.
+	IsSpecial              bool
+	Expanded               bool
+	Listed                 bool
+	ListErr                bool
+	SubtreePending         bool
+	ChecksumCountedDone    bool
+	SubtreeChecksumAnyDiff bool
+	ChildStatus            AttrStatus
+	IsLast                 bool
+}
+
+// Totals is what a folder holds on side, as the last rollup counted it:
+// nothing for a file.
+func (n *TreeNode) Totals(side Side) SideTotals {
+	if n.totals == nil {
+		return SideTotals{}
+	}
+	return n.totals[side]
+}
+
+// setTotals keeps a folder's rollup, in a block only a folder that holds
+// something has.
+func (n *TreeNode) setTotals(t [2]SideTotals) {
+	if n.totals == nil {
+		if t == ([2]SideTotals{}) {
+			return
+		}
+		n.totals = new([2]SideTotals)
+	}
+	*n.totals = t
+}
+
+// SwapTotals swaps the sides of the rollup, as the sides swap.
+func (n *TreeNode) SwapTotals() {
+	if n.totals != nil {
+		n.totals[0], n.totals[1] = n.totals[1], n.totals[0]
+	}
 }
 
 // Entries returns both sides' entries.
@@ -382,7 +419,7 @@ func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
 	}
 	for s := range n.Sides {
 		st, e := &n.Sides[s], n.Sides[s].Entry
-		if e == nil || changed.has(Side(s), e.RelPath) || st.ChecksumSize != e.Size || !st.ChecksumModTime.Equal(e.ModTime) {
+		if e == nil || changed.has(Side(s), e.RelPath) || st.ChecksumSize != e.Size || st.ChecksumModTime != NanoOf(e.ModTime) {
 			st.dropChecksum()
 		}
 	}
@@ -453,9 +490,9 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 	}
 	n.Compare.Size = cmpAttr(l.Size == r.Size)
 	n.Compare.ModTime = cmpTime(l.ModTime, r.ModTime, opts)
-	n.Compare.ATime = cmpTime(l.ATime, r.ATime, opts)
-	n.Compare.CTime = cmpTime(l.CTime, r.CTime, opts)
-	n.Compare.BirthTime = cmpTime(l.BirthTime, r.BirthTime, opts)
+	n.Compare.ATime = cmpTime(l.ATime.Time(), r.ATime.Time(), opts)
+	n.Compare.CTime = cmpTime(l.CTime.Time(), r.CTime.Time(), opts)
+	n.Compare.BirthTime = cmpTime(l.BirthTime.Time(), r.BirthTime.Time(), opts)
 	n.Compare.Mode = cmpAttr(l.Mode == r.Mode)
 }
 
@@ -592,7 +629,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 	}
 	if !node.Listed {
 		node.ChildStatus = AttrUnknown
-		node.Totals = [2]SideTotals{}
+		node.setTotals([2]SideTotals{})
 		node.SubtreePending = true
 		node.SubtreeBothFiles = 0
 		node.SubtreeChecksumPending = 0
@@ -602,8 +639,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 	result := AttrEqual
 	var tot [2]SideTotals
 	pending := false
-	bothFiles := 0
-	cksumPending := 0
+	var bothFiles, cksumPending int32
 	anyDiff := false
 	for _, child := range node.Children {
 		s := propagateStatus(child, opts, st)
@@ -640,7 +676,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 		if child.IsDir {
 			st.TotalDirs++
 			for s := range tot {
-				tot[s].add(child.Totals[s])
+				tot[s].add(child.Totals(Side(s)))
 				if child.Sides[s].Entry != nil {
 					tot[s].Dirs++
 				}
@@ -675,7 +711,7 @@ func propagateStatus(node *TreeNode, opts *CompareOpts, st *TreeStats) AttrStatu
 			st.FilesRightOnly++
 		}
 	}
-	node.Totals = tot
+	node.setTotals(tot)
 	node.SubtreePending = pending
 	node.SubtreeBothFiles = bothFiles
 	node.SubtreeChecksumPending = cksumPending
@@ -828,9 +864,9 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	lsraw, rsraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("%d", e.Size) })
 	attrs = append(attrs, attr{"size", ls, rs, lsraw, rsraw, node.Compare.Size, false, sizeWin, 0})
 	addTime("mtime", func(e *FileEntry) time.Time { return e.ModTime }, node.Compare.ModTime, opts != nil && opts.ModTime)
-	addTime("atime", func(e *FileEntry) time.Time { return e.ATime }, node.Compare.ATime, opts != nil && opts.ATime)
-	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime }, node.Compare.CTime, opts != nil && opts.CTime)
-	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime }, node.Compare.BirthTime, opts != nil && opts.BirthTime)
+	addTime("atime", func(e *FileEntry) time.Time { return e.ATime.Time() }, node.Compare.ATime, opts != nil && opts.ATime)
+	addTime("ctime", func(e *FileEntry) time.Time { return e.CTime.Time() }, node.Compare.CTime, opts != nil && opts.CTime)
+	addTime("btime", func(e *FileEntry) time.Time { return e.BirthTime.Time() }, node.Compare.BirthTime, opts != nil && opts.BirthTime)
 	lv, rv := val(func(e *FileEntry) string { return e.Mode.String() })
 	lpraw, rpraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("0%o", e.Mode.Perm()) })
 	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0, 0})

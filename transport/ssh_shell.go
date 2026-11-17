@@ -402,8 +402,8 @@ func parseListRecord(rec string) (listRecord, bool) {
 	e := model.FileEntry{
 		Size:    size,
 		ModTime: parseEpoch(f[1]),
-		ATime:   parseEpoch(f[2]),
-		CTime:   parseEpoch(f[3]),
+		ATime:   model.NanoOf(parseEpoch(f[2])),
+		CTime:   model.NanoOf(parseEpoch(f[3])),
 		IsDir:   f[5] == "d" || f[5] == "D",
 		Mode:    os.FileMode(modeVal),
 	}

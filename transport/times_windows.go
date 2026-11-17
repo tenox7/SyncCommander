@@ -13,9 +13,9 @@ func fillTimes(entry *model.FileEntry, info os.FileInfo) {
 	if !ok {
 		return
 	}
-	entry.ATime = time.Unix(0, d.LastAccessTime.Nanoseconds())
-	entry.CTime = time.Unix(0, d.CreationTime.Nanoseconds())
-	entry.BirthTime = time.Unix(0, d.CreationTime.Nanoseconds())
+	entry.ATime = model.NanoOf(time.Unix(0, d.LastAccessTime.Nanoseconds()))
+	entry.CTime = model.NanoOf(time.Unix(0, d.CreationTime.Nanoseconds()))
+	entry.BirthTime = model.NanoOf(time.Unix(0, d.CreationTime.Nanoseconds()))
 }
 
 // setTimes leaves the creation time alone when btime is unknown; passing the

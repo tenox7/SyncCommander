@@ -13,8 +13,8 @@ func fillTimes(entry *model.FileEntry, info os.FileInfo) {
 	if !ok {
 		return
 	}
-	entry.ATime = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-	entry.CTime = time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
+	entry.ATime = model.NanoOf(time.Unix(st.Atim.Sec, st.Atim.Nsec))
+	entry.CTime = model.NanoOf(time.Unix(st.Ctim.Sec, st.Ctim.Nsec))
 }
 
 func setTimes(path string, mtime, atime, _ time.Time) error {

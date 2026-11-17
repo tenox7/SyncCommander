@@ -621,7 +621,7 @@ func (c *copier) copyOne(f item) {
 
 	verify := resumeVerifier(c.req.VerifyResume, c.req.Scanner, c.src, c.dst, f.relPath, srcEntry.Size)
 	finish := func(how string) {
-		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
+		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil {
 			transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
 		}
 		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)

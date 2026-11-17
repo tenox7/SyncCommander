@@ -163,7 +163,7 @@ func sftpEntry(relPath string, info os.FileInfo) model.FileEntry {
 		e.Name = ""
 	}
 	if stat, ok := info.Sys().(*sftp.FileStat); ok && stat != nil {
-		e.ATime = time.Unix(int64(stat.Atime), 0)
+		e.ATime = model.NanoOf(time.Unix(int64(stat.Atime), 0))
 	}
 	return e
 }

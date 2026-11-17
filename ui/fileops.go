@@ -154,7 +154,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			newer, older = r, l
 			olderBackend, touched, side = left, model.SideLeft, "left"
 		}
-		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime, newer.BirthTime); err != nil {
+		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime.Time(), newer.BirthTime.Time()); err != nil {
 			// A failed touch logged nothing (U9).
 			if ctx.Err() == nil {
 				transport.Log.Add("touch", transport.DirFail, side+" "+older.RelPath+": "+err.Error())
@@ -163,7 +163,7 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			// Touch only changes metadata; the file body is unchanged. Roll the
 			// cached CRC fingerprint forward to the new mtime so the preserving
 			// merge below treats CRC as still valid.
-			scanner.MutateTree(func(*model.TreeNode) { node.Sides[touched].ChecksumModTime = newer.ModTime })
+			scanner.MutateTree(func(*model.TreeNode) { node.Sides[touched].ChecksumModTime = model.NanoOf(newer.ModTime) })
 		}
 		refreshParent(ctx, scanner, relPath, opts)
 		return done

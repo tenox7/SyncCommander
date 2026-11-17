@@ -88,7 +88,7 @@ func (m *Model) swapSides() {
 // busy, so no checksum is in flight to carry across.
 func swapTreeData(node *model.TreeNode) {
 	node.Sides[0], node.Sides[1] = node.Sides[1], node.Sides[0]
-	node.Totals[0], node.Totals[1] = node.Totals[1], node.Totals[0]
+	node.SwapTotals()
 
 	switch node.Compare.Presence {
 	case model.PresenceLeftOnly:

@@ -373,7 +373,7 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	if !entry.IsDir {
 		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
 	}
-	t := node.Totals[p.side]
+	t := node.Totals(p.side)
 	if t.Dirs == 0 && t.Files == 0 {
 		return ""
 	}

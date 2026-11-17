@@ -13,9 +13,9 @@ func fillTimes(entry *model.FileEntry, info os.FileInfo) {
 	if !ok {
 		return
 	}
-	entry.ATime = time.Unix(st.Atimespec.Sec, st.Atimespec.Nsec)
-	entry.CTime = time.Unix(st.Ctimespec.Sec, st.Ctimespec.Nsec)
-	entry.BirthTime = time.Unix(st.Birthtimespec.Sec, st.Birthtimespec.Nsec)
+	entry.ATime = model.NanoOf(time.Unix(st.Atimespec.Sec, st.Atimespec.Nsec))
+	entry.CTime = model.NanoOf(time.Unix(st.Ctimespec.Sec, st.Ctimespec.Nsec))
+	entry.BirthTime = model.NanoOf(time.Unix(st.Birthtimespec.Sec, st.Birthtimespec.Nsec))
 }
 
 func setTimes(path string, mtime, atime, _ time.Time) error {

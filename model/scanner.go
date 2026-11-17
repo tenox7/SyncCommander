@@ -1095,7 +1095,7 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 	case err != nil:
 		st.ChecksumErr = true
 	default:
-		st.Checksum, st.ChecksumSize, st.ChecksumModTime = sum, entry.Size, entry.ModTime
+		st.Checksum, st.ChecksumSize, st.ChecksumModTime = sum, entry.Size, NanoOf(entry.ModTime)
 	}
 	l, r := &node.Sides[SideLeft], &node.Sides[SideRight]
 	if !l.ChecksumDone || !r.ChecksumDone {

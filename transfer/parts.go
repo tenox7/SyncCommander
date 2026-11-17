@@ -58,7 +58,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 		if err == nil {
 			// The times go on the part, so the file has them from the moment
 			// it has its name.
-			if terr := c.dst.SetTimes(ctx, part, src.ModTime, src.ATime, src.BirthTime); terr != nil {
+			if terr := c.dst.SetTimes(ctx, part, src.ModTime, src.ATime.Time(), src.BirthTime.Time()); terr != nil {
 				transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+terr.Error())
 			}
 			err = pw.CommitPart(ctx, f.relPath, src.Mode)
