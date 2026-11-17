@@ -943,24 +943,29 @@ func (s *Scanner) checksumNode(ctx context.Context, node *TreeNode) {
 	if !ok {
 		return
 	}
-	s.resetChecksumPhase([]checksumGroup{{files: []*TreeNode{node}}})
+	groups := []checksumGroup{{files: []*TreeNode{node}}}
+	s.resetChecksumPhase(groups)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideLeft, algo) }()
 	go func() { defer wg.Done(); s.checksumSideFile(ctx, node, SideRight, algo) }()
 	wg.Wait()
+	s.settleChecksumPhase(groups)
 }
 
-// resetChecksumPhase clears transient per-file done flags and (re)marks the
+// resetChecksumPhase starts a checksum run over groups: it clears each
+// file's per-run flags, marks the file as being summed and (re)marks the
 // per-dir pending flags so the UI shows ≈ on each top-level dir that still
-// has work scheduled for that side.
+// has work scheduled for that side. A file keeps its sums: the run replaces
+// one only when the new one arrives, so a stopped run takes nothing away
+// (F11). settleChecksumPhase ends the run.
 func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 	s.lockTree()
 	defer s.unlockTree()
 	for _, g := range groups {
 		for _, f := range g.files {
 			for s := range f.Sides {
-				f.Sides[s] = SideState{Entry: f.Sides[s].Entry}
+				f.Sides[s].ChecksumDone, f.Sides[s].ChecksumErr = false, false
 			}
 			f.ChecksumCountedDone = false
 			f.Compare.Checksum = AttrScanning
@@ -976,6 +981,28 @@ func (s *Scanner) resetChecksumPhase(groups []checksumGroup) {
 	}
 }
 
+// settleChecksumPhase ends a checksum run over groups. A file the run did
+// not finish on both sides, because it was stopped, gets the state its sums
+// give: the ones it had, and a new one where it arrived (F11). The folders'
+// marks for scheduled work go.
+func (s *Scanner) settleChecksumPhase(groups []checksumGroup) {
+	s.lockTree()
+	defer s.unlockTree()
+	for _, g := range groups {
+		for _, f := range g.files {
+			if f.Compare.Checksum == AttrScanning {
+				f.Compare.Checksum = pairChecksumStatus(f)
+			}
+		}
+		if g.dir == nil {
+			continue
+		}
+		for s := range g.dir.Sides {
+			g.dir.Sides[s].ChecksumPending, g.dir.Sides[s].ChecksumActive = false, false
+		}
+	}
+}
+
 // runChecksumSides launches two goroutines, one per side, that march through
 // groups independently. Each side does its own prefetch (if its backend
 // supports it) and then per-file Checksum calls, up to s.concurrency in
@@ -987,6 +1014,7 @@ func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, 
 	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideLeft, algo, onPairDone) }()
 	go func() { defer wg.Done(); s.processChecksumSide(ctx, groups, SideRight, algo, onPairDone) }()
 	wg.Wait()
+	s.settleChecksumPhase(groups)
 }
 
 func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, algo string, onPairDone func()) {
@@ -1055,6 +1083,11 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 		markChecksumInFlight(node, side, 1)
 		sum, err = s.backend(side).Checksum(ctx, node.RelPath, algo)
 		markChecksumInFlight(node, side, -1)
+		if err != nil && ctx.Err() != nil {
+			// Stopped: this side keeps the sum it had, and the end of the
+			// run gives the file the state its sums give (F11).
+			return false
+		}
 	}
 
 	s.lockTree()
@@ -1065,6 +1098,7 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 	case entry == nil:
 	case err != nil:
 		st.ChecksumErr = true
+		st.dropChecksum()
 	default:
 		st.Checksum, st.ChecksumSize, st.ChecksumModTime = sum, entry.Size, NanoOf(entry.ModTime)
 	}
@@ -1072,19 +1106,25 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 	if !l.ChecksumDone || !r.ChecksumDone {
 		return false
 	}
-	switch {
-	case l.ChecksumErr || r.ChecksumErr:
-		node.Compare.Checksum = AttrUnknown
-	case l.Entry == nil || r.Entry == nil:
-		node.Compare.Checksum = AttrNA
-	default:
-		node.Compare.Checksum = checksumStatus(node)
-	}
+	node.Compare.Checksum = pairChecksumStatus(node)
 	if node.ChecksumCountedDone {
 		return false
 	}
 	node.ChecksumCountedDone = true
 	return true
+}
+
+// pairChecksumStatus is a file's checksum status from what its sides hold:
+// unknown when a side failed, not applicable when the file is on one side.
+func pairChecksumStatus(n *TreeNode) AttrStatus {
+	l, r := &n.Sides[SideLeft], &n.Sides[SideRight]
+	switch {
+	case l.ChecksumErr || r.ChecksumErr:
+		return AttrUnknown
+	case l.Entry == nil || r.Entry == nil:
+		return AttrNA
+	}
+	return checksumStatus(n)
 }
 
 type dirJob struct {
