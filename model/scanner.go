@@ -1255,31 +1255,33 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 		e, err := b.List(c, relDir)
 		return listedEntries(side, relDir, e), wrapListErr(side, relDir, err)
 	}
-	if !listLeft {
-		e, err := one(right, "right")
-		return nil, e, err
-	}
-	if !listRight {
-		e, err := one(left, "left")
-		return e, nil, err
-	}
 	type result struct {
 		entries []FileEntry
 		err     error
 		isLeft  bool
 	}
+	// Each side lists in a goroutine of its own, and the wait ends with
+	// ctx: a backend that does not stop with ctx (a hung network mount)
+	// must not hold the scan, with one side listed or two (F25).
 	ch := make(chan result, 2)
-	go func() {
-		e, err := one(left, "left")
-		ch <- result{e, err, true}
-	}()
-	go func() {
-		e, err := one(right, "right")
-		ch <- result{e, err, false}
-	}()
+	n := 0
+	if listLeft {
+		n++
+		go func() {
+			e, err := one(left, "left")
+			ch <- result{e, err, true}
+		}()
+	}
+	if listRight {
+		n++
+		go func() {
+			e, err := one(right, "right")
+			ch <- result{e, err, false}
+		}()
+	}
 	var le, re []FileEntry
 	var firstErr error
-	for i := 0; i < 2; i++ {
+	for range n {
 		select {
 		case <-ctx.Done():
 			return le, re, ctx.Err()
