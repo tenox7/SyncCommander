@@ -28,14 +28,12 @@ type FTPBackend struct {
 	base    string
 	conn    *ftp.ServerConn
 	rawConn net.Conn
-	hasher  *ftpHasher
+	hash    *ftpHashConn
 	display string
 	addr    string
 	user    string
 	pass    string
 	scheme  string
-	host    string
-	port    string
 	tlsCfg  *tls.Config
 	pool    *connPool[*ftpConn]
 	mu      sync.Mutex
@@ -176,7 +174,7 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 			remotePath = path.Join(wd, strings.TrimPrefix(remotePath, "/~"))
 		}
 	}
-	hasher, _ := newFTPHasher(ctx, host, port, user, pass, scheme, tlsCfg)
+	hasher, hashErr := newFTPHasher(ctx, host, port, user, pass, scheme, tlsCfg)
 	if err := ctx.Err(); err != nil {
 		// Cancelled while the hash connection was set up: a backend
 		// without it would quietly have no checksums.
@@ -195,14 +193,14 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 		base:    remotePath,
 		conn:    conn,
 		rawConn: rawConn,
-		hasher:  hasher,
+		hash: newFTPHashConn(func(ctx context.Context) (*ftpHasher, error) {
+			return newFTPHasher(ctx, host, port, user, pass, scheme, tlsCfg)
+		}, hasher, hashErr),
 		display: fmt.Sprintf("%s://%s@%s%s", scheme, user, displayHost, remotePath),
 		addr:    addr,
 		user:    user,
 		pass:    pass,
 		scheme:  scheme,
-		host:    host,
-		port:    port,
 		tlsCfg:  tlsCfg,
 		capture: capture,
 	}
@@ -243,9 +241,7 @@ func (b *FTPBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pool.close()
-	if b.hasher != nil {
-		b.hasher.close()
-	}
+	b.hash.close()
 	return b.conn.Quit()
 }
 
@@ -293,10 +289,6 @@ func (b *FTPBackend) reconnectLocked(ctx context.Context) error {
 		return err
 	}
 	b.conn, b.rawConn = conn, rawConn
-	if b.hasher != nil {
-		b.hasher.close()
-		b.hasher, _ = newFTPHasher(ctx, b.host, b.port, b.user, b.pass, b.scheme, b.tlsCfg)
-	}
 	Log.Add("ftp", DirIn, "reconnected")
 	return nil
 }
@@ -675,28 +667,41 @@ func (c *captureConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (b *FTPBackend) currentHasher() *ftpHasher {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.hasher
-}
-
-func (b *FTPBackend) Checksum(_ context.Context, relPath, algo string) (string, error) {
-	h := b.currentHasher()
-	if h == nil {
-		return "", errors.New("no checksum support on this FTP server")
+// Checksum asks the checksum connection for relPath's sum. A connection
+// found dead is dialed again and asked once more: an idle one the server
+// ended while a long listing ran fails no file.
+func (b *FTPBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	full := path.Join(b.base, relPath)
+	for try := 0; ; try++ {
+		h, err := b.hash.get(ctx)
+		if err != nil {
+			return "", err
+		}
+		if h == nil {
+			return "", errors.New("no checksum support on this FTP server")
+		}
+		sum, err := h.sum(ctx, full, algo)
+		if !errors.Is(err, errHashConnGone) {
+			return sum, err
+		}
+		b.hash.drop(h)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if try > 0 {
+			return "", &hashConnError{err}
+		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.hash(path.Join(b.base, relPath), algo)
 }
 
 // ChecksumAlgos are the hash commands the server named in its FEAT answer
-// when the checksum connection logged in.
-func (b *FTPBackend) ChecksumAlgos(context.Context) ([]string, error) {
-	h := b.currentHasher()
-	if h == nil {
-		return nil, nil
+// when the checksum connection logged in. With no connection, it dials one:
+// one that cannot be made is an error, never "no checksums", which the
+// scanner would keep for the session (F24).
+func (b *FTPBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	h, err := b.hash.get(ctx)
+	if err != nil || h == nil {
+		return nil, err
 	}
 	var algos []string
 	for _, a := range []string{"sha256", "sha1", "md5"} {
@@ -1000,6 +1005,112 @@ func (r *ftpReader) Close() error {
 	return r.err
 }
 
+// ftpHashConn holds the connection that asks the server for checksums. It
+// is dialed at connect, and again when an ask finds none: the dial failed,
+// or the connection died. A server whose FEAT names no hash command has
+// none for good. A connection that could not be made is no answer: the
+// next ask dials again, after a wait that doubles while dials fail, so a
+// server refusing connections is not dialed once per file (F24).
+type ftpHashConn struct {
+	dial   func(ctx context.Context) (*ftpHasher, error)
+	mu     sync.Mutex
+	h      *ftpHasher
+	none   bool // the server names no hash command
+	closed bool
+	err    error         // why the last dial failed
+	wait   time.Duration // after it, before the next
+	next   time.Time
+}
+
+// ftpHashRedial is the wait after a failed dial of the checksum connection;
+// it doubles while dials fail, up to ftpHashRedialMax.
+var ftpHashRedial, ftpHashRedialMax = 5 * time.Second, 2 * time.Minute
+
+// errNoHashCmds is a server whose FEAT names no hash command.
+var errNoHashCmds = errors.New("the server names no hash command")
+
+// errHashConnGone is an ask that failed because the checksum connection
+// did: the connection is dropped and the next ask dials a new one.
+var errHashConnGone = errors.New("the checksum connection is gone")
+
+// hashConnError is a failure of the checksum connection. It hides its cause
+// from the error classes of the connection wrapper: the primary connection
+// may be fine, so it is neither closed as lost nor held off as unreachable.
+type hashConnError struct{ err error }
+
+func (e *hashConnError) Error() string { return "ftp: the checksum connection: " + e.err.Error() }
+
+// newFTPHashConn starts with h and err, the dial made at connect.
+func newFTPHashConn(dial func(ctx context.Context) (*ftpHasher, error), h *ftpHasher, err error) *ftpHashConn {
+	c := &ftpHashConn{dial: dial}
+	c.mu.Lock()
+	c.tookLocked(h, err)
+	c.mu.Unlock()
+	return c
+}
+
+// get returns the connection, dialing one when there is none. nil with no
+// error is a server with no hash command.
+func (c *ftpHashConn) get(ctx context.Context) (*ftpHasher, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.closed:
+		return nil, &hashConnError{net.ErrClosed}
+	case c.h != nil || c.none:
+		return c.h, nil
+	case time.Now().Before(c.next):
+		return nil, c.err
+	}
+	h, err := c.dial(ctx)
+	if ctx.Err() != nil {
+		// A stopped dial is no failure of the server's: it starts no wait.
+		if h != nil {
+			h.close()
+		}
+		return nil, ctx.Err()
+	}
+	return h, c.tookLocked(h, err)
+}
+
+// tookLocked keeps the result of a dial: the connection, the server's "no
+// hash command", or the failure and the wait before the next dial. mu held.
+func (c *ftpHashConn) tookLocked(h *ftpHasher, err error) error {
+	switch {
+	case err == nil:
+		c.h, c.err, c.wait = h, nil, 0
+		return nil
+	case errors.Is(err, errNoHashCmds):
+		c.none = true
+		return nil
+	}
+	c.wait = min(max(2*c.wait, ftpHashRedial), ftpHashRedialMax)
+	c.next = time.Now().Add(c.wait)
+	c.err = &hashConnError{err}
+	Log.Add("ftp", DirErr, fmt.Sprintf("%v; asking again in %v", c.err, c.wait))
+	return c.err
+}
+
+// drop forgets h, found dead: the next ask dials again at once.
+func (c *ftpHashConn) drop(h *ftpHasher) {
+	c.mu.Lock()
+	if c.h == h {
+		c.h = nil
+	}
+	c.mu.Unlock()
+	h.close()
+}
+
+func (c *ftpHashConn) close() {
+	c.mu.Lock()
+	h := c.h
+	c.h, c.closed = nil, true
+	c.mu.Unlock()
+	if h != nil {
+		h.close()
+	}
+}
+
 // ftpHasher is a second control connection dedicated to XCRC/XSHA/HASH
 // commands, so checksums never queue behind a transfer on the primary.
 type ftpHasher struct {
@@ -1009,6 +1120,7 @@ type ftpHasher struct {
 	reader *textproto.Reader
 	writer *textproto.Writer
 	cmds   map[string]string
+	closed bool // guarded by mu
 }
 
 // newFTPHasher opens the connection that asks for checksums. Until it is
@@ -1073,14 +1185,20 @@ func startFTPHasher(rawTCP net.Conn, user, pass, scheme string, tlsCfg *tls.Conf
 		return nil, err
 	}
 
-	code, msg, _ := h.sendCmd("FEAT")
+	// A FEAT that got no answer says nothing of the server: only one it
+	// answered can say it has no hash command.
+	code, msg, err := h.cmd("FEAT")
+	if err != nil {
+		h.close()
+		return nil, err
+	}
 	h.cmds = make(map[string]string)
 	if code == 211 {
 		h.parseFeat(msg)
 	}
 	if len(h.cmds) == 0 {
 		h.close()
-		return nil, errors.New("no hash commands available")
+		return nil, errNoHashCmds
 	}
 	return h, nil
 }
@@ -1113,10 +1231,49 @@ func (h *ftpHasher) readResp() (int, string, error) {
 	return h.reader.ReadResponse(0)
 }
 
+// cmd sends a command and reads the reply. A connection that fails, or a
+// server that says it is closing it (421), is errHashConnGone.
+func (h *ftpHasher) cmd(format string, args ...any) (int, string, error) {
+	code, msg, err := h.sendCmd(format, args...)
+	switch {
+	case err != nil:
+		return 0, "", fmt.Errorf("%w: %w", errHashConnGone, err)
+	case code == 421:
+		return 0, "", fmt.Errorf("%w: %d %s", errHashConnGone, code, msg)
+	}
+	return code, msg, nil
+}
+
+// sum asks for the checksum of fullPath. A stop of ctx cuts the ask short;
+// its reply may still come, so the connection is done with.
+func (h *ftpHasher) sum(ctx context.Context, fullPath, algo string) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return "", errHashConnGone
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	stop := context.AfterFunc(ctx, func() { h.raw.SetDeadline(time.Now()) })
+	sum, err := h.hash(fullPath, algo)
+	if !stop() {
+		return "", fmt.Errorf("%w: %w", errHashConnGone, ctx.Err())
+	}
+	return sum, err
+}
+
 // close says QUIT politely but with a deadline: it is often called precisely
-// because the network is known to be dead.
+// because the network is known to be dead. The deadline also ends an ask
+// that waits for a reply, so close does not wait long for mu.
 func (h *ftpHasher) close() {
 	h.raw.SetDeadline(time.Now().Add(2 * time.Second))
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
 	h.sendCmd("QUIT")
 	h.conn.Close()
 }
@@ -1160,9 +1317,11 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 	}
 	if cmd == "HASH" {
 		if name := ftpAlgoName[algo]; name != "" {
-			h.sendCmd("OPTS HASH %s", name)
+			if _, _, err := h.cmd("OPTS HASH %s", name); err != nil {
+				return "", err
+			}
 		}
-		code, msg, err := h.sendCmd("HASH %s", fullPath)
+		code, msg, err := h.cmd("HASH %s", fullPath)
 		if err != nil {
 			return "", err
 		}
@@ -1175,7 +1334,7 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 		}
 		return strings.ToLower(fields[2]), nil
 	}
-	code, msg, err := h.sendCmd("%s %s", cmd, fullPath)
+	code, msg, err := h.cmd("%s %s", cmd, fullPath)
 	if err != nil {
 		return "", err
 	}

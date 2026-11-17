@@ -3,6 +3,7 @@ package transport
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -28,9 +29,23 @@ type fakeFTPD struct {
 	store        map[string][]byte
 	noRenameOver bool
 	dashAIsName  bool
-	mu           sync.Mutex
-	lists        []string // LIST arguments, in order
-	logins       int      // PASS commands answered
+	// hashes makes FEAT name XSHA256, which sums a file of store. A sum
+	// of hangOn gets no reply; hangAsked hears of it. refuse(n) turns the
+	// n-th connection away, the first being 1, as a server at its limit
+	// does; featFails(n) closes it at its FEAT, as a server going away.
+	// With dropOnSum every sum closes its connection with no reply.
+	hashes    bool
+	dropOnSum bool
+	hangOn    string
+	hangAsked chan struct{}
+	refuse    func(n int) bool
+	featFails func(n int) bool
+	mu        sync.Mutex
+	lists     []string // LIST arguments, in order
+	listConns []int    // the connection each LIST came on
+	logins    int      // PASS commands answered
+	conns     []net.Conn
+	listener  net.Listener
 }
 
 // fakeFTPFile is what RETR of a path sends: the body, then the final reply.
@@ -52,16 +67,43 @@ func (f *fakeFTPD) start(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	f.listener = l
 	go func() {
 		for {
 			c, err := l.Accept()
 			if err != nil {
 				return
 			}
-			go f.serve(c)
+			f.mu.Lock()
+			f.conns = append(f.conns, c)
+			n := len(f.conns)
+			refused := f.refuse != nil && f.refuse(n)
+			f.mu.Unlock()
+			if refused {
+				io.WriteString(c, "421 There are too many connections from your internet address.\r\n")
+				c.Close()
+				continue
+			}
+			go f.serve(c, n)
 		}
 	}()
 	return l.Addr().String()
+}
+
+// connCount is how many connections the server took or turned away.
+func (f *fakeFTPD) connCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.conns)
+}
+
+// kill ends the n-th connection the way a server ends an idle one.
+func (f *fakeFTPD) kill(n int) {
+	f.mu.Lock()
+	c := f.conns[n-1]
+	f.mu.Unlock()
+	io.WriteString(c, "421 Timeout.\r\n")
+	c.Close()
 }
 
 func (f *fakeFTPD) loginCount() int {
@@ -76,7 +118,7 @@ func (f *fakeFTPD) listed() []string {
 	return slices.Clone(f.lists)
 }
 
-func (f *fakeFTPD) serve(c net.Conn) {
+func (f *fakeFTPD) serve(c net.Conn, n int) {
 	defer c.Close()
 	r := bufio.NewReader(c)
 	reply := func(s string) { io.WriteString(c, s+"\r\n") }
@@ -104,11 +146,44 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			f.mu.Unlock()
 			reply("230 Login successful.")
 		case "FEAT":
+			if f.featFails != nil && f.featFails(n) {
+				reply("421 Service not available, closing control connection.")
+				return
+			}
+			feats := " EPSV\r\n PASV\r\n SIZE\r\n"
 			if f.mlsd != nil {
-				reply("211-Features:\r\n EPSV\r\n PASV\r\n SIZE\r\n MLST type*;size*;modify*;\r\n211 End")
+				feats += " MLST type*;size*;modify*;\r\n"
+			}
+			if f.hashes {
+				feats += " XSHA256\r\n"
+			}
+			reply("211-Features:\r\n" + feats + "211 End")
+		case "XSHA256":
+			p := path.Clean(arg)
+			if !f.hashes {
+				reply("502 Command not implemented.")
 				continue
 			}
-			reply("211-Features:\r\n EPSV\r\n PASV\r\n SIZE\r\n211 End")
+			f.mu.Lock()
+			drop := f.dropOnSum
+			f.mu.Unlock()
+			if drop {
+				return
+			}
+			if p == f.hangOn {
+				if f.hangAsked != nil {
+					f.hangAsked <- struct{}{}
+				}
+				continue
+			}
+			f.mu.Lock()
+			body, ok := f.store[p]
+			f.mu.Unlock()
+			if !ok {
+				reply("550 No such file.")
+				continue
+			}
+			reply(fmt.Sprintf("213 %x", sha256.Sum256(body)))
 		case "TYPE":
 			reply("200 Switching to Binary mode.")
 		case "PWD":
@@ -132,6 +207,7 @@ func (f *fakeFTPD) serve(c net.Conn) {
 			}
 			f.mu.Lock()
 			f.lists = append(f.lists, arg)
+			f.listConns = append(f.listConns, n)
 			f.mu.Unlock()
 			reply("150 Here comes the directory listing.")
 			dc, err := pasv.Accept()
