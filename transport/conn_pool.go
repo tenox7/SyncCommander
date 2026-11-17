@@ -93,6 +93,15 @@ func (p *connPool[T]) release(c T) {
 	p.mu.Unlock()
 }
 
+// discard closes c, an extra the caller holds, for good, in place of its
+// release: a connection closed under a call is of no use to the next one.
+func (p *connPool[T]) discard(c T) {
+	p.mu.Lock()
+	p.size--
+	p.mu.Unlock()
+	p.closeFn(c)
+}
+
 // resize sets how many extras the pool may hold. Raising it lets the next
 // acquires dial. Lowering it never takes a connection away from a running
 // transfer: idle surplus closes now, busy surplus when it is released.

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -36,23 +37,92 @@ func sftpFastOpts() []sftp.ClientOption {
 	}
 }
 
+// sftpConn is one ssh connection and the sftp session on it.
 type sftpConn struct {
 	sftp *sftp.Client
 	ssh  *ssh.Client
+	cut  atomic.Bool // watch closed it, to stop a call the server did not answer
 }
 
-func (c *sftpConn) close() {
+// close ends c. The ssh connection goes first: pkg/sftp's Close waits until
+// the server ends the session, which a server that hangs never does (S11).
+func (c *sftpConn) close() error {
+	var err error
+	if c.ssh != nil {
+		err = c.ssh.Close()
+	}
 	if c.sftp != nil {
 		c.sftp.Close()
 	}
-	if c.ssh != nil {
-		c.ssh.Close()
+	if c.cut.Load() {
+		return nil
 	}
+	return err
+}
+
+// sftpGrace is how long a call has, after its ctx ends, to end by itself
+// before watch closes its connection.
+const sftpGrace = time.Second
+
+// watch closes c when ctx ends and the call on c has not ended a moment
+// later (S11). pkg/sftp takes no ctx: a call waits for the server's answer
+// as long as that takes, forever on a server whose file system hangs while
+// sshd stays up, and a file's Close waits behind the transfer it would stop.
+// Closing the ssh connection ends every call on c at once. The moment keeps
+// c when the call ends by itself, as one whose source stopped does. The call
+// ends with stop, which reports whether c was closed.
+func (c *sftpConn) watch(ctx context.Context) (stop func() bool) {
+	ended, decided := make(chan struct{}), make(chan struct{})
+	var cut bool
+	after := context.AfterFunc(ctx, func() {
+		defer close(decided)
+		t := time.NewTimer(sftpGrace)
+		defer t.Stop()
+		select {
+		case <-ended:
+		case <-t.C:
+			cut = true
+			c.cut.Store(true)
+			c.ssh.Close()
+		}
+	})
+	return func() bool {
+		close(ended)
+		if after() {
+			return false
+		}
+		<-decided
+		return cut
+	}
+}
+
+// stopped is the error of a call whose connection watch closed.
+func stopped(ctx context.Context) error {
+	return fmt.Errorf("%w: the server did not answer, so its connection was closed", ctx.Err())
+}
+
+// newSFTPConn starts an sftp session on client, which it closes when ctx
+// ends first (see watch).
+func newSFTPConn(ctx context.Context, client *ssh.Client) (*sftpConn, error) {
+	c := &sftpConn{ssh: client}
+	stop := c.watch(ctx)
+	sc, err := sftp.NewClient(client, sftpFastOpts()...)
+	if stop() {
+		if err == nil {
+			sc.Close()
+		}
+		return nil, fmt.Errorf("sftp: %w", stopped(ctx))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sftp: %w", err)
+	}
+	c.sftp = sc
+	return c, nil
 }
 
 type SFTPBackend struct {
 	sshShell
-	sftp *sftp.Client
+	main *sftpConn // calls on files and folders; transfers too without extras
 	pool *connPool[*sftpConn]
 }
 
@@ -62,7 +132,7 @@ func NewSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel 
 	if err != nil {
 		return nil, err
 	}
-	b, err := newSFTPBackend(conn, rawURL, insecure, parallel)
+	b, err := newSFTPBackend(ctx, conn, rawURL, insecure, parallel)
 	if err != nil {
 		conn.client.Close()
 	}
@@ -71,15 +141,19 @@ func NewSFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel 
 
 // newSFTPBackend builds an SFTPBackend over an already-dialed sshConn; on
 // error the caller closes conn.client. rawURL lets the pool dial extra
-// connections for parallel transfers (parallel-1 of them).
-func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
-	client, err := sftp.NewClient(conn.client, sftpFastOpts()...)
+// connections for parallel transfers (parallel-1 of them). A ctx that ends
+// first stops the start.
+func newSFTPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure bool, parallel int) (*SFTPBackend, error) {
+	main, err := newSFTPConn(ctx, conn.client)
 	if err != nil {
-		return nil, fmt.Errorf("sftp: %w", err)
+		return nil, err
 	}
-	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, sftp: client}
-	if b.base, err = expandHome(conn.basePath, client.Getwd); err != nil {
-		client.Close()
+	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, main: main}
+	if err := b.onMain(ctx, func(c *sftp.Client) (err error) {
+		b.base, err = expandHome(conn.basePath, c.Getwd)
+		return err
+	}); err != nil {
+		main.close()
 		return nil, fmt.Errorf("sftp: %w", err)
 	}
 	b.display = sshDisplayURL(conn, b.base)
@@ -88,15 +162,15 @@ func newSFTPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (
 		if err != nil {
 			return nil, err
 		}
-		sc, err := sftp.NewClient(c.client, sftpFastOpts()...)
+		sc, err := newSFTPConn(ctx, c.client)
 		if err != nil {
 			c.client.Close()
-			return nil, fmt.Errorf("sftp: %w", err)
+			return nil, err
 		}
 		Log.Add("sftp", DirIn, "extra connection dialed")
-		return &sftpConn{sftp: sc, ssh: c.client}, nil
+		return sc, nil
 	}
-	b.pool = newConnPool(&sftpConn{sftp: client, ssh: conn.client}, parallel-1, dial, func(c *sftpConn) { c.close() })
+	b.pool = newConnPool(main, parallel-1, dial, func(c *sftpConn) { c.close() })
 	return b, nil
 }
 
@@ -105,8 +179,58 @@ func (b *SFTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
 
 func (b *SFTPBackend) Close() error {
 	b.pool.close()
-	b.sftp.Close()
-	return b.client.Close()
+	return b.main.close()
+}
+
+// connCut reports that watch closed the main connection: the backend is of
+// no more use, and the reconnecting wrapper opens a new one.
+func (b *SFTPBackend) connCut() bool { return b.main.cut.Load() }
+
+// onMain runs op on the main connection, which watch closes when ctx ends
+// first. An op that ended anyway keeps its result; either way the backend
+// is of no more use then (connCut).
+func (b *SFTPBackend) onMain(ctx context.Context, op func(*sftp.Client) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stop := b.main.watch(ctx)
+	err := op(b.main.sftp)
+	if stop() && err != nil {
+		return stopped(ctx)
+	}
+	return err
+}
+
+// onPooled runs op on a pooled connection, which watch closes when ctx ends
+// first.
+func (b *SFTPBackend) onPooled(ctx context.Context, op func(*sftp.Client) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, release := b.pool.acquire(ctx)
+	if err := ctx.Err(); err != nil {
+		release()
+		return err
+	}
+	stop := conn.watch(ctx)
+	err := op(conn.sftp)
+	cut := stop()
+	b.giveBack(conn, release, cut)
+	if cut && err != nil {
+		return stopped(ctx)
+	}
+	return err
+}
+
+// giveBack returns conn to the pool once its call ended. An extra
+// connection that watch closed leaves the pool: the next call gets a new
+// one.
+func (b *SFTPBackend) giveBack(conn *sftpConn, release func(), cut bool) {
+	if cut && conn != b.main {
+		b.pool.discard(conn)
+		return
+	}
+	release()
 }
 
 func (b *SFTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -123,7 +247,11 @@ func (b *SFTPBackend) PreloadRecursive(ctx context.Context, scope string) error 
 func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := b.abs(relDir)
 	Log.Add("sftp", DirOut, "READDIR "+dir)
-	entries, err := b.sftp.ReadDir(dir)
+	var entries []os.FileInfo
+	err := b.onMain(ctx, func(c *sftp.Client) (err error) {
+		entries, err = c.ReadDir(dir)
+		return err
+	})
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 		return nil, err
@@ -141,8 +269,12 @@ func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileE
 }
 
 // Stat lstats relPath on the server: one request, no listing.
-func (b *SFTPBackend) Stat(_ context.Context, relPath string) (model.FileEntry, error) {
-	info, err := b.sftp.Lstat(b.abs(relPath))
+func (b *SFTPBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	var info os.FileInfo
+	err := b.onMain(ctx, func(c *sftp.Client) (err error) {
+		info, err = c.Lstat(b.abs(relPath))
+		return err
+	})
 	if err != nil {
 		return model.FileEntry{}, fmt.Errorf("sftp: stat %s: %w", relPath, err)
 	}
@@ -168,11 +300,11 @@ func sftpEntry(relPath string, info os.FileInfo) model.FileEntry {
 	return e
 }
 
-func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, _ time.Time) error {
+func (b *SFTPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	if atime.IsZero() {
 		atime = mtime
 	}
-	err := b.sftp.Chtimes(b.abs(relPath), atime, mtime)
+	err := b.onMain(ctx, func(c *sftp.Client) error { return c.Chtimes(b.abs(relPath), atime, mtime) })
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("sftp", DirErr, "CHTIMES "+relPath+": "+err.Error())
@@ -186,54 +318,54 @@ func (b *SFTPBackend) SetTimes(_ context.Context, relPath string, mtime, atime, 
 // S8): writing past the end of a shorter file leaves a gap of zeros. The
 // source opens once the file is ready. The data is synced when the server
 // can, and Close is checked: pkg/sftp reports the final flush status there,
-// so ignoring it would report a short file as copied.
+// so ignoring it would report a short file as copied. A cancel closes the
+// connection when the server does not answer (onPooled): closing the file
+// would wait behind the transfer.
 func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mode os.FileMode, open func() (io.ReadCloser, error)) error {
 	fullPath := b.abs(relPath)
-	flags := os.O_WRONLY
-	if offset < 0 {
-		if err := b.sftp.MkdirAll(path.Dir(fullPath)); err != nil {
+	return b.onPooled(ctx, func(c *sftp.Client) error {
+		flags := os.O_WRONLY
+		if offset < 0 {
+			if err := c.MkdirAll(path.Dir(fullPath)); err != nil {
+				return err
+			}
+			flags |= os.O_CREATE | os.O_TRUNC
+		}
+		f, err := c.OpenFile(fullPath, flags)
+		if offset >= 0 && errors.Is(err, fs.ErrNotExist) {
+			return appendOffsetErr("sftp", relPath, -1, offset)
+		}
+		if err != nil {
 			return err
 		}
-		flags |= os.O_CREATE | os.O_TRUNC
-	}
-	conn, release := b.pool.acquire(ctx)
-	defer release()
-	f, err := conn.sftp.OpenFile(fullPath, flags)
-	if offset >= 0 && errors.Is(err, fs.ErrNotExist) {
-		return appendOffsetErr("sftp", relPath, -1, offset)
-	}
-	if err != nil {
-		return err
-	}
-	stop := CancelCloser(ctx, f)
-	if offset >= 0 {
-		var fi os.FileInfo
-		if fi, err = f.Stat(); err == nil && fi.Size() != offset {
-			err = appendOffsetErr("sftp", relPath, fi.Size(), offset)
+		if offset >= 0 {
+			var fi os.FileInfo
+			if fi, err = f.Stat(); err == nil && fi.Size() != offset {
+				err = appendOffsetErr("sftp", relPath, fi.Size(), offset)
+			}
+			if err == nil {
+				_, err = f.Seek(offset, io.SeekStart)
+			}
+		}
+		var src io.ReadCloser
+		if err == nil {
+			src, err = open()
 		}
 		if err == nil {
-			_, err = f.Seek(offset, io.SeekStart)
+			_, err = io.Copy(f, src)
+			src.Close()
 		}
-	}
-	var src io.ReadCloser
-	if err == nil {
-		src, err = open()
-	}
-	if err == nil {
-		_, err = io.Copy(f, src)
-		src.Close()
-	}
-	if err == nil {
-		err = syncSFTP(f)
-	}
-	stop()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = conn.sftp.Chmod(fullPath, mode)
-	}
-	return err
+		if err == nil {
+			err = syncSFTP(f)
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = c.Chmod(fullPath, mode)
+		}
+		return err
+	})
 }
 
 // syncSFTP asks the server to sync f to disk (fsync@openssh.com, L14). A
@@ -270,9 +402,13 @@ func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.
 }
 
 // PartSize stats relPath's part (model.PartWriter).
-func (b *SFTPBackend) PartSize(_ context.Context, relPath string) (int64, error) {
+func (b *SFTPBackend) PartSize(ctx context.Context, relPath string) (int64, error) {
 	p := b.abs(model.PartPath(relPath))
-	fi, err := b.sftp.Lstat(p)
+	var fi os.FileInfo
+	err := b.onMain(ctx, func(c *sftp.Client) (err error) {
+		fi, err = c.Lstat(p)
+		return err
+	})
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return 0, nil
@@ -289,9 +425,9 @@ func (b *SFTPBackend) PartSize(_ context.Context, relPath string) (int64, error)
 // which replaces a file or a link in one step, never a folder. Plain
 // SSH_FXP_RENAME refuses a name in use on OpenSSH, so without the extension
 // the file there goes first: a moment with no file at that name.
-func (b *SFTPBackend) CommitPart(_ context.Context, relPath string, mode os.FileMode) error {
+func (b *SFTPBackend) CommitPart(ctx context.Context, relPath string, mode os.FileMode) error {
 	Log.Add("sftp", DirOut, "COMMIT "+relPath)
-	err := b.commitPart(model.PartPath(relPath), relPath, mode)
+	err := b.onMain(ctx, func(c *sftp.Client) error { return b.commitPart(c, model.PartPath(relPath), relPath, mode) })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "COMMIT "+relPath+": "+err.Error())
@@ -299,21 +435,21 @@ func (b *SFTPBackend) CommitPart(_ context.Context, relPath string, mode os.File
 	return err
 }
 
-func (b *SFTPBackend) commitPart(partRel, relPath string, mode os.FileMode) error {
+func (b *SFTPBackend) commitPart(c *sftp.Client, partRel, relPath string, mode os.FileMode) error {
 	part, final := b.abs(partRel), b.abs(relPath)
 	if model.PartMode(mode) != mode.Perm() {
-		if err := b.sftp.Chmod(part, mode); err != nil {
+		if err := c.Chmod(part, mode); err != nil {
 			return err
 		}
 	}
 	folder := func() error {
-		if fi, err := b.sftp.Lstat(final); err == nil && fi.IsDir() {
+		if fi, err := c.Lstat(final); err == nil && fi.IsDir() {
 			return fmt.Errorf("sftp: %s is a folder: %w", final, fs.ErrExist)
 		}
 		return nil
 	}
-	if _, ok := b.sftp.HasExtension("posix-rename@openssh.com"); ok {
-		err := b.sftp.PosixRename(part, final)
+	if _, ok := c.HasExtension("posix-rename@openssh.com"); ok {
+		err := c.PosixRename(part, final)
 		if err != nil {
 			if ferr := folder(); ferr != nil {
 				return ferr
@@ -324,10 +460,10 @@ func (b *SFTPBackend) commitPart(partRel, relPath string, mode os.FileMode) erro
 	if err := folder(); err != nil {
 		return err
 	}
-	if err := b.sftp.Remove(final); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := c.Remove(final); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return b.sftp.Rename(part, final)
+	return c.Rename(part, final)
 }
 
 func (b *SFTPBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
@@ -338,8 +474,14 @@ func (b *SFTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) 
 	return b.openAt(ctx, relPath, offset)
 }
 
+// openAt opens relPath on a pooled connection, which watch closes when ctx
+// ends before the reader is closed and a read waits for the server (S11).
 func (b *SFTPBackend) openAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	conn, release := b.pool.acquire(ctx)
+	stop := conn.watch(ctx)
 	rc, err := conn.sftp.Open(b.abs(relPath))
 	if err == nil && offset > 0 {
 		if _, err = rc.Seek(offset, io.SeekStart); err != nil {
@@ -347,24 +489,33 @@ func (b *SFTPBackend) openAt(ctx context.Context, relPath string, offset int64) 
 		}
 	}
 	if err != nil {
-		release()
+		cut := stop()
+		b.giveBack(conn, release, cut)
+		if cut {
+			err = stopped(ctx)
+		}
 		Log.Add("sftp", DirErr, "OPEN "+relPath+": "+err.Error())
 		return nil, err
 	}
-	return &sftpPooledReader{ReadCloser: rc, release: release}, nil
+	return &sftpReader{ReadCloser: rc, ctx: ctx, done: func() { b.giveBack(conn, release, stop()) }}, nil
 }
 
-func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {
+func (b *SFTPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
 	fullPath := b.abs(relPath)
 	Log.Add("sftp", DirOut, "MKDIR "+relPath)
-	err := b.sftp.MkdirAll(fullPath)
+	err := b.onMain(ctx, func(c *sftp.Client) error {
+		if err := c.MkdirAll(fullPath); err != nil {
+			return err
+		}
+		if mode != 0 {
+			_ = c.Chmod(fullPath, mode.Perm())
+		}
+		return nil
+	})
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
 		return err
-	}
-	if mode != 0 {
-		_ = b.sftp.Chmod(fullPath, mode.Perm())
 	}
 	return nil
 }
@@ -373,17 +524,24 @@ func (b *SFTPBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode)
 // posix-rename@openssh.com, which is rename(2); plain SSH_FXP_RENAME needs
 // hard links on OpenSSH. A case-only rename skips the check: on a
 // case-insensitive server the target is the file itself.
-func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
-	if !strings.EqualFold(oldRelPath, newRelPath) {
-		if _, err := b.sftp.Lstat(b.abs(newRelPath)); err == nil {
-			return renameTargetTaken("sftp", newRelPath)
+func (b *SFTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	taken := false
+	err := b.onMain(ctx, func(c *sftp.Client) error {
+		if !strings.EqualFold(oldRelPath, newRelPath) {
+			if _, err := c.Lstat(b.abs(newRelPath)); err == nil {
+				taken = true
+				return renameTargetTaken("sftp", newRelPath)
+			}
 		}
+		rename := c.Rename
+		if _, ok := c.HasExtension("posix-rename@openssh.com"); ok {
+			rename = c.PosixRename
+		}
+		return rename(b.abs(oldRelPath), b.abs(newRelPath))
+	})
+	if taken {
+		return err
 	}
-	rename := b.sftp.Rename
-	if _, ok := b.sftp.HasExtension("posix-rename@openssh.com"); ok {
-		rename = b.sftp.PosixRename
-	}
-	err := rename(b.abs(oldRelPath), b.abs(newRelPath))
 	b.listCache.forgetRenamed(oldRelPath, newRelPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())
@@ -391,8 +549,8 @@ func (b *SFTPBackend) Rename(_ context.Context, oldRelPath, newRelPath string) e
 	return err
 }
 
-func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
-	err := b.sftp.Remove(b.abs(relPath))
+func (b *SFTPBackend) Remove(ctx context.Context, relPath string) error {
+	err := b.onMain(ctx, func(c *sftp.Client) error { return c.Remove(b.abs(relPath)) })
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
 		Log.Add("sftp", DirErr, "REMOVE "+relPath+": "+err.Error())
@@ -400,11 +558,11 @@ func (b *SFTPBackend) Remove(_ context.Context, relPath string) error {
 	return err
 }
 
-func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
+func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return fmt.Errorf("sftp: refusing to remove the base directory")
 	}
-	err := b.removeAll(b.abs(relPath))
+	err := b.onMain(ctx, func(c *sftp.Client) error { return removeAll(c, b.abs(relPath)) })
 	b.listCache.forgetRemoved(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
@@ -412,42 +570,55 @@ func (b *SFTPBackend) RemoveAll(_ context.Context, relPath string) error {
 	return err
 }
 
-func (b *SFTPBackend) removeAll(fullPath string) error {
-	info, err := b.sftp.Stat(fullPath)
+func removeAll(c *sftp.Client, fullPath string) error {
+	info, err := c.Stat(fullPath)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return b.sftp.Remove(fullPath)
+		return c.Remove(fullPath)
 	}
-	entries, err := b.sftp.ReadDir(fullPath)
+	entries, err := c.ReadDir(fullPath)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		child := path.Join(fullPath, e.Name())
 		if e.IsDir() {
-			err = b.removeAll(child)
+			err = removeAll(c, child)
 		} else {
-			err = b.sftp.Remove(child)
+			err = c.Remove(child)
 		}
 		if err != nil {
 			return err
 		}
 	}
-	return b.sftp.RemoveDirectory(fullPath)
+	return c.RemoveDirectory(fullPath)
 }
 
-// sftpPooledReader wraps an sftp.File so the underlying connection is
-// released back to the pool when the caller closes the reader.
-type sftpPooledReader struct {
+// sftpReader reads a file on a pooled connection, which openAt's watch
+// closes when ctx ends during a read the server does not answer. Close
+// gives the connection back.
+type sftpReader struct {
 	io.ReadCloser
-	release func()
-	once    sync.Once
+	ctx  context.Context
+	done func()
+	once sync.Once
 }
 
-func (r *sftpPooledReader) Close() error {
+// Read gives a read that failed after ctx ended ctx's error: a closed
+// connection reads as lost, and the backend the caller writes to would be
+// dropped for it (markBrokenIf).
+func (r *sftpReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && r.ctx.Err() != nil {
+		err = fmt.Errorf("sftp: read: %w", r.ctx.Err())
+	}
+	return n, err
+}
+
+func (r *sftpReader) Close() error {
 	err := r.ReadCloser.Close()
-	r.once.Do(r.release)
+	r.once.Do(r.done)
 	return err
 }

@@ -78,15 +78,33 @@ func (b *lazyBackend) current() model.Backend {
 	return b.inner
 }
 
+// connCutter is a backend that can close its own connection, as SFTP does
+// to stop a call the server does not answer (S11). One that has is of no
+// more use.
+type connCutter interface{ connCut() bool }
+
 // connected returns the connection, nil when there is none yet, or why no
-// call may reach the server now (connectGateLocked).
+// call may reach the server now (connectGateLocked). A connection its
+// backend closed is dropped here, so the call dials a new one at once.
 func (b *lazyBackend) connected() (model.Backend, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if err := b.connectGateLocked(); err != nil {
+		b.mu.Unlock()
 		return nil, err
 	}
-	return b.inner, nil
+	inner := b.inner
+	c, ok := inner.(connCutter)
+	cut := ok && c.connCut()
+	if cut {
+		b.inner = nil
+	}
+	b.mu.Unlock()
+	if cut {
+		Log.Add(b.proto, DirErr, "the connection was closed to stop a call the server did not answer; reconnecting")
+		inner.Close()
+		return nil, nil
+	}
+	return inner, nil
 }
 
 func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error) {

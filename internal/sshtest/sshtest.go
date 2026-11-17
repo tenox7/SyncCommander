@@ -28,6 +28,10 @@ type Options struct {
 	// internal-sftp does: with nothing on its input, a command prints
 	// nothing and exits 0. The sftp subsystem works.
 	OnlySFTP bool
+	// SFTPStream carries what the sftp server reads and writes. A test can
+	// hold it, as a server whose file system hangs: the server process
+	// reads and answers nothing, and the ssh connection stays up.
+	SFTPStream func(io.ReadWriter) io.ReadWriter
 }
 
 // Start serves until the test ends and returns the address. Without
@@ -91,7 +95,7 @@ func serveSession(c ssh.Channel, reqs <-chan *ssh.Request, o Options) {
 		var sub struct{ Name string }
 		if (o.SFTP || o.OnlySFTP) && req.Type == "subsystem" && ssh.Unmarshal(req.Payload, &sub) == nil && sub.Name == "sftp" {
 			req.Reply(true, nil)
-			serveSFTP(c)
+			serveSFTP(c, o)
 			return
 		}
 		var p struct{ Command string }
@@ -101,7 +105,7 @@ func serveSession(c ssh.Channel, reqs <-chan *ssh.Request, o Options) {
 		}
 		req.Reply(true, nil)
 		if o.OnlySFTP {
-			serveSFTP(c)
+			serveSFTP(c, o)
 			c.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 			return
 		}
@@ -127,8 +131,15 @@ func serveSession(c ssh.Channel, reqs <-chan *ssh.Request, o Options) {
 	}
 }
 
-func serveSFTP(c ssh.Channel) {
-	if srv, err := sftp.NewServer(c); err == nil {
+func serveSFTP(c ssh.Channel, o Options) {
+	var rw io.ReadWriteCloser = c
+	if o.SFTPStream != nil {
+		rw = struct {
+			io.ReadWriter
+			io.Closer
+		}{o.SFTPStream(c), c}
+	}
+	if srv, err := sftp.NewServer(rw); err == nil {
 		srv.Serve()
 	}
 }

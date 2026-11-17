@@ -140,7 +140,7 @@ func openSSHBackend(ctx context.Context, rawURL string, insecure bool, parallel 
 		return b, nil
 	}
 	Log.Add("ssh", DirIn, "SFTP available, using SFTP backend ("+ver+")")
-	b, err := newSFTPBackend(conn, rawURL, insecure, parallel)
+	b, err := newSFTPBackend(ctx, conn, rawURL, insecure, parallel)
 	if err != nil {
 		conn.client.Close()
 		return nil, err
