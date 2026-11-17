@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeFTPD is a small FTP server that lists the way vsftpd does by
@@ -40,10 +41,31 @@ type fakeFTPD struct {
 	hangAsked chan struct{}
 	refuse    func(n int) bool
 	featFails func(n int) bool
+	// Stalls (L8). With storStall STOR takes its data connection and reads
+	// nothing; with listStall LIST sends one line on it and then nothing,
+	// the connection left open. hang names a command that gets no reply. A
+	// file whose reply is "stall" is sent with its data connection left
+	// open and no reply; "none" closes the data connection and sends no
+	// reply. retrPace sends a file 1 KiB at a time, this long apart.
+	// dataOpen hears the command of each data connection taken. dropOnce
+	// names a command at which the server closes the connection, the first
+	// time it comes, as a link that went down.
+	dropOnce  string
+	dropped   bool
+	epsvPort  int // set, the data port EPSV names, one the fake does not serve
+	storStall bool
+	listStall bool
+	hang      string
+	retrPace  time.Duration
+	dataOpen  chan string
+	stop      chan struct{} // closed by closeAll; a stall waits on it
+	stopOnce  sync.Once
+	dataConns []net.Conn
 	mu        sync.Mutex
 	lists     []string // LIST arguments, in order
 	listConns []int    // the connection each LIST came on
 	logins    int      // PASS commands answered
+	quits     []int    // the connections that said QUIT
 	conns     []net.Conn
 	listener  net.Listener
 }
@@ -66,7 +88,8 @@ func (f *fakeFTPD) start(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
+	f.stop = make(chan struct{})
+	t.Cleanup(f.closeAll)
 	f.listener = l
 	go func() {
 		for {
@@ -90,6 +113,37 @@ func (f *fakeFTPD) start(t *testing.T) string {
 	return l.Addr().String()
 }
 
+// closeAll ends the server: its listener, every connection, every stall.
+func (f *fakeFTPD) closeAll() {
+	f.stopOnce.Do(func() { close(f.stop) })
+	f.listener.Close()
+	f.mu.Lock()
+	conns := append(slices.Clone(f.conns), f.dataConns...)
+	f.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+}
+
+// takeData accepts the data connection of cmd and keeps it for closeAll.
+func (f *fakeFTPD) takeData(pasv net.Listener, cmd string) (net.Conn, error) {
+	dc, err := pasv.Accept()
+	pasv.Close()
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.dataConns = append(f.dataConns, dc)
+	f.mu.Unlock()
+	if f.dataOpen != nil {
+		select {
+		case f.dataOpen <- cmd:
+		default:
+		}
+	}
+	return dc, nil
+}
+
 // connCount is how many connections the server took or turned away.
 func (f *fakeFTPD) connCount() int {
 	f.mu.Lock()
@@ -104,6 +158,13 @@ func (f *fakeFTPD) kill(n int) {
 	f.mu.Unlock()
 	io.WriteString(c, "421 Timeout.\r\n")
 	c.Close()
+}
+
+// quitFrom is whether the n-th connection said QUIT.
+func (f *fakeFTPD) quitFrom(n int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.quits, n)
 }
 
 func (f *fakeFTPD) loginCount() int {
@@ -137,6 +198,21 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			return
 		}
 		cmd, arg, _ := strings.Cut(strings.TrimRight(line, "\r\n"), " ")
+		f.mu.Lock()
+		hang := f.hang
+		f.mu.Unlock()
+		if hang != "" && strings.EqualFold(cmd, hang) {
+			continue
+		}
+		if f.dropOnce != "" && strings.EqualFold(cmd, f.dropOnce) {
+			f.mu.Lock()
+			drop := !f.dropped
+			f.dropped = true
+			f.mu.Unlock()
+			if drop {
+				return
+			}
+		}
 		switch strings.ToUpper(cmd) {
 		case "USER":
 			reply("331 Please specify the password.")
@@ -195,6 +271,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				reply("550 Failed to change directory.")
 			}
 		case "EPSV":
+			if f.epsvPort != 0 {
+				reply(fmt.Sprintf("229 Entering Extended Passive Mode (|||%d|)", f.epsvPort))
+				continue
+			}
 			if pasv, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
 				reply("425 Cannot listen.")
 				continue
@@ -210,11 +290,16 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			f.listConns = append(f.listConns, n)
 			f.mu.Unlock()
 			reply("150 Here comes the directory listing.")
-			dc, err := pasv.Accept()
-			pasv.Close()
+			dc, err := f.takeData(pasv, "LIST")
 			pasv = nil
 			if err != nil {
 				continue
+			}
+			if f.listStall {
+				io.WriteString(dc, lsLine("first", false)+"\r\n")
+				<-f.stop
+				dc.Close()
+				return
 			}
 			for _, l := range f.list(arg) {
 				io.WriteString(dc, l+"\r\n")
@@ -236,8 +321,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Here comes the listing.")
-			dc, err := pasv.Accept()
-			pasv.Close()
+			dc, err := f.takeData(pasv, "MLSD")
 			pasv = nil
 			if err != nil {
 				continue
@@ -254,15 +338,33 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Opening BINARY mode data connection.")
-			dc, err := pasv.Accept()
-			pasv.Close()
+			dc, err := f.takeData(pasv, "RETR")
 			pasv = nil
 			if err != nil {
 				continue
 			}
-			io.WriteString(dc, file.body)
-			dc.Close()
-			reply(file.reply)
+			for body := file.body; body != ""; {
+				n := len(body)
+				if f.retrPace > 0 {
+					n = min(n, 1024)
+				}
+				io.WriteString(dc, body[:n])
+				body = body[n:]
+				if f.retrPace > 0 && body != "" {
+					time.Sleep(f.retrPace)
+				}
+			}
+			switch file.reply {
+			case "stall":
+				<-f.stop
+				dc.Close()
+				return
+			case "none":
+				dc.Close()
+			default:
+				dc.Close()
+				reply(file.reply)
+			}
 		case "SIZE":
 			f.mu.Lock()
 			body, ok := f.store[path.Clean(arg)]
@@ -281,11 +383,15 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Ok to send data.")
-			dc, err := pasv.Accept()
-			pasv.Close()
+			dc, err := f.takeData(pasv, "STOR")
 			pasv = nil
 			if err != nil {
 				continue
+			}
+			if f.storStall {
+				<-f.stop
+				dc.Close()
+				return
 			}
 			data, _ := io.ReadAll(dc)
 			dc.Close()
@@ -337,6 +443,9 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			}
 			reply("250 Delete operation successful.")
 		case "QUIT":
+			f.mu.Lock()
+			f.quits = append(f.quits, n)
+			f.mu.Unlock()
 			reply("221 Goodbye.")
 			return
 		default:

@@ -25,9 +25,11 @@ import (
 )
 
 type FTPBackend struct {
-	base    string
-	conn    *ftp.ServerConn
-	rawConn net.Conn
+	base string
+	conn *ftp.ServerConn
+	// socks are the primary's sockets, which a cancel closes. A reconnect
+	// replaces them under a cancel watcher.
+	socks   atomic.Pointer[ftpSockets]
 	hash    *ftpHashConn
 	display string
 	addr    string
@@ -36,12 +38,183 @@ type FTPBackend struct {
 	scheme  string
 	tlsCfg  *tls.Config
 	pool    *connPool[*ftpConn]
-	mu      sync.Mutex
+	// prim is held while the primary connection is in use: a call waits for
+	// it only as long as its ctx lets it, as a call stuck on the server
+	// holds it (L8). It guards conn and dashA.
+	prim    chan struct{}
+	closed  atomic.Bool
 	dirs    sync.Map // directories known to exist, so uploads skip the MKD dance
 	capture *listCapture
 	// dashA is whether LIST takes -a on a server without MLSD: 0 not known
-	// yet, 1 yes, -1 no. See listLocked. Guarded by mu.
+	// yet, 1 yes, -1 no. See listLocked. Guarded by prim.
 	dashA int
+}
+
+// ftpIdle is the longest one read or one write on an FTP socket may wait for
+// its bytes: a reply on the control connection, or the next bytes of a
+// transfer or a listing. A server that stops answering fails the call after
+// it, with no cancel needed (L8).
+var ftpIdle = idleSetting{def: 5 * time.Minute}
+
+// SetFTPIdleTimeout sets ftpIdle; 0 or less waits for ever.
+func SetFTPIdleTimeout(d time.Duration) { ftpIdle.set(d) }
+
+// opDeadlineConn gives each read and each write a deadline from when it
+// starts. A socket may sit idle between them as long as it likes, as a
+// control connection does while its transfer runs; idleTimeoutConn moves
+// the deadline after each one, which would expire a control connection
+// during a long transfer. A deadline set from outside still holds when it
+// comes first: TLS sets one to send its close alert. A read or a write that
+// runs out of time closes the socket: a reply that came after its call gave
+// up would be read as the reply to the next one.
+type opDeadlineConn struct {
+	net.Conn
+	idle   time.Duration
+	mu     sync.Mutex
+	rd, wd time.Time // set from outside; zero for none
+}
+
+// ftpWriteChunk is the most one write sends under one deadline, so a large
+// buffer that a slow link moves steadily does not run out of time.
+const ftpWriteChunk = 64 << 10
+
+func (c *opDeadlineConn) Read(p []byte) (int, error) {
+	if c.idle > 0 {
+		c.mu.Lock()
+		c.Conn.SetReadDeadline(sooner(c.rd, c.idle))
+		c.mu.Unlock()
+	}
+	n, err := c.Conn.Read(p)
+	c.closeOnTimeout(err)
+	return n, err
+}
+
+func (c *opDeadlineConn) Write(p []byte) (int, error) {
+	if c.idle <= 0 {
+		n, err := c.Conn.Write(p)
+		c.closeOnTimeout(err)
+		return n, err
+	}
+	total := 0
+	for len(p) > 0 {
+		c.mu.Lock()
+		c.Conn.SetWriteDeadline(sooner(c.wd, c.idle))
+		c.mu.Unlock()
+		n, err := c.Conn.Write(p[:min(len(p), ftpWriteChunk)])
+		total += n
+		if err != nil {
+			c.closeOnTimeout(err)
+			return total, err
+		}
+		p = p[n:]
+	}
+	return total, nil
+}
+
+func (c *opDeadlineConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rd, c.wd = t, t
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *opDeadlineConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rd = t
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *opDeadlineConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wd = t
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *opDeadlineConn) closeOnTimeout(err error) {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		c.Conn.Close()
+	}
+}
+
+// sooner is idle from now, or set when that comes first.
+func sooner(set time.Time, idle time.Duration) time.Time {
+	d := time.Now().Add(idle)
+	if !set.IsZero() && set.Before(d) {
+		return set
+	}
+	return d
+}
+
+// ftpSockets are the sockets of one control connection: its own, and the
+// data connections it opens. Close closes them all, which ends any call on
+// the connection: closing the control socket alone left a transfer or a
+// listing waiting on its data socket (L8). A data connection dialed after
+// Close is closed at once.
+type ftpSockets struct {
+	ctx    context.Context // ends at Close, and with it a data dial
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	ctrl   net.Conn
+	data   map[*ftpDataConn]struct{}
+	closed bool
+}
+
+func newFTPSockets() *ftpSockets {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &ftpSockets{ctx: ctx, cancel: cancel, data: map[*ftpDataConn]struct{}{}}
+}
+
+func (s *ftpSockets) setCtrl(c net.Conn) {
+	s.mu.Lock()
+	s.ctrl = c
+	s.mu.Unlock()
+}
+
+// addData keeps c, a data connection, until it closes.
+func (s *ftpSockets) addData(c net.Conn) (net.Conn, error) {
+	d := &ftpDataConn{Conn: c, s: s}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		c.Close()
+		return nil, net.ErrClosed
+	}
+	s.data[d] = struct{}{}
+	return d, nil
+}
+
+func (s *ftpSockets) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.cancel()
+	s.mu.Lock()
+	s.closed = true
+	ctrl, data := s.ctrl, s.data
+	s.data = nil
+	s.mu.Unlock()
+	for d := range data {
+		d.Conn.Close()
+	}
+	if ctrl != nil {
+		return ctrl.Close()
+	}
+	return nil
+}
+
+// ftpDataConn is a data connection its ftpSockets keeps until it closes.
+type ftpDataConn struct {
+	net.Conn
+	s *ftpSockets
+}
+
+func (d *ftpDataConn) Close() error {
+	d.s.mu.Lock()
+	delete(d.s.data, d)
+	d.s.mu.Unlock()
+	return d.Conn.Close()
 }
 
 // ftpConn is one extra control+data connection used for a parallel transfer.
@@ -50,7 +223,7 @@ type FTPBackend struct {
 // on acquire; see acquireExtra.
 type ftpConn struct {
 	conn     *ftp.ServerConn
-	rawConn  net.Conn
+	socks    *ftpSockets
 	lastUsed time.Time
 }
 
@@ -64,31 +237,36 @@ func (c *ftpConn) close() {
 // dial hook meters every socket and adds the TLS the library would have: with
 // a custom dialer jlaffaye skips its own implicit-TLS dial and hands out data
 // connections before its TLS branch, so ftps would speak plaintext to port
-// 990 and ftpes data channels would ignore PROT P. The returned net.Conn is
-// the raw control socket, closed on ctx cancel to abort blocked transfers.
-// dialFTPConn opens and logs in a control connection. Until the login is
-// done a cancel of ctx closes its socket, which ends a dial, a greeting or
-// a login that waits on a server that does not answer (D1). The data
-// connections it opens later are dialled under the call that needs them.
-func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, net.Conn, error) {
+// 990 and ftpes data channels would ignore PROT P. It returns the sockets
+// of the connection, which a cancel closes to end a call that waits on one.
+// Until the login is done a cancel of ctx closes the control socket, which
+// ends a dial, a greeting or a login that waits on a server that does not
+// answer (D1). The data connections it opens later are dialled under the
+// call that needs them.
+func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, *ftpSockets, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	var rawConn net.Conn
+	socks := newFTPSockets()
+	idle := ftpIdle.get()
 	var dials atomic.Int32
 	stopWatch := func() bool { return true }
 	dialFunc := func(network, address string) (net.Conn, error) {
 		n := dials.Add(1)
-		dialCtx := context.Background()
+		dialCtx := socks.ctx
 		if n == 1 {
 			dialCtx = ctx
 		}
-		c, err := dialer.DialContext(dialCtx, network, address)
+		raw, err := dialer.DialContext(dialCtx, network, address)
 		if err != nil {
 			return nil, err
 		}
-		c = LimitConn(c)
+		// The limiter sleeps outside the deadline: each chunk it sends
+		// gets its own.
+		c := LimitConn(&opDeadlineConn{Conn: raw, idle: idle})
 		if n == 1 {
-			rawConn = c
+			socks.setCtrl(c)
 			stopWatch = context.AfterFunc(ctx, func() { c.Close() })
+		} else if c, err = socks.addData(c); err != nil {
+			return nil, err
 		}
 		// Explicit TLS upgrades the control connection itself after AUTH TLS
 		// and leaves only the data sockets to us.
@@ -116,12 +294,13 @@ func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *t
 		err = ctx.Err()
 	}
 	if err != nil {
+		socks.Close()
 		if ctx.Err() != nil {
 			return nil, nil, fmt.Errorf("ftp %s: %w", addr, ctx.Err())
 		}
 		return nil, nil, err
 	}
-	return conn, rawConn, nil
+	return conn, socks, nil
 }
 
 // loginFTP dials addr, logs in and switches to binary mode.
@@ -165,7 +344,7 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 	addr := host + ":" + port
 
 	capture := &listCapture{}
-	conn, rawConn, err := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, capture)
+	conn, socks, err := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, capture)
 	if err != nil {
 		return nil, err
 	}
@@ -190,9 +369,9 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 		displayHost = addr
 	}
 	b := &FTPBackend{
-		base:    remotePath,
-		conn:    conn,
-		rawConn: rawConn,
+		base: remotePath,
+		conn: conn,
+		prim: make(chan struct{}, 1),
 		hash: newFTPHashConn(func(ctx context.Context) (*ftpHasher, error) {
 			return newFTPHasher(ctx, host, port, user, pass, scheme, tlsCfg)
 		}, hasher, hashErr),
@@ -204,45 +383,80 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 		tlsCfg:  tlsCfg,
 		capture: capture,
 	}
+	b.socks.Store(socks)
 
 	// Extra connections for parallel transfers. Primary is nil: when the pool
 	// is at capacity acquireExtra returns false and the caller serializes on
-	// the primary conn under b.mu. maxExtras=0 (parallel<=1) means every
+	// the primary conn under prim. maxExtras=0 (parallel<=1) means every
 	// transfer takes the primary path.
 	dial := func(ctx context.Context) (*ftpConn, error) {
-		c, raw, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, nil)
+		c, socks, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, nil)
 		if derr != nil {
 			return nil, derr
 		}
 		Log.Add("ftp", DirIn, "extra connection dialed")
-		return &ftpConn{conn: c, rawConn: raw, lastUsed: time.Now()}, nil
+		return &ftpConn{conn: c, socks: socks, lastUsed: time.Now()}, nil
 	}
 	b.pool = newConnPool[*ftpConn](nil, parallel-1, dial, func(c *ftpConn) { c.close() })
 	return b, nil
 }
 
-// abortOnCancel returns a stop func that, while running, closes the raw
-// control conn when ctx is canceled. Closing the underlying net.Conn
-// unblocks blocked Stor/Retr/List/etc by failing the next read/write on
-// the control conn. Data conns (which the library opens separately) get
-// TCP keepalive via the shared Dialer, so dead peers there are detected
-// at the OS level.
+// abortOnCancel returns a stop func that, while running, closes the
+// primary's sockets when ctx is canceled: the control socket and the data
+// sockets, so a call that waits on either ends.
 func (b *FTPBackend) abortOnCancel(ctx context.Context) func() {
-	return CancelCloser(ctx, b.rawConn)
+	return CancelCloser(ctx, primarySockets{b})
 }
+
+// primarySockets closes the primary's sockets as they are when it is
+// called: a reconnect under a call replaces them, and the call that runs
+// again on the new ones is ended by a cancel too.
+type primarySockets struct{ b *FTPBackend }
+
+func (p primarySockets) Close() error { return p.b.socks.Load().Close() }
+
+// lockPrimary takes the primary connection, waiting no longer than ctx.
+func (b *FTPBackend) lockPrimary(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case b.prim <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *FTPBackend) unlockPrimary() { <-b.prim }
 
 func (b *FTPBackend) BasePath() string { return b.display }
 
 // SetParallel keeps n-1 extra connections; the n-th transfer shares the
-// primary under b.mu.
+// primary under prim.
 func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
 
+// Close says QUIT on the primary connection: now when it is free, or else
+// once the call that holds it lets it go. Close waited for that call, so
+// one stuck on a server that does not answer held quit for good (L8); its
+// cancel, or ftpIdle, ends such a call now. A call that fails after Close
+// makes no new connection.
 func (b *FTPBackend) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.closed.Store(true)
 	b.pool.close()
 	b.hash.close()
-	return b.conn.Quit()
+	select {
+	case b.prim <- struct{}{}:
+		defer b.unlockPrimary()
+		return b.conn.Quit()
+	default:
+	}
+	go func() {
+		b.prim <- struct{}{}
+		defer b.unlockPrimary()
+		b.conn.Quit()
+	}()
+	return nil
 }
 
 // acquireExtra returns a dedicated transfer connection and its release func,
@@ -256,8 +470,8 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 		poolRelease()
 		return nil, nil, false
 	}
-	// On cancel, CancelCloser force-closes this conn's control socket, so it
-	// goes back dead. Zero lastUsed to force a liveness probe on next acquire
+	// On cancel, CancelCloser force-closes this conn's sockets, so it goes
+	// back dead. Zero lastUsed to force a liveness probe on next acquire
 	// rather than handing out a corpse within the 60s trust window.
 	release := func() {
 		c.lastUsed = time.Now()
@@ -266,8 +480,8 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 		}
 		poolRelease()
 	}
-	if time.Since(c.lastUsed) > 60*time.Second && c.conn.NoOp() != nil {
-		conn, raw, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
+	if time.Since(c.lastUsed) > 60*time.Second && c.probe(ctx) != nil {
+		conn, socks, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
 		if err != nil {
 			Log.Add("ftp", DirErr, "extra reconnect failed: "+err.Error())
 			c.lastUsed = time.Time{} // still dead: keep the probe armed
@@ -275,20 +489,30 @@ func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) 
 			return nil, nil, false
 		}
 		c.conn.Quit()
-		c.conn, c.rawConn, c.lastUsed = conn, raw, time.Now()
+		c.conn, c.socks, c.lastUsed = conn, socks, time.Now()
 		Log.Add("ftp", DirIn, "extra reconnected")
 	}
 	return c, release, true
 }
 
+// probe asks c whether it still answers; a cancel of ctx ends the wait.
+func (c *ftpConn) probe(ctx context.Context) error {
+	defer CancelCloser(ctx, c.socks)()
+	return c.conn.NoOp()
+}
+
 func (b *FTPBackend) reconnectLocked(ctx context.Context) error {
+	if b.closed.Load() {
+		return net.ErrClosed // a call Close ended makes no new connection
+	}
 	b.conn.Quit()
-	conn, rawConn, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, b.capture)
+	conn, socks, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, b.capture)
 	if err != nil {
-		b.rawConn = nil
+		b.socks.Store(nil)
 		return err
 	}
-	b.conn, b.rawConn = conn, rawConn
+	b.conn = conn
+	b.socks.Store(socks)
 	Log.Add("ftp", DirIn, "reconnected")
 	return nil
 }
@@ -297,8 +521,10 @@ func (b *FTPBackend) reconnectLocked(ctx context.Context) error {
 // when the connection turns out dead, reconnects and runs it once more. Only
 // for ops that can safely repeat.
 func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	if err := b.lockPrimary(ctx); err != nil {
+		return err
+	}
+	defer b.unlockPrimary()
 	defer b.abortOnCancel(ctx)()
 	err := op()
 	if err == nil || ctx.Err() != nil || b.conn.NoOp() == nil {
@@ -308,6 +534,9 @@ func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
 	if rerr := b.reconnectLocked(ctx); rerr != nil {
 		Log.Add("ftp", DirErr, "reconnect failed: "+rerr.Error())
 		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err() // a cancel during the reconnect closed the old sockets
 	}
 	return op()
 }
@@ -727,15 +956,17 @@ func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, o
 	fullPath := path.Join(b.base, relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
 		defer release()
-		return b.storeOn(ctx, ex.conn, ex.rawConn, fullPath, src, offset)
+		return b.storeOn(ctx, ex.conn, ex.socks, fullPath, src, offset)
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.storeOn(ctx, b.conn, b.rawConn, fullPath, src, offset)
+	if err := b.lockPrimary(ctx); err != nil {
+		return err
+	}
+	defer b.unlockPrimary()
+	return b.storeOn(ctx, b.conn, b.socks.Load(), fullPath, src, offset)
 }
 
-func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, raw net.Conn, fullPath string, src io.Reader, offset int64) error {
-	defer CancelCloser(ctx, raw)()
+func (b *FTPBackend) storeOn(ctx context.Context, conn *ftp.ServerConn, socks *ftpSockets, fullPath string, src io.Reader, offset int64) error {
+	defer CancelCloser(ctx, socks)()
 	err := b.ensureDir(conn, path.Dir(fullPath))
 	if err == nil && offset > 0 {
 		err = conn.StorFrom(fullPath, src, uint64(offset))
@@ -927,22 +1158,28 @@ func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io
 	Log.Add("ftp", DirOut, fmt.Sprintf("RETR %s @%d", relPath, offset))
 	fullPath := path.Join(b.base, relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
+		stop := CancelCloser(ctx, ex.socks)
 		resp, err := retrFrom(ex.conn, fullPath, offset)
 		if err != nil {
+			stop()
 			release()
 			Log.Add("ftp", DirErr, err.Error())
 			return nil, err
 		}
-		return &ftpReader{rc: resp, stop: CancelCloser(ctx, ex.rawConn), done: release}, nil
+		return &ftpReader{rc: resp, stop: stop, done: release}, nil
 	}
-	b.mu.Lock()
+	if err := b.lockPrimary(ctx); err != nil {
+		return nil, err
+	}
+	stop := b.abortOnCancel(ctx)
 	resp, err := retrFrom(b.conn, fullPath, offset)
 	if err != nil {
-		b.mu.Unlock()
+		stop()
+		b.unlockPrimary()
 		Log.Add("ftp", DirErr, err.Error())
 		return nil, err
 	}
-	return &ftpReader{rc: resp, stop: b.abortOnCancel(ctx), done: b.mu.Unlock}, nil
+	return &ftpReader{rc: resp, stop: stop, done: b.unlockPrimary}, nil
 }
 
 func retrFrom(conn *ftp.ServerConn, fullPath string, offset int64) (*ftp.Response, error) {
@@ -952,9 +1189,10 @@ func retrFrom(conn *ftp.ServerConn, fullPath string, offset int64) (*ftp.Respons
 	return conn.Retr(fullPath)
 }
 
-// ftpReader wraps a RETR body. Close stops the cancel watcher, closes the data
-// stream and runs done (a pool release or the primary unlock) exactly once,
-// since the copy layer may Close more than once.
+// ftpReader wraps a RETR body. Close closes the data stream, reads the
+// server's reply, stops the cancel watcher and runs done (a pool release or
+// the primary unlock) exactly once, since the copy layer may Close more than
+// once.
 type ftpReader struct {
 	rc   io.ReadCloser
 	stop func()
@@ -996,10 +1234,13 @@ func (r *ftpReader) shutdown() error {
 	return r.shutErr
 }
 
+// Close reads the server's final reply with the cancel watcher still on:
+// stopped first, a server that never sent the reply held Close for good
+// (L8).
 func (r *ftpReader) Close() error {
 	r.once.Do(func() {
-		r.stop()
 		r.err = r.shutdown()
+		r.stop()
 		r.done()
 	})
 	return r.err

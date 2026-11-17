@@ -39,6 +39,7 @@ func main() {
 	listTimeout := flag.Duration("list-timeout", 120*time.Second, "abort one directory listing after this long (0 = never)")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
+	ftpTimeout := flag.Duration("ftp-timeout", 5*time.Minute, "ftp timeout: fail a call when one read or write on its connection waits this long (0 = never)")
 	resticDelete := flag.Bool("restic-delete", false, "allow deletes in a restic:// repository, a mirror's included (off: refused)")
 	resticNew := flag.Bool("restic-new", false, "open a restic:// path that holds no repository yet (no config), to copy one into it (off: refused, as a mistyped path looks the same)")
 	bwLimit := flag.String("bwlimit", "0", "bandwidth limit per direction, e.g. 512k, 4M (0 = unlimited)")
@@ -99,6 +100,7 @@ func main() {
 	model.LogErr = func(proto, msg string) { transport.Log.Add(proto, transport.DirErr, msg) }
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
 	transport.SetResticIdleTimeout(*resticTimeout)
+	transport.SetFTPIdleTimeout(*ftpTimeout)
 	transport.SetResticDeletes(*resticDelete)
 	transport.SetResticNew(*resticNew)
 
