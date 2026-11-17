@@ -55,8 +55,9 @@ func (b *RcloneBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{OpenAt: true, Preload: true}, nil
 }
 
+// The fake takes copies as a local disk does (L22).
 func (b *FakeBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true}, nil
 }
 
 // The optional interfaces are reached by type assertion once Caps says yes,
@@ -116,6 +117,9 @@ var (
 	_ model.SeekableOpener     = (*RcloneBackend)(nil)
 	_ model.RecursivePreloader = (*RcloneBackend)(nil)
 	_ model.Backend            = (*FakeBackend)(nil)
+	_ model.Resumer            = (*FakeBackend)(nil)
+	_ model.PartWriter         = (*FakeBackend)(nil)
+	_ model.RegionChecksummer  = (*FakeBackend)(nil)
 	_ model.SeekableOpener     = (*FakeBackend)(nil)
 	_ model.Backend            = (*lazyBackend)(nil)
 	_ model.LivenessManaged    = (*lazyBackend)(nil)

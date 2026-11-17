@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -64,29 +65,63 @@ func TestFakeShape(t *testing.T) {
 	}
 }
 
+// diff= changes a file in one of three ways, a third each: it grows (the same
+// first bytes, more of them, a later time), it is rewritten (the same size,
+// other bytes, a later time), or only a checksum tells (the same size and
+// time, other bytes). Before L22 every changed file grew. drop= takes files
+// away.
 func TestFakeDiffAndDrop(t *testing.T) {
-	plain, _ := NewFakeBackend("fake://x?dirs=0&files=2000&depth=1")
-	skewed, _ := NewFakeBackend("fake://x?dirs=0&files=2000&depth=1&diff=0.1&drop=0.05")
-	base, _ := plain.List(context.Background(), "")
-	other, _ := skewed.List(context.Background(), "")
+	ctx := context.Background()
+	plain, _ := NewFakeBackend("fake://x?dirs=0&files=2000&depth=1&size=4096")
+	skewed, _ := NewFakeBackend("fake://x?dirs=0&files=2000&depth=1&size=4096&diff=0.1&drop=0.05")
+	base, _ := plain.List(ctx, "")
+	other, _ := skewed.List(ctx, "")
 
 	dropped := len(base) - len(other)
 	if dropped < 60 || dropped > 140 {
 		t.Errorf("drop=0.05 of 2000 removed %d entries, want ~100", dropped)
 	}
 
-	byName := make(map[string]int64, len(base))
+	byName := make(map[string]model.FileEntry, len(base))
 	for _, e := range base {
-		byName[e.Name] = e.Size
+		byName[e.Name] = e
 	}
-	differing := 0
+	body := func(b *FakeBackend, rel string) []byte {
+		t.Helper()
+		rd, err := b.Open(ctx, rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rd.Close()
+		data, err := io.ReadAll(rd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	var grown, rewritten, silent int
 	for _, e := range other {
-		if size, ok := byName[e.Name]; ok && size != e.Size {
-			differing++
+		was, ok := byName[e.Name]
+		if !ok {
+			continue
+		}
+		a, b := body(plain, e.RelPath), body(skewed, e.RelPath)
+		later := e.ModTime.After(was.ModTime)
+		switch {
+		case e.Size > was.Size && later && bytes.HasPrefix(b, a):
+			grown++
+		case e.Size == was.Size && later && (e.Size == 0 || !bytes.Equal(a, b)):
+			rewritten++
+		case e.Size == was.Size && e.ModTime.Equal(was.ModTime) && !bytes.Equal(a, b):
+			silent++
+		case e != was || !bytes.Equal(a, b):
+			t.Errorf("%s changed in a way diff= does not make: %+v, was %+v", e.Name, e, was)
 		}
 	}
-	if differing < 130 || differing > 270 {
-		t.Errorf("diff=0.1 of ~1900 perturbed %d entries, want ~190", differing)
+	for kind, n := range map[string]int{"grew": grown, "were rewritten": rewritten, "changed so only a checksum tells": silent} {
+		if n < 35 || n > 100 {
+			t.Errorf("diff=0.1 of ~1900: %d files %s, want ~63", n, kind)
+		}
 	}
 }
 
