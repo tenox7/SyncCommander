@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"sc/model"
+	"sc/transport"
 )
 
 // W-H4: after a deep scan, an rsync daemon's listings came from the cache
@@ -59,4 +61,46 @@ func TestRescanShowsWhatTheServerHoldsNow(t *testing.T) {
 	writeFile(t, filepath.Join(mod, "sub", "c.txt"), "new")
 	s.sc.RescanNode(ctx, s.node(t, "sub"), scenarioOpts, nil)
 	check("after r on sub", "sub", "a.txt", "b.txt", "c.txt")
+}
+
+// F12, W-H4: a rescan after a copy that lists a few folders lists each of
+// them fresh. With no recursive listing to serve them, a listing from the
+// cache the scan filled shows the folder as it was then: here a file put on
+// the server since, in a folder the copy wrote to.
+func TestRescanAfterACopyListsEachFolderFresh(t *testing.T) {
+	url, mod := startRsyncd(t)
+	right := t.TempDir()
+	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for _, side := range []string{mod, right} {
+		for _, d := range []string{"s0", "s1", "s2", "s3"} {
+			p := filepath.Join(side, "d", d, "a.txt")
+			writeFile(t, p, "x")
+			if err := os.Chtimes(p, at, at); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeFile(t, filepath.Join(mod, "d", "s1", "new.txt"), "new")
+	lb, err := transport.TryOpenBackend(url, false, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { transport.CloseBackend(lb) })
+	s := scanned(t, mod, right, lb, transport.NewLocalBackend(right)) // the daemon is the source
+	writeFile(t, filepath.Join(mod, "d", "s1", "later.txt"), "put on the server after the scan")
+	ctx := context.Background()
+	node := s.node(t, "d")
+	p := &Progress{}
+	res := Copy(ctx, Request{Src: s.lb, Dst: s.rb, Scanner: s.sc, Node: node, RelPath: "d",
+		LeftToRight: true, Opts: scenarioOpts, Parallel: 1, Progress: p, Plan: PlanCopy(s.sc, node, true, scenarioOpts)})
+	if p.Failed.Load() != 0 {
+		t.Fatalf("%d failed", p.Failed.Load())
+	}
+	s.sc.RescanNode(ctx, res.RescanRoot, scenarioOpts, res.Changed)
+	if n := s.findRel("d/s1/new.txt"); n == nil || n.Compare.Presence != model.PresenceBoth {
+		t.Error("after the rescan the tree does not show d/s1/new.txt on both sides")
+	}
+	if s.findRel("d/s1/later.txt") == nil {
+		t.Error("after the rescan the tree does not show d/s1/later.txt, put on the server after the scan: d/s1 came from the cache")
+	}
 }

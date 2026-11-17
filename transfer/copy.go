@@ -376,6 +376,7 @@ func (c *copier) clearTwin(relPath string) error {
 			tw.err = fmt.Errorf("the destination has a %s %s in the way, not replaced without confirmation (copy again to see the dialog)", kind, tw.relPath)
 			return
 		}
+		c.markChanged(tw.relPath)
 		if err := c.remove(tw.entry); err != nil {
 			tw.err = fmt.Errorf("could not remove the %s %s in the way: %w", kind, tw.relPath, err)
 			return
@@ -404,6 +405,9 @@ func (c *copier) remove(e entry) error {
 	return c.dst.Remove(c.ctx, e.relPath)
 }
 
+// markChanged records a destination path the copy wrote or removed, or
+// tried to: the rescan lists the folders that hold such paths, and no others
+// (F12), and their cached checksums go.
 func (c *copier) markChanged(relPath string) {
 	c.mu.Lock()
 	c.dstChanged[relPath] = true
@@ -587,6 +591,10 @@ func (c *copier) copyOne(f item) {
 		c.failed("COPY "+f.relPath, err)
 		return
 	}
+	// From here the destination path may change, also when the copy then
+	// fails half way: the rescan lists its folder again, and its cached
+	// checksum goes (F12).
+	c.markChanged(f.relPath)
 	if srcEntry.IsDir {
 		p.File.Store(f.relPath)
 		p.beginFile(0)
@@ -616,7 +624,6 @@ func (c *copier) copyOne(f item) {
 		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime, srcEntry.BirthTime); err != nil {
 			transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
 		}
-		c.markChanged(f.relPath)
 		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
 	}
 	guarded := func(op func(context.Context) bool) (ok bool) {
@@ -655,7 +662,6 @@ func (c *copier) copyOne(f item) {
 			c.failed("COPY "+f.relPath, err)
 			return
 		}
-		c.markChanged(f.relPath)
 		how := ""
 		if resumed {
 			how = " (resumed)"
@@ -742,6 +748,7 @@ func (c *copier) mirrorDelete() {
 				}
 				continue
 			}
+			c.markChanged(d.RelPath)
 			if err := c.remove(entry{relPath: d.RelPath, isDir: d.IsDir}); err != nil {
 				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.RelPath+": "+err.Error())
 				continue

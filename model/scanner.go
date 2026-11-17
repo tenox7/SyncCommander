@@ -335,7 +335,11 @@ func countGroupFiles(groups []checksumGroup) int64 {
 
 // RescanNode lists node again, down to the scanner's maxDepth, and shows
 // what both sides hold now: a rescan never takes a listing from a cache an
-// earlier recursive listing filled (W-H4).
+// earlier recursive listing filled (W-H4). After a write, changed holds the
+// paths it wrote or removed, and the rescan lists node and the folders under
+// it that hold one of them, and no others: after a copy of one file, a deep
+// scan's rescan listed every folder under the file's folder, the whole tree
+// for a file at the top (F12).
 func (s *Scanner) RescanNode(ctx context.Context, node *TreeNode, opts CompareOpts, changed *ChangedPaths) {
 	if node.IsDir {
 		s.rescanDir(ctx, node, opts, s.maxDepth, changed)
@@ -480,6 +484,35 @@ func (s *Scanner) rescanFile(ctx context.Context, node *TreeNode, opts CompareOp
 	}
 }
 
+// mostTouched says whether changed holds paths in more than half of the
+// folders under node: one recursive listing of node then serves a rescan
+// better than a listing of each. It walks the touched folders, then counts
+// the others only up to twice as many.
+func mostTouched(node *TreeNode, changed *ChangedPaths) bool {
+	touched := countDirs(node, 0, changed.touchesSubtree)
+	return touched > 0 && countDirs(node, 2*touched, nil) < 2*touched
+}
+
+// countDirs counts the folders under node that keep passes, nil keeping
+// all, descending only into those, and stops at limit when limit > 0.
+func countDirs(node *TreeNode, limit int, keep func(relPath string) bool) int {
+	n := 0
+	var walk func(*TreeNode) bool
+	walk = func(p *TreeNode) bool {
+		for _, c := range p.Children {
+			if !c.IsDir || (keep != nil && !keep(c.RelPath)) {
+				continue
+			}
+			if n++; n == limit || !walk(c) {
+				return false
+			}
+		}
+		return true
+	}
+	walk(node)
+	return n
+}
+
 func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpts, depthLimit int, changed *ChangedPaths) {
 	var preloadOnce sync.Once
 	var dirsListed, totalFiles, ckDone atomic.Int64
@@ -507,21 +540,22 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		collectExpanded(child, oldExpanded)
 	}
 	seed, ok := listJob(node, node.Depth+1)
+	// A rescan shows what the server holds now, not what an earlier
+	// recursive listing left in a backend's cache (W-H4). Its own folder is
+	// listed fresh; on a full-depth rescan that lists most folders under it,
+	// a fresh recursive listing, started right after, serves the rest, so a
+	// big tree is not listed folder by folder. Any other rescan starts none:
+	// each folder it lists is listed fresh.
+	preload := depthLimit == 0 && (changed == nil || mostTouched(node, changed))
 	s.mu.RUnlock()
 	if !ok {
 		return
 	}
 
-	// A rescan shows what the server holds now, not what an earlier
-	// recursive listing left in a backend's cache (W-H4). Its own folder is
-	// listed fresh; on a full-depth rescan a fresh recursive listing, started
-	// right after, serves the rest, so a big tree is not listed folder by
-	// folder. A rescan with a depth limit starts none: each folder it lists
-	// is listed fresh.
 	fresh := WithFreshListing(ctx)
 	walkDirs(ctx, s.listWidth, []dirJob{seed}, func(job dirJob) []dirJob {
 		lctx := fresh
-		if job.parent != node && depthLimit == 0 {
+		if job.parent != node && preload {
 			lctx = ctx
 		}
 		leftEntries, rightEntries, listErr := s.listDir(lctx, job.relDir, job.listLeft, job.listRight)
@@ -549,7 +583,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		setp(PhaseScanning)
 
 		var filter func(*TreeNode) bool
-		if depthLimit != 0 && job.depth+1 > depthLimit {
+		if changed != nil || (depthLimit != 0 && job.depth+1 > depthLimit) {
 			filter = func(n *TreeNode) bool { return changed.touchesSubtree(n.RelPath) }
 		}
 		next := childJobs(children, job.depth+1, filter)
@@ -557,7 +591,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		// the background so the user sees this dir's entries first while
 		// the deep listing fills the cache for the rest of the subtree. It
 		// is fresh: it replaces a run in flight and starts on an empty cache.
-		if job.parent == node && depthLimit == 0 {
+		if job.parent == node && preload {
 			preloadOnce.Do(func() { s.preloadRecursive(fresh, node.RelPath, seed.listLeft, seed.listRight) })
 		}
 		return next
