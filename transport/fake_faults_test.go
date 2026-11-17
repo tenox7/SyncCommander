@@ -281,9 +281,12 @@ func TestFakeDelaysAndStallsCalls(t *testing.T) {
 	b.Inject(FakeFault{Op: FakeList, Path: "d00000", Stall: true, Times: 1})
 	short2, cancel2 := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel2()
-	start = time.Now()
-	if _, err := b.List(short2, "d00000"); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) < 50*time.Millisecond {
-		t.Errorf("a stalled List: %v after %v, want the context's error when it ends", err, time.Since(start))
+	end, _ := short2.Deadline()
+	if _, err := b.List(short2, "d00000"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a stalled List: %v, want the context's error", err)
+	}
+	if early := time.Until(end); early > 0 {
+		t.Errorf("a stalled List returned %v before its context ended", early)
 	}
 
 	// A copy that stalls after 4096 bytes leaves them written while it
