@@ -291,7 +291,8 @@ func TestPartsAreNotCopied(t *testing.T) {
 
 // One rsync session sends a whole local folder, the parts in it too, as
 // files under their part names. A folder that holds one is copied file by
-// file, which leaves the parts out.
+// file, which leaves the parts out. (Until T1 this ran without -batch, so
+// it never reached the batch it is about.)
 func TestBatchSendLeavesPartsOut(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("no rsync binary")
@@ -310,8 +311,44 @@ func TestBatchSendLeavesPartsOut(t *testing.T) {
 	}
 	t.Cleanup(func() { transport.CloseBackend(dst) })
 	s := scanned(t, left, right, transport.NewLocalBackend(left), dst)
+	s.batch = true
+	mark := len(transport.Log.Lines())
 	if p := s.copy(t, "d", true, false); p.Failed.Load() != 0 {
 		t.Errorf("copy failed")
 	}
 	wantTree(t, "after copying d over rsync", right, "d/", "d/e/", "d/e/g.txt", "d/f.txt")
+	if !logged(mark, "BATCH d: holds unfinished copies") || logged(mark, "BATCH d (") {
+		t.Error("the log does not say the folder went file by file for its part")
+	}
+}
+
+// T1: a remote source is opened through the wrapper the program opens it
+// with, whose OpenAt and ChecksumRange no test ran. A local part that holds
+// the first 400 bytes of an sftp file is checked by checksum on both sides
+// and resumed: only the rest is read.
+func TestPartIsResumedFromARemoteSource(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "l"), filepath.Join(root, "r")
+	body := strings.Repeat("0123456789", 100)
+	writeFile(t, filepath.Join(left, "a.txt"), body)
+	writeFile(t, filepath.Join(right, model.PartPath("a.txt")), body[:400])
+	src, err := transport.TryOpenBackend("sftp://x:pw@"+sshtest.Start(t, true)+filepath.ToSlash(left), true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { transport.CloseBackend(src) })
+	s := scanned(t, left, right, src, transport.NewLocalBackend(right))
+	mark := len(transport.Log.Lines())
+	if p := s.copy(t, "a.txt", true, false); p.Failed.Load() != 0 {
+		t.Errorf("copy failed")
+	}
+	if !logged(mark, "COPY a.txt: resuming after the 400B") || !logged(mark, "COPY a.txt OK (resumed)") {
+		t.Error("the log does not say the copy resumed after 400 bytes")
+	}
+	if got := readFile(t, filepath.Join(right, "a.txt")); got != body {
+		t.Errorf("a.txt holds %q", got)
+	}
+	if onDisk(filepath.Join(right, model.PartPath("a.txt"))) {
+		t.Error("the part is still there")
+	}
 }

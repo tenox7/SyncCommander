@@ -62,6 +62,7 @@ type scenario struct {
 	lb, rb       model.Backend
 	sc           *model.Scanner
 	verifyResume bool // -verify-resume for the copies
+	batch        bool // -batch: a folder goes to rsync+ssh in one session
 }
 
 func newScenario(t *testing.T, left, right string) *scenario {
@@ -127,7 +128,7 @@ func (s *scenario) copy(t *testing.T, relPath string, leftToRight, mirror bool, 
 	p := &Progress{}
 	Copy(context.Background(), Request{Src: src, Dst: dst, Scanner: s.sc, Node: node, RelPath: relPath,
 		LeftToRight: leftToRight, Opts: scenarioOpts, Parallel: 1, Progress: p, Plan: plan,
-		VerifyResume: s.verifyResume})
+		VerifyResume: s.verifyResume, Batch: s.batch})
 	return p
 }
 
