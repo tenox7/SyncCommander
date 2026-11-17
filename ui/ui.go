@@ -76,9 +76,13 @@ type Model struct {
 
 	cachedStats    *TreeStats // rollup cache, see refreshTree
 	statsRev       uint64
+	statsOpts      model.CompareOpts // the options cachedStats was counted with
 	lastPropagate  time.Time
 	propagateEvery time.Duration
 	lastFlatLen    int
+	viewRev        uint64     // counts the folds, see changeView
+	rowsFrom       rowsSource // what the panels' rows were built from
+	rowsBuilt      bool
 }
 
 func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {

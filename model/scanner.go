@@ -140,10 +140,10 @@ func (s *Scanner) unlockTree() {
 
 // ReadTree runs fn with the tree pinned under the shared read lock, so scanner
 // goroutines cannot mutate it while fn walks. Readers do not exclude each
-// other, so fn may only write the rollup and guide fields that PropagateStatus
-// and FlattenTree own; those belong to the single UI goroutine and the scanner
-// never touches them. Not reentrant: fn must not call another Scanner method
-// that locks.
+// other, so fn may only write the fields that belong to the single UI
+// goroutine, which the scanner never touches: the rollup and guide fields
+// that PropagateStatus and FlattenTree own, and Expanded. Not reentrant: fn
+// must not call another Scanner method that locks.
 func (s *Scanner) ReadTree(fn func(root *TreeNode)) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -151,8 +151,8 @@ func (s *Scanner) ReadTree(fn func(root *TreeNode)) {
 }
 
 // MutateTree runs fn under the exclusive lock and bumps the revision, for the
-// edits the UI makes itself (expand/collapse, side swap). Same reentrancy rule
-// as ReadTree.
+// edits the UI makes to what the scanner reads too (a side swap, a folder
+// marked unlisted). Same reentrancy rule as ReadTree.
 func (s *Scanner) MutateTree(fn func(root *TreeNode)) {
 	s.lockTree()
 	defer s.unlockTree()
@@ -410,13 +410,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, opts CompareOpts
 	// The preserving merge reuses and rewrites the live child nodes, so it is a
 	// mutation like the assignment that follows it; both go under the lock.
 	s.lockTree()
-	oldExpanded := make(map[string]bool)
-	for _, child := range node.Children {
-		collectExpanded(child, oldExpanded)
-	}
-	children := MergeChildren(node, leftEntries, rightEntries, node.Depth+1, opts, nil)
-	restoreExpanded(children, oldExpanded)
-	node.Children = children
+	node.Children = MergeChildren(node, leftEntries, rightEntries, node.Depth+1, opts, nil)
 	node.Listed = true
 	node.ListErr = false
 	s.unlockTree()
@@ -535,10 +529,6 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 	}
 
 	s.mu.RLock()
-	oldExpanded := make(map[string]bool)
-	for _, child := range node.Children {
-		collectExpanded(child, oldExpanded)
-	}
 	seed, ok := listJob(node, node.Depth+1)
 	// A rescan shows what the server holds now, not what an earlier
 	// recursive listing left in a backend's cache (W-H4). Its own folder is
@@ -568,7 +558,6 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 		}
 		s.lockTree()
 		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, opts, changed)
-		restoreExpanded(children, oldExpanded)
 		job.parent.Children = children
 		job.parent.Listed = true
 		job.parent.ListErr = false
@@ -816,24 +805,6 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, opts Com
 	parent.Children = MergeChildren(parent, left, right, parent.Depth+1, opts, nil)
 	parent.Listed = true
 	parent.ListErr = false
-}
-
-func collectExpanded(node *TreeNode, m map[string]bool) {
-	if node.Expanded {
-		m[node.RelPath] = true
-	}
-	for _, child := range node.Children {
-		collectExpanded(child, m)
-	}
-}
-
-func restoreExpanded(nodes []*TreeNode, m map[string]bool) {
-	for _, node := range nodes {
-		if m[node.RelPath] {
-			node.Expanded = true
-		}
-		restoreExpanded(node.Children, m)
-	}
 }
 
 // findNode descends from root one path component at a time, so a lookup

@@ -66,21 +66,25 @@ func TestOneRuleDecidesEqual(t *testing.T) {
 		if got := [3]int{st.FilesEqual, st.FilesDiff, st.FilesUnknown}; got != wantCounts {
 			t.Errorf("%s: equal, different, not compared = %v, want %v", tc.what, got, wantCounts)
 		}
-		var copied, found []string
+		var copied []string
 		for _, n := range CollectCopyFiles(d, &tc.opts, true, false) {
 			copied = append(copied, n.Name)
 		}
-		for n := FindNextDiff(root, nil, &tc.opts); n != nil; n = FindNextDiff(root, n, &tc.opts) {
-			found = append(found, n.Name)
-		}
 		slices.Sort(copied)
-		slices.Sort(found)
 		slices.Sort(wantDiff)
 		if !slices.Equal(copied, wantDiff) {
 			t.Errorf("%s: a folder copy writes %q, want the different ones %q", tc.what, copied, wantDiff)
 		}
-		if !slices.Equal(found, wantDiff) {
-			t.Errorf("%s: next difference finds %q, want %q", tc.what, found, wantDiff)
+		// The rollup was just counted: next difference may use it or not.
+		for _, counted := range []bool{false, true} {
+			var found []string
+			for n := FindNextDiff(root, nil, &tc.opts, counted); n != nil; n = FindNextDiff(root, n, &tc.opts, counted) {
+				found = append(found, n.Name)
+			}
+			slices.Sort(found)
+			if !slices.Equal(found, wantDiff) {
+				t.Errorf("%s: next difference (rollup used: %v) finds %q, want %q", tc.what, counted, found, wantDiff)
+			}
 		}
 	}
 }

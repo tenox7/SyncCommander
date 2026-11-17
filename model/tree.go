@@ -147,7 +147,11 @@ type TreeNode struct {
 	IsDir                  bool
 	// IsSpecial marks a row of links, pipes or devices (FileEntry.IsSpecial):
 	// its own kind, so a file of the same name is a twin, as a folder is.
-	IsSpecial              bool
+	IsSpecial bool
+	// Expanded is what the user unfolded. Like the rollup fields it belongs
+	// to the UI goroutine, which reads and writes it under the shared lock;
+	// the scanner never touches it. So a fold leaves the tree's revision
+	// alone and costs no rollup walk (U21).
 	Expanded               bool
 	Listed                 bool
 	ListErr                bool
@@ -1119,38 +1123,89 @@ func CountDescendants(node *TreeNode) (files, dirs int, complete bool) {
 	return
 }
 
-// FindNextDiff walks the tree in DFS order starting after `after` and returns
-// the next node that represents a "diff leaf" — a file whose compared
-// attributes differ, or any item present on only one side. Directories present
-// on both sides aren't leaves; the search drills into them. If `after` is
-// itself a diff leaf, its subtree is skipped (the dir's existence is the
-// diff). Returns nil if no further diff is found.
-func FindNextDiff(root, after *TreeNode, opts *CompareOpts) *TreeNode {
+// FindNextDiff returns the next difference after `after` in DFS order: a
+// node on one side only, or a file on both sides whose compared attributes
+// differ. Folders on both sides aren't leaves; the search drills into them.
+// If `after` is itself a diff leaf, its subtree is skipped (the dir's
+// existence is the diff). Pass after=nil to start from the top.
+//
+// The walk starts at `after`, not at the top: what lies under it, then what
+// follows it and each folder above it. With counted set, the folder rollups
+// are current (PropagateStatus ran with opts since the tree last changed),
+// and a folder whose rollup holds nothing but equal files is passed over
+// whole. So a jump costs the way to the next difference, not the tree before
+// or after the cursor (U21). Returns nil if no further difference is found,
+// or if `after` is no longer in the tree.
+func FindNextDiff(root, after *TreeNode, opts *CompareOpts, counted bool) *TreeNode {
 	if root == nil {
 		return nil
 	}
-	started := after == nil
-	var visit func(n *TreeNode) *TreeNode
-	visit = func(n *TreeNode) *TreeNode {
-		if started && isDiffLeaf(n, opts) {
-			return n
+	w := diffWalk{opts, counted}
+	if after == nil {
+		return w.first(root)
+	}
+	for n := after; n != root; n = n.Parent {
+		if n.Parent == nil || !slices.Contains(n.Parent.Children, n) {
+			return nil // a rescan dropped it
 		}
-		if n == after {
-			started = true
-			if isDiffLeaf(n, opts) {
-				return nil
-			}
+	}
+	if after.IsDir && !isDiffLeaf(after, opts) {
+		if d := w.under(after); d != nil {
+			return d
 		}
-		if n.IsDir {
-			for _, child := range n.Children {
-				if r := visit(child); r != nil {
-					return r
-				}
-			}
+	}
+	for n := after; n != root; n = n.Parent {
+		if w.allEqual(n.Parent) {
+			continue
 		}
+		siblings := n.Parent.Children
+		if d := w.firstIn(siblings[slices.Index(siblings, n)+1:]); d != nil {
+			return d
+		}
+	}
+	return nil
+}
+
+// diffWalk finds differences in DFS order. With counted set it passes over
+// the folders whose rollup holds only equal files.
+type diffWalk struct {
+	opts    *CompareOpts
+	counted bool
+}
+
+// allEqual reports a folder the current rollup found to hold only folders
+// and files on both sides, every file equal. A folder that was not listed,
+// or holds a file not compared yet, rolls up as unknown, never as equal.
+func (w diffWalk) allEqual(dir *TreeNode) bool {
+	return w.counted && dir.ChildStatus == AttrEqual
+}
+
+// first is the first difference at or under n.
+func (w diffWalk) first(n *TreeNode) *TreeNode {
+	if isDiffLeaf(n, w.opts) {
+		return n
+	}
+	if n.IsDir {
+		return w.under(n)
+	}
+	return nil
+}
+
+// under is the first difference below dir.
+func (w diffWalk) under(dir *TreeNode) *TreeNode {
+	if w.allEqual(dir) {
 		return nil
 	}
-	return visit(root)
+	return w.firstIn(dir.Children)
+}
+
+func (w diffWalk) firstIn(nodes []*TreeNode) *TreeNode {
+	for _, n := range nodes {
+		if d := w.first(n); d != nil {
+			return d
+		}
+	}
+	return nil
 }
 
 // FindByName walks the tree in DFS order starting after `after` and returns

@@ -108,7 +108,10 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) {
 	case "right", "l", "+", "=":
 		m.settings.Adjust(1)
 	case " ", "enter":
+		// A compare option changes what the rollups count: recount now,
+		// not at the next change to the tree.
 		m.settings.Toggle()
+		m.refreshTreeNow()
 	}
 }
 

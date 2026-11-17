@@ -101,10 +101,15 @@ func (p *Panel) PageDown() {
 	p.clampOffset()
 }
 
-func (p *Panel) Toggle() {
-	if node := p.CursorNode(); node != nil {
-		node.Expanded = !node.Expanded
+// Toggle folds or unfolds the cursor node and says whether there was one.
+// Runs under changeView.
+func (p *Panel) Toggle() bool {
+	node := p.CursorNode()
+	if node == nil {
+		return false
 	}
+	node.Expanded = !node.Expanded
+	return true
 }
 
 func (p *Panel) clampOffset() {
@@ -499,7 +504,7 @@ func (p *Panel) onArrow(i, x int) bool {
 }
 
 // Collapse folds the cursor directory or, from inside one, jumps to the
-// enclosing directory and folds that. Runs under mutateTree.
+// enclosing directory and folds that. Runs under changeView.
 func (p *Panel) Collapse() bool {
 	row, ok := p.CursorRow()
 	if !ok {

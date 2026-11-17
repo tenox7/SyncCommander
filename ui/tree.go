@@ -6,41 +6,74 @@ import (
 	"sc/model"
 )
 
-// readTree and mutateTree fence the UI goroutine's tree access against the
-// scanner's: readTree for walks and rendering, mutateTree for the edits the UI
-// makes itself (expand/collapse, side swap). Neither is reentrant — nothing
-// inside fn may call back into a Scanner method that locks, refreshTree
-// included.
+// readTree, mutateTree and changeView fence the UI goroutine's tree access
+// against the scanner's: readTree for walks and rendering, mutateTree for the
+// edits the UI makes to what the scanner reads too (a side swap, a folder
+// marked unlisted), changeView for folds. None is reentrant — nothing inside
+// fn may call back into a Scanner method that locks, refreshTree included.
 func (m *Model) readTree(fn func(root *model.TreeNode)) { m.scanner.ReadTree(fn) }
 
 func (m *Model) mutateTree(fn func(root *model.TreeNode)) { m.scanner.MutateTree(fn) }
 
-// refreshTree rebuilds the visible rows. The rollup walk behind them is
-// O(whole tree) — at a million nodes it costs tens of milliseconds — so it runs
-// only when the scanner has actually changed something, and never more often
-// than four times its own cost. That caps it at a quarter of the frame budget
-// no matter how big the tree gets; the flatten itself only touches expanded
-// nodes and stays cheap.
+// changeView runs fn, which folds or unfolds nodes and says whether it did.
+// Expansion belongs to the UI goroutine (TreeNode.Expanded), so fn holds
+// only the shared lock and the tree's revision stays: a fold changes what
+// is shown, not what is counted, and costs no rollup walk over the whole
+// tree (U21). The next refresh rebuilds the rows.
+func (m *Model) changeView(fn func(root *model.TreeNode) bool) {
+	m.readTree(func(root *model.TreeNode) {
+		if fn(root) {
+			m.viewRev++
+		}
+	})
+}
+
+// rowsSource is what the rows were built from: the tree's revision, the
+// folds and the compare options. The same source gives the same rows.
+type rowsSource struct {
+	treeRev, viewRev uint64
+	opts             model.CompareOpts
+}
+
+// refreshTree brings the rollups and the visible rows up to date. The
+// rollup walk is O(whole tree) — at a million nodes it costs tens of
+// milliseconds — so it runs only when what it counts changed (the tree or
+// the compare options), and never more often than four times its own cost.
+// That caps it at a quarter of the frame budget no matter how big the tree
+// gets. The rows are rebuilt only when the tree, the folds or the options
+// changed, so a tick with nothing new costs nothing (U21); the flatten
+// itself only touches expanded nodes.
 func (m *Model) refreshTree() {
-	rev := m.scanner.Rev()
 	m.scanner.ReadTree(func(tree *model.TreeNode) {
 		if tree == nil {
 			m.cachedStats = nil
 			return
 		}
-		if rev != m.statsRev && time.Since(m.lastPropagate) >= m.propagateEvery {
+		rev, opts := m.scanner.Rev(), *m.cmpOpts
+		if (rev != m.statsRev || opts != m.statsOpts) && time.Since(m.lastPropagate) >= m.propagateEvery {
 			t0 := time.Now()
 			s := model.PropagateStatus(tree, m.cmpOpts)
 			m.lastPropagate = time.Now()
 			m.propagateEvery = min(4*m.lastPropagate.Sub(t0), 2*time.Second)
-			m.statsRev = rev
+			m.statsRev, m.statsOpts = rev, opts
 			m.cachedStats = &s
+		}
+		from := rowsSource{rev, m.viewRev, opts}
+		if m.rowsBuilt && from == m.rowsFrom {
+			return
 		}
 		flat := model.FlattenTree(tree, m.cmpOpts, m.lastFlatLen)
 		m.lastFlatLen = len(flat)
 		m.left.panel.SetRows(flat)
 		m.right.panel.SetRows(flat)
+		m.rowsFrom, m.rowsBuilt = from, true
 	})
+}
+
+// rollupsCurrent reports whether the last rollup counted the tree as it is
+// now, with the compare options as they are. Called under the tree lock.
+func (m *Model) rollupsCurrent() bool {
+	return m.cachedStats != nil && m.statsRev == m.scanner.Rev() && m.statsOpts == *m.cmpOpts
 }
 
 // refreshTreeNow bypasses the throttle. Used when an operation finishes or the

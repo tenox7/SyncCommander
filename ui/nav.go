@@ -46,13 +46,13 @@ func (m *Model) toggleCursor() tea.Cmd {
 	p := m.activePanel()
 	node := p.CursorNode()
 	lazyList := false
-	m.mutateTree(func(*model.TreeNode) {
+	m.changeView(func(*model.TreeNode) bool {
 		if node != nil && node.IsDir && !node.Listed && m.mayStart(opScan) {
 			node.Expanded = true
 			lazyList = true
-			return
+			return true
 		}
-		p.Toggle()
+		return p.Toggle()
 	})
 	if lazyList {
 		return m.listNode(node)
@@ -65,7 +65,10 @@ func (m *Model) toggleCursor() tea.Cmd {
 // enclosing one.
 func (m *Model) collapseCursor() {
 	collapsed := false
-	m.mutateTree(func(*model.TreeNode) { collapsed = m.activePanel().Collapse() })
+	m.changeView(func(*model.TreeNode) bool {
+		collapsed = m.activePanel().Collapse()
+		return collapsed
+	})
 	if !collapsed {
 		return
 	}
@@ -74,12 +77,13 @@ func (m *Model) collapseCursor() {
 }
 
 func (m *Model) setExpandedAll(expand bool) {
-	m.mutateTree(func(tree *model.TreeNode) {
+	m.changeView(func(tree *model.TreeNode) bool {
 		if tree == nil {
-			return
+			return false
 		}
 		model.SetExpandedAll(tree, expand)
 		tree.Expanded = true
+		return true
 	})
 	m.refreshTree()
 }
@@ -98,7 +102,7 @@ func (m *Model) openSearch() {
 func (m *Model) jumpToNextDiff() {
 	after := m.activePanel().CursorFile()
 	m.jumpToMatch(func(tree *model.TreeNode) *model.TreeNode {
-		target := model.FindNextDiff(tree, after, m.cmpOpts)
+		target := model.FindNextDiff(tree, after, m.cmpOpts, m.rollupsCurrent())
 		if target != nil {
 			target.Expanded = true
 		}
@@ -110,16 +114,17 @@ func (m *Model) jumpToNextDiff() {
 // match and puts the cursor on it.
 func (m *Model) jumpToMatch(find func(tree *model.TreeNode) *model.TreeNode) {
 	var target *model.TreeNode
-	m.mutateTree(func(tree *model.TreeNode) {
+	m.changeView(func(tree *model.TreeNode) bool {
 		if tree == nil {
-			return
+			return false
 		}
 		if target = find(tree); target == nil {
-			return
+			return false
 		}
 		for n := target.Parent; n != nil; n = n.Parent {
 			n.Expanded = true
 		}
+		return true
 	})
 	if target == nil {
 		return
