@@ -16,6 +16,12 @@ import (
 // Until then an in-flight preload is awaited rather than bypassed with a
 // live per-dir call. preloadCtx is the scan context the wait follows, so a
 // per-call stall timeout on List does not abandon a slow but healthy preload.
+//
+// A write while a run is going makes the run's view of the written folders
+// old: the run may have sent part of such a folder before the write and
+// goes on sending the rest, which refilled would be served as the whole
+// folder (W-H2). So the cache keeps nothing the run sends for those
+// folders, and they are listed live, until the next run starts.
 type listCache struct {
 	mu         sync.Mutex
 	cond       *sync.Cond
@@ -26,6 +32,8 @@ type listCache struct {
 	preloadCtx context.Context
 	runs       int                // runs started; only the latest one feeds the cache
 	stopRun    context.CancelFunc // stops the latest run's listing
+	stale      map[string]bool    // folders a write changed while the run was going
+	staleTree  map[string]bool    // folders a write removed or moved then, and all under them
 }
 
 func newListCache() *listCache {
@@ -38,6 +46,29 @@ func newListCache() *listCache {
 func (c *listCache) reset() {
 	c.entries = make(map[string][]model.FileEntry)
 	c.complete = make(map[string]bool)
+	c.stale, c.staleTree = nil, nil
+}
+
+// running reports whether a run is still sending.
+func (c *listCache) running() bool { return c.active && !c.done }
+
+// staleLocked reports whether a write during the run changed dir, or removed
+// or moved a folder it is in.
+func (c *listCache) staleLocked(dir string) bool {
+	if c.stale[dir] {
+		return true
+	}
+	if len(c.staleTree) == 0 {
+		return false
+	}
+	for p := dir; ; p = parentDir(p) {
+		if c.staleTree[p] {
+			return true
+		}
+		if p == "" {
+			return false
+		}
+	}
 }
 
 // recursiveLister streams a subtree: emit appends a batch of children to
@@ -148,6 +179,9 @@ func (c *listCache) emit(parent string, entries []model.FileEntry) {
 }
 
 func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
+	if c.staleLocked(parent) {
+		return
+	}
 	c.entries[parent] = append(c.entries[parent], entries...)
 }
 
@@ -174,9 +208,11 @@ func (c *listCache) markComplete(dir string) {
 }
 
 func (c *listCache) markCompleteLocked(dir string) {
-	c.complete[dir] = true
-	if _, ok := c.entries[dir]; !ok {
-		c.entries[dir] = nil
+	if !c.staleLocked(dir) {
+		c.complete[dir] = true
+		if _, ok := c.entries[dir]; !ok {
+			c.entries[dir] = nil
+		}
 	}
 	c.cond.Broadcast()
 }
@@ -191,8 +227,9 @@ func (c *listCache) lookup(relDir string) (entries []model.FileEntry, hit, activ
 }
 
 // await blocks until relDir is complete, the preload finishes or its context
-// ends. It deliberately ignores the caller's per-call context, whose stall
-// timeout is unsuited to one long recursive listing.
+// ends, or a write makes the run's view of relDir old. It deliberately
+// ignores the caller's per-call context, whose stall timeout is unsuited to
+// one long recursive listing.
 func (c *listCache) await(relDir string) ([]model.FileEntry, bool) {
 	c.mu.Lock()
 	pctx := c.preloadCtx
@@ -213,7 +250,7 @@ func (c *listCache) await(relDir string) ([]model.FileEntry, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for !c.ready(relDir) && (pctx == nil || pctx.Err() == nil) {
+	for !c.ready(relDir) && !c.staleLocked(relDir) && (pctx == nil || pctx.Err() == nil) {
 		c.cond.Wait()
 	}
 	entries, ok := c.entries[relDir]
@@ -228,12 +265,25 @@ func (c *listCache) drop(dir string) {
 	delete(c.complete, dir)
 }
 
+// changedLocked drops dir after a write to it. While a run is going, dir is
+// also marked: see listCache.
+func (c *listCache) changedLocked(dir string) {
+	c.drop(dir)
+	if c.running() {
+		if c.stale == nil {
+			c.stale = make(map[string]bool)
+		}
+		c.stale[dir] = true
+		c.cond.Broadcast()
+	}
+}
+
 func (c *listCache) invalidate(relDir string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	c.drop(relDir)
+	c.changedLocked(relDir)
 	c.mu.Unlock()
 }
 
@@ -247,7 +297,7 @@ func (c *listCache) invalidateAncestors(relPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for p := parentDir(relPath); ; p = parentDir(p) {
-		c.drop(p)
+		c.changedLocked(p)
 		if p == "" {
 			return
 		}
@@ -277,6 +327,13 @@ func (c *listCache) invalidateTree(prefix string) {
 		if k == prefix || strings.HasPrefix(k, prefix+"/") {
 			c.drop(k)
 		}
+	}
+	if c.running() {
+		if c.staleTree == nil {
+			c.staleTree = make(map[string]bool)
+		}
+		c.staleTree[prefix] = true
+		c.cond.Broadcast()
 	}
 }
 
