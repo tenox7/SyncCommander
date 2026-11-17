@@ -204,32 +204,46 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 
 	walkDirs(ctx, s.listWidth, []dirJob{{relDir: "", parent: root, depth: 1, listLeft: true, listRight: true}},
 		func(job dirJob) []dirJob {
-			leftEntries, rightEntries, listErr := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
-			if job.listLeft {
-				stats.leftPending.Add(-1)
-			}
-			if job.listRight {
-				stats.rightPending.Add(-1)
-			}
-			if listErr != nil {
-				logScanErr(listErr)
+			// A copy started during the scan lists the folders it copies
+			// (EnsureSubtreeListed), these too. One it listed first is kept
+			// as it filled it: listed again, the scan would merge into nodes
+			// the copy walks (F19).
+			// The root starts listed: it stands for the base folders, and no
+			// other lister lists it.
+			s.mu.RLock()
+			filled := job.parent != root && job.parent.Listed && !job.parent.ListErr
+			s.mu.RUnlock()
+			if !filled {
+				leftEntries, rightEntries, listErr := s.listDir(ctx, job.relDir, job.listLeft, job.listRight)
+				if listErr != nil {
+					donePending(&stats.leftPending, &stats.rightPending, job)
+					logScanErr(listErr)
+					s.lockTree()
+					job.parent.ListErr = true
+					s.unlockTree()
+					return nil
+				}
+				// New nodes only, so the merge may run unlocked: it reads no
+				// live node, even when another lister filled the folder
+				// meanwhile. The first to fill it wins.
+				children := mergeChildren(job.parent, nil, leftEntries, rightEntries, job.depth, opts, nil)
 				s.lockTree()
-				job.parent.ListErr = true
+				if job.parent == root || !job.parent.Listed || job.parent.ListErr {
+					job.parent.Children = children
+					job.parent.Listed = true
+					job.parent.ListErr = false
+				}
 				s.unlockTree()
-				return nil
 			}
-
-			// Fresh nodes only: the parent has no children yet, so the merge
-			// touches nothing a reader could see and may run unlocked.
-			children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, opts, nil)
-			s.lockTree()
-			job.parent.Children = children
-			job.parent.Listed = true
-			job.parent.ListErr = false
-			s.unlockTree()
+			donePending(&stats.leftPending, &stats.rightPending, job)
 
 			stats.dirsListed.Add(1)
 			descend := s.maxDepth == 0 || job.depth+1 <= s.maxDepth
+			// The children are live: other writers change them under the
+			// lock, so they are read under it.
+			var next []dirJob
+			s.mu.RLock()
+			children := job.parent.Children
 			for _, child := range children {
 				if child.IsDir {
 					stats.totalDirs.Add(1)
@@ -246,11 +260,10 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 				}
 				stats.totalFiles.Add(1)
 			}
-
-			var next []dirJob
 			if descend {
 				next = childJobs(children, job.depth+1, nil)
 			}
+			s.mu.RUnlock()
 			// After listing the root, kick off the recursive preload in the
 			// background so the user sees the top-level entries first while
 			// the deep listing fills the cache for subsequent dirs.
@@ -292,6 +305,16 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 	p := progress(PhaseDone)
 	p.ChecksumFiles, p.ChecksumDone = checksumTotal, checksumDone.Load()
 	s.setProgress(p)
+}
+
+// donePending takes job's sides off the scan's pending counts.
+func donePending(left, right *atomic.Int64, job dirJob) {
+	if job.listLeft {
+		left.Add(-1)
+	}
+	if job.listRight {
+		right.Add(-1)
+	}
 }
 
 // childJobs queues the listable directories among children, in reverse so

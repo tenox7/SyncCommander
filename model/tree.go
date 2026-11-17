@@ -329,6 +329,13 @@ func (c *ChangedPaths) index() {
 // Children/Listed/Expanded state; new entries are added, missing ones
 // dropped. changed names paths whose cached checksums must not survive.
 func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, depth int, opts CompareOpts, changed *ChangedPaths) []*TreeNode {
+	return mergeChildren(parent, parent.Children, leftEntries, rightEntries, depth, opts, changed)
+}
+
+// mergeChildren merges the listings into existing, the children it reuses
+// and rewrites. With none it builds new nodes only, and reads and writes no
+// live node: what the scan does without the lock (F19).
+func mergeChildren(parent *TreeNode, existingChildren []*TreeNode, leftEntries, rightEntries []FileEntry, depth int, opts CompareOpts, changed *ChangedPaths) []*TreeNode {
 	keyFor := func(name string, isDir, special bool) string {
 		switch {
 		case isDir:
@@ -338,8 +345,8 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 		}
 		return name
 	}
-	existing := make(map[string]*TreeNode, len(parent.Children))
-	for _, c := range parent.Children {
+	existing := make(map[string]*TreeNode, len(existingChildren))
+	for _, c := range existingChildren {
 		existing[keyFor(c.Name, c.IsDir, c.IsSpecial)] = c
 	}
 	byKey := make(map[string]*TreeNode)

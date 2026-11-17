@@ -55,6 +55,22 @@ func fileEntry(rel, name string, size int64) FileEntry {
 	return FileEntry{RelPath: rel, Name: name, Size: size}
 }
 
+// A failed listing is done too: the scan ends with no side shown as
+// scanning (the status bar shows a side active while a listing is pending).
+func TestScanWithAFailedListingEndsWithNoSideActive(t *testing.T) {
+	dirs := map[string][]FileEntry{
+		"":  {dirEntry("d", "d")},
+		"d": {fileEntry("d/a.txt", "a.txt", 10)},
+	}
+	left := &stubBackend{dirs: dirs}
+	right := &stubBackend{dirs: dirs, fail: map[string]bool{"d": true}}
+	s := NewScanner(left, right, 1, 1, true)
+	s.Scan(context.Background(), CompareOpts{})
+	if p := s.Progress(); p.Phase != PhaseDone || p.LeftActive || p.RightActive {
+		t.Errorf("after the scan: phase %q, left active %v, right active %v; want done, no side active", p.Phase, p.LeftActive, p.RightActive)
+	}
+}
+
 // A List failure on one side must not merge the other side's entries: doing so
 // turns a transient network error into a tree full of false LeftOnly/RightOnly
 // nodes, which drives wrong copy and mirror-delete sets.
