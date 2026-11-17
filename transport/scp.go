@@ -28,6 +28,9 @@ type SCPBackend struct {
 // connections for parallel transfers (parallel-1 of them).
 func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SCPBackend, error) {
 	b := &SCPBackend{sshShell: sshShell{client: conn.client, proto: "scp", listCache: newListCache()}}
+	if err := b.checkShell(); err != nil {
+		return nil, fmt.Errorf("scp: %w", err)
+	}
 	base, err := expandHome(conn.basePath, b.home)
 	if err != nil {
 		return nil, fmt.Errorf("scp: %w", err)

@@ -96,6 +96,41 @@ func (s *sshShell) home() (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// shellWord is the word checkShell has the login shell echo.
+const shellWord = "sc-shell-ok"
+
+// checkShell has the login shell echo a known word. scp and rsync+ssh read
+// every listing, stat and sum from what commands print, so any other answer
+// stops the connect (S10). Text around the word is a login script that
+// prints: read as file data, it made the first entry of each listing size 0
+// and its own first word every file's sum. No answer at all is an account
+// that runs one fixed command, such as ForceCommand internal-sftp: every
+// command prints nothing and exits 0, so every folder listed as empty.
+func (s *sshShell) checkShell() error {
+	ctx, cancel := context.WithTimeout(context.Background(), sshKeepaliveTimeout)
+	defer cancel()
+	var out bytes.Buffer
+	if err := s.exec(ctx, s.client, "echo "+shellWord, nil, &out); err != nil {
+		return fmt.Errorf("the login shell cannot run echo: %w", err)
+	}
+	switch got := strings.TrimRight(out.String(), "\r\n"); {
+	case got == shellWord:
+		return nil
+	case strings.TrimSpace(got) == "":
+		return errors.New("the server ran no command for this login (echo printed nothing): it may allow sftp only; use sftp://")
+	default:
+		return fmt.Errorf("the login shell printed %s for echo %s: a login script prints text, which would be read as file data; make it print only in interactive shells", clip(out.String()), shellWord)
+	}
+}
+
+// clip quotes up to 80 bytes of what a server printed, for an error.
+func clip(s string) string {
+	if len(s) > 80 {
+		return strconv.Quote(s[:80]) + "..."
+	}
+	return strconv.Quote(s)
+}
+
 // expandHome resolves the URL spellings that mean the login home: "", "/"
 // and "/~" are the home itself, "/~/x" is x below it. When the server does
 // not give the home as one absolute path, it fails, and so does the
@@ -192,18 +227,9 @@ func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, e
 	return e, nil
 }
 
-// statRecord reads the one record a stat prints. One whose size is not a
-// number is not a record, such as a login banner ahead of it: a listing
-// takes that as size 0 (S10).
+// statRecord reads the one record a stat prints.
 func statRecord(out string) (listRecord, bool) {
-	rec := strings.TrimSuffix(out, "\x00")
-	r, ok := parseListRecord(rec)
-	if !ok || r.err != "" {
-		return r, ok
-	}
-	size, _, _ := strings.Cut(rec, "\t")
-	_, err := strconv.ParseInt(size, 10, 64)
-	return r, err == nil
+	return parseListRecord(strings.TrimSuffix(out, "\x00"))
 }
 
 func (s *sshShell) listCmd(dir string, recursive bool) string {
@@ -257,15 +283,24 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 	if err := s.list(ctx, s.abs(relDir), false, &out); err != nil {
 		return nil, err
 	}
+	text := strings.TrimSuffix(out.String(), "\x00")
+	if text == "" {
+		return nil, nil
+	}
 	var result []model.FileEntry
-	for _, rec := range strings.Split(out.String(), "\x00") {
+	for _, rec := range strings.Split(text, "\x00") {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		r, ok := parseListRecord(rec)
 		switch {
 		case !ok:
-			continue
+			// Text that is not a record, such as what a login script
+			// prints ahead of the listing, was left out, and the rest
+			// was taken for the folder (S10).
+			err := fmt.Errorf("%s: listing %s: %w: the server answered %s", s.proto, s.abs(relDir), ErrIncompleteListing, clip(rec))
+			Log.Add(s.proto, DirErr, err.Error())
+			return nil, err
 		case r.err != "":
 			// perl could not open the folder or stat an entry: the listing
 			// is short, and exit status 0 says nothing.
@@ -310,6 +345,7 @@ type shellListing struct {
 	unread           map[string]bool // the grouper's skip set
 	reports          []string
 	bad              bool
+	junk             string // the first text that was not a record
 }
 
 func newShellListing(scope, absPrefix string, emit func(string, []model.FileEntry), complete func(string)) *shellListing {
@@ -321,6 +357,11 @@ func newShellListing(scope, absPrefix string, emit func(string, []model.FileEntr
 func (l *shellListing) add(rec string) {
 	r, ok := parseListRecord(rec)
 	if !ok {
+		// See findList.
+		if !l.bad {
+			l.junk = rec
+		}
+		l.bad = true
 		return
 	}
 	rel, ok := relUnder(l.absPrefix, r.name)
@@ -364,6 +405,8 @@ func (l *shellListing) unreadBy(relPath string) {
 
 func (l *shellListing) finish(label string) error {
 	switch {
+	case l.bad && l.junk != "":
+		return fmt.Errorf("%s: %w: the server answered %s", label, ErrIncompleteListing, clip(l.junk))
 	case l.bad:
 		return fmt.Errorf("%s: %w", label, ErrIncompleteListing)
 	case len(l.unread) == 0:
@@ -388,7 +431,8 @@ type listRecord struct {
 // parseListRecord decodes one lister record; the trailing name field may
 // contain anything but NUL. A link, pipe or device keeps its type (find's
 // %y letter) in the mode: it is listed, never read or written through (L2,
-// L9).
+// L9). One whose numbers do not read is no record, such as the first
+// record with a login banner ahead of it, which was taken as size 0 (S10).
 func parseListRecord(rec string) (listRecord, bool) {
 	f := strings.SplitN(rec, "\t", 7)
 	if len(f) < 7 {
@@ -397,13 +441,19 @@ func parseListRecord(rec string) (listRecord, bool) {
 	if f[5] == "!" {
 		return listRecord{name: f[6], err: f[0]}, true
 	}
-	size, _ := strconv.ParseInt(f[0], 10, 64)
-	modeVal, _ := strconv.ParseUint(f[4], 8, 32)
+	size, serr := strconv.ParseInt(f[0], 10, 64)
+	modeVal, merr := strconv.ParseUint(f[4], 8, 32)
+	mtime, mok := parseEpoch(f[1])
+	atime, aok := parseEpoch(f[2])
+	ctime, cok := parseEpoch(f[3])
+	if serr != nil || size < 0 || merr != nil || !mok || !aok || !cok {
+		return listRecord{}, false
+	}
 	e := model.FileEntry{
 		Size:    size,
-		ModTime: parseEpoch(f[1]),
-		ATime:   model.NanoOf(parseEpoch(f[2])),
-		CTime:   model.NanoOf(parseEpoch(f[3])),
+		ModTime: mtime,
+		ATime:   model.NanoOf(atime),
+		CTime:   model.NanoOf(ctime),
 		IsDir:   f[5] == "d" || f[5] == "D",
 		Mode:    os.FileMode(modeVal),
 	}
@@ -427,17 +477,22 @@ func parseListRecord(rec string) (listRecord, bool) {
 	return listRecord{name: f[6], entry: e, unread: f[5] == "D"}, true
 }
 
-func parseEpoch(s string) time.Time {
+// parseEpoch reads seconds since 1970 with an optional fraction, as find's
+// %T@ and perl print them.
+func parseEpoch(s string) (time.Time, bool) {
 	sec, frac, _ := strings.Cut(s, ".")
-	secs, _ := strconv.ParseInt(sec, 10, 64)
+	secs, err := strconv.ParseInt(sec, 10, 64)
+	if err != nil || strings.Trim(frac, "0123456789") != "" {
+		return time.Time{}, false
+	}
 	if frac == "" {
-		return time.Unix(secs, 0)
+		return time.Unix(secs, 0), true
 	}
 	for len(frac) < 9 {
 		frac += "0"
 	}
 	nsec, _ := strconv.ParseInt(frac[:9], 10, 64)
-	return time.Unix(secs, nsec)
+	return time.Unix(secs, nsec), true
 }
 
 // recordWriter buffers a stream and calls cb for each complete sep-terminated
@@ -469,36 +524,73 @@ func (w *recordWriter) flush() {
 	}
 }
 
-var cksumProbes = []struct{ algo, test, cmd string }{
-	{"sha256", "echo -n test | sha256sum >/dev/null 2>&1", "sha256sum"},
-	{"sha256", "echo -n test | shasum -a 256 >/dev/null 2>&1", "shasum -a 256"},
-	{"sha1", "echo -n test | sha1sum >/dev/null 2>&1", "sha1sum"},
-	{"sha1", "echo -n test | shasum >/dev/null 2>&1", "shasum"},
-	{"md5", "echo -n test | md5sum >/dev/null 2>&1", "md5sum"},
-	{"md5", "md5 -q -s test >/dev/null 2>&1", "md5 -q"},
+// cksumProbes are the commands that may give each algorithm's sum; the
+// first that works for an algorithm is used for it.
+var cksumProbes = []struct{ algo, cmd string }{
+	{"sha256", "sha256sum"},
+	{"sha256", "shasum -a 256"},
+	{"sha1", "sha1sum"},
+	{"sha1", "shasum"},
+	{"md5", "md5sum"},
+	{"md5", "md5 -q"},
+}
+
+// testSums are the sums of the word test, which each probe is asked for.
+var testSums = map[string]string{
+	"sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+	"sha1":   "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
+	"md5":    "098f6bcd4621d373cade4e832627b4f6",
 }
 
 var sshChecksumOrder = []string{"sha256", "sha1", "md5"}
 
-// probeSSHChecksums finds a working command per algorithm; the first probe
-// that succeeds wins. A probe that exits with a status has no such command;
-// any other failure, a connection that died or ctx, ends the probe with it:
-// taken for a missing command, it left the connection without checksums.
-func probeSSHChecksums(run func(string) error) (map[string]string, error) {
+// probeSSHChecksums finds a working command per algorithm: one that gives
+// the right sum of the word test. That it exits 0 proves nothing (S10): on
+// an account limited to sftp every command prints nothing and exits 0, and
+// behind a login script that prints, the script's first word was every
+// file's sum. wrong is told each answer that is not the sum. A probe that
+// exits with a status has no such command; any other failure, a
+// connection that died or ctx, ends the probe with it: taken for a missing
+// command, it left the connection without checksums.
+func probeSSHChecksums(run func(string) (string, error), wrong func(cmd, out string)) (map[string]string, error) {
 	cmds := make(map[string]string)
 	for _, p := range cksumProbes {
 		if cmds[p.algo] != "" {
 			continue
 		}
+		out, err := run("printf test | " + p.cmd)
 		var exit *ssh.ExitError
-		switch err := run(p.test); {
+		switch {
 		case err == nil:
-			cmds[p.algo] = p.cmd
+			if sum, ok := sumIn(out, p.algo); ok && sum == testSums[p.algo] {
+				cmds[p.algo] = p.cmd
+			} else {
+				wrong(p.cmd, out)
+			}
 		case !errors.As(err, &exit):
 			return nil, err
 		}
 	}
 	return cmds, nil
+}
+
+// sumLen is how many hex digits each algorithm's sum has.
+var sumLen = map[string]int{"sha256": 64, "sha1": 40, "md5": 32}
+
+// sumIn reads the sum a checksum command printed: its first word, which
+// must be algo's number of hex digits. GNU tools put a \ ahead of the sum
+// of a name they escape. Anything else, such as the first word of a login
+// banner ahead of the sum, is no sum (S10).
+func sumIn(out, algo string) (string, bool) {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", false
+	}
+	sum := strings.ToLower(strings.TrimPrefix(fields[0], "\\"))
+	if len(sum) != sumLen[algo] || strings.Trim(sum, "0123456789abcdef") != "" {
+		return "", false
+	}
+	return sum, true
 }
 
 // checksumCmds returns the server's checksum command of each algorithm it
@@ -510,9 +602,12 @@ func (s *sshShell) checksumCmds(ctx context.Context) (map[string]string, error) 
 	if s.cksumCmds != nil {
 		return s.cksumCmds, nil
 	}
-	cmds, err := probeSSHChecksums(func(cmd string) error {
-		_, err := s.run(ctx, cmd)
-		return err
+	cmds, err := probeSSHChecksums(func(cmd string) (string, error) {
+		var out bytes.Buffer
+		err := s.exec(ctx, s.client, cmd, nil, &out)
+		return out.String(), err
+	}, func(cmd, out string) {
+		Log.Add(s.proto, DirWarn, fmt.Sprintf("%s did not give the sum of a test word (it printed %s): not used", cmd, clip(out)))
 	})
 	if ctx.Err() != nil {
 		// A command cut short can still end with an exit status, which
@@ -562,11 +657,11 @@ func (s *sshShell) Checksum(ctx context.Context, relPath, algo string) (string, 
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "", errors.New("empty checksum output")
+	sum, ok := sumIn(out, algo)
+	if !ok {
+		return "", fmt.Errorf("%s: %s of %s: the server answered %s, not a sum", s.proto, algo, relPath, clip(out))
 	}
-	return strings.TrimPrefix(fields[0], "\\"), nil
+	return sum, nil
 }
 
 // ChecksumRange sums n bytes of relPath from off on the server, the
@@ -586,11 +681,11 @@ func (s *sshShell) ChecksumRange(ctx context.Context, relPath, algo string, off,
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "", errors.New("empty checksum output")
+	sum, ok := sumIn(out, algo)
+	if !ok {
+		return "", fmt.Errorf("%s: %s of %d bytes of %s: the server answered %s, not a sum", s.proto, algo, n, relPath, clip(out))
 	}
-	return fields[0], nil
+	return sum, nil
 }
 
 const touchLayout = "2006-01-02T15:04:05.000000000Z"
