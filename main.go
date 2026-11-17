@@ -148,7 +148,12 @@ func main() {
 	if *mouse {
 		progOpts = append(progOpts, tea.WithMouseCellMotion())
 	}
-	final, err := tea.NewProgram(mdl, progOpts...).Run()
+	p := tea.NewProgram(mdl, progOpts...)
+	// rclone still ends the process on a few errors it calls fatal: the
+	// terminal is given back first, so the shell works and the reason shows.
+	transport.OnRcloneFatal(func() { _ = p.ReleaseTerminal() })
+	final, err := p.Run()
+	transport.OnRcloneFatal(nil)
 	if m, ok := final.(*ui.Model); ok {
 		m.Close()
 	}

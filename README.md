@@ -89,7 +89,9 @@ for name.
 ## rclone remotes
 
 `rclone://` hands everything after the scheme to rclone, so any named remote
-from `rclone.conf` or any connection string works.
+from `rclone.conf` or any connection string works. An encrypted `rclone.conf`
+takes its password from `RCLONE_CONFIG_PASS` or `RCLONE_PASSWORD_COMMAND`: sc
+never asks for it, since the TUI holds the terminal.
 
 ```
 sc rclone://gdrive/Photos /backup/photos            # named remote

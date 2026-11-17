@@ -10,12 +10,15 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/lib/atexit"
 
 	"sc/model"
 )
@@ -54,15 +57,89 @@ type RcloneBackend struct {
 
 var rcloneInit sync.Once
 
-// rcloneSetup redirects rclone's logging into sc's remote log before anything
-// else touches rclone. Its default slog handler writes to stderr, which would
-// corrupt the TUI, and configfile.Install logs a NOTICE when no rclone.conf
-// exists.
-func rcloneSetup() {
+// rcloneConf is rclone's config file storage, installed by rcloneSetup.
+var rcloneConf *rcloneConfig
+
+// rcloneSetup makes rclone a library that leaves the process and the
+// terminal to sc, the first time it runs, and reads rclone's config file
+// (L13). Every remote reads that file, so its error fails every open.
+//   - rclone logs into sc's remote log: its default handler writes to
+//     stderr, which would corrupt the TUI.
+//   - An encrypted config file never asks for its password on the terminal
+//     the TUI holds: RCLONE_CONFIG_PASS or RCLONE_PASSWORD_COMMAND gives it,
+//     or the open fails and says so.
+//   - rclone installs no SIGINT/SIGTERM handler: its handler ends the
+//     process with the terminal still raw, where bubbletea's restores it.
+//   - A config file that cannot be read is an error, never rclone's
+//     os.Exit, and the next open reads it again.
+func rcloneSetup() error {
 	rcloneInit.Do(func() {
 		fs.SetLogger(rcloneLogHandler{})
+		fs.GetConfig(nil).AskPassword = false
+		atexit.IgnoreSignals()
 		configfile.Install()
+		rcloneConf = &rcloneConfig{Storage: config.Data()}
+		config.SetData(rcloneConf) // no-op when there is no config file path
+		config.LoadedData()        // reads the file through rcloneConf.Load
 	})
+	return rcloneConf.check()
+}
+
+// rcloneConfig is rclone's config file storage with a Load that cannot end
+// the process: rclone loads the file on first use (config.LoadedData) and
+// calls os.Exit on any error but "not found". Load keeps the error for
+// check and tells rclone the file loaded, holding no remotes.
+type rcloneConfig struct {
+	config.Storage
+	mu  sync.Mutex
+	err error // the last load's failure
+}
+
+func (c *rcloneConfig) Load() error {
+	err := c.Storage.Load()
+	failed := err
+	if err == config.ErrorConfigFileNotFound { // rclone compares it so
+		failed = nil
+	}
+	c.mu.Lock()
+	c.err = failed
+	c.mu.Unlock()
+	if failed != nil {
+		return nil
+	}
+	return err
+}
+
+// check returns the config file's error, reading the file again when the
+// last read failed: a file fixed while sc runs needs no restart.
+func (c *rcloneConfig) check() error {
+	c.mu.Lock()
+	failed := c.err != nil
+	c.mu.Unlock()
+	if failed {
+		_ = c.Load()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return fmt.Errorf("rclone: config file %s: %w", config.GetConfigPath(), c.err)
+	}
+	return nil
+}
+
+// rcloneFatalHook runs before rclone ends the process; see OnRcloneFatal.
+var rcloneFatalHook atomic.Pointer[func()]
+
+// OnRcloneFatal sets release to run before rclone ends the process, which
+// it still does on a few errors it calls fatal, such as a CA certificate
+// file that cannot be read; nil unsets it. main gives back the terminal the
+// TUI holds.
+func OnRcloneFatal(release func()) {
+	if release == nil {
+		rcloneFatalHook.Store(nil)
+		return
+	}
+	rcloneFatalHook.Store(&release)
 }
 
 type rcloneLogHandler struct{}
@@ -75,7 +152,21 @@ func (rcloneLogHandler) Handle(_ context.Context, r slog.Record) error {
 		dir = DirErr
 	}
 	Log.Add("rclone", dir, r.Message)
+	if r.Level == fs.SlogLevelCritical {
+		rcloneFatal(r.Message)
+	}
 	return nil
+}
+
+// rcloneFatal runs right before rclone's os.Exit(1), which sc cannot stop:
+// rclone logs at its critical level only in fs.Fatal and fs.Fatalf. The
+// hook gives the terminal back, and the reason goes to stderr, where it
+// stays after the exit; sc's own log goes with the process.
+func rcloneFatal(msg string) {
+	if release := rcloneFatalHook.Load(); release != nil {
+		(*release)()
+	}
+	fmt.Fprintln(os.Stderr, "sc: rclone ended the program:", msg)
 }
 
 func (h rcloneLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
@@ -100,7 +191,9 @@ func parseRcloneSpec(rawURL string) (string, error) {
 // NewRcloneBackend makes the remote rawURL names; a cancel of ctx stops it
 // while it is being made.
 func NewRcloneBackend(ctx context.Context, rawURL string, insecure bool) (*RcloneBackend, error) {
-	rcloneSetup()
+	if err := rcloneSetup(); err != nil {
+		return nil, err
+	}
 	spec, err := parseRcloneSpec(rawURL)
 	if err != nil {
 		return nil, err

@@ -179,6 +179,15 @@ func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, err
 		}
 		return NewLocalBackend(arg), nil
 	}
+	if strings.HasPrefix(arg, rcloneScheme) {
+		// rclone's config file is read here, before the TUI holds the
+		// terminal when main calls this: a password command runs on a free
+		// terminal, and a file that cannot be read is the argument's error
+		// (L13).
+		if err := rcloneSetup(); err != nil {
+			return nil, err
+		}
+	}
 	return NewLazyBackend(MaskURLPassword(arg), func(ctx context.Context) (model.Backend, error) {
 		return openBackend(ctx, arg, insecure, parallel)
 	}), nil
