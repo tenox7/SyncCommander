@@ -1121,11 +1121,39 @@ func (b *FTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 		return errors.New("ftp: refusing to remove the base directory")
 	}
 	b.dirs.Clear()
-	err := b.withPrimary(ctx, func() error { return b.removeAllLocked(b.abs(relPath)) })
+	err := b.withPrimary(ctx, func() error {
+		full := b.abs(relPath)
+		e, err := b.entryInFolderLocked(full)
+		if err != nil {
+			return err
+		}
+		if e != nil && e.Type != ftp.EntryTypeFolder {
+			return b.conn.Delete(full) // a link goes as a link
+		}
+		return b.removeAllLocked(full)
+	})
 	if err != nil {
 		Log.Add("ftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
+}
+
+// entryInFolderLocked finds fullPath in its folder's listing; nil when the
+// listing lacks it. FTP has no lstat: asked for a link's path, a server
+// lists the folder the link points to, and a folder delete there deleted
+// through the link, out of the base too. Only the link's own folder lists
+// it as a link.
+func (b *FTPBackend) entryInFolderLocked(fullPath string) (*ftp.Entry, error) {
+	entries, err := b.listLocked(path.Dir(fullPath))
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.Name == path.Base(fullPath) {
+			return e, nil
+		}
+	}
+	return nil, nil
 }
 
 func (b *FTPBackend) removeAllLocked(fullPath string) error {

@@ -574,7 +574,10 @@ func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 }
 
 func removeAll(c *sftp.Client, fullPath string) error {
-	info, err := c.Stat(fullPath)
+	// Lstat: a link is removed as a link. Stat followed it, and a folder
+	// that became a link after the scan had the folder it points to
+	// emptied, outside the base too, as os.RemoveAll and rm -rf never do.
+	info, err := c.Lstat(fullPath)
 	if err != nil {
 		return err
 	}
