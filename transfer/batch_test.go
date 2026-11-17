@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"sc/internal/sshtest"
 	"sc/transport"
@@ -42,6 +43,10 @@ func TestScenarioBatchSendsAFolderInOneSession(t *testing.T) {
 	writeFile(t, filepath.Join(left, "d", "f.txt"), "the file")
 	writeFile(t, filepath.Join(left, "d", "e", "g.txt"), "another")
 	writeFile(t, filepath.Join(left, "outside.txt"), "not in d")
+	// An empty folder is on the copy's list too: it goes, and is no file.
+	if err := os.MkdirAll(filepath.Join(left, "d", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	s := batchScenario(t, left, right)
 	mark := len(transport.Log.Lines())
 	p := s.copy(t, "d", true, false)
@@ -49,9 +54,9 @@ func TestScenarioBatchSendsAFolderInOneSession(t *testing.T) {
 		t.Errorf("failed=%d done=%d total=%d, want 0, 2, 2", p.Failed.Load(), p.Done.Load(), p.Total.Load())
 	}
 	if !logged(mark, "BATCH d (2 files") || !logged(mark, "BATCH d OK") {
-		t.Error("the log has no BATCH d lines: the folder did not go in one session")
+		t.Errorf("the log has no BATCH d lines for 2 files: %q", transport.Log.Lines()[mark:])
 	}
-	wantTree(t, "after the batch", right, "d/", "d/e/", "d/e/g.txt", "d/f.txt")
+	wantTree(t, "after the batch", right, "d/", "d/e/", "d/e/g.txt", "d/empty/", "d/f.txt")
 	for rel, body := range map[string]string{"d/f.txt": "the file", "d/e/g.txt": "another"} {
 		if got := readFile(t, filepath.Join(right, rel)); got != body {
 			t.Errorf("%s = %q, want %q", rel, got, body)
@@ -117,4 +122,65 @@ func TestScenarioBatchThenMirrorDeletesThePlannedFiles(t *testing.T) {
 		t.Error("the log does not show the batch and then the mirror delete")
 	}
 	wantTree(t, "after the mirror", right, "d/", "d/f.txt", "other.txt")
+}
+
+// sameTimes gives the files one mtime on both sides, an hour ago.
+func sameTimes(t *testing.T, rels []string, sides ...string) time.Time {
+	t.Helper()
+	when := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for _, side := range sides {
+		for _, rel := range rels {
+			if err := os.Chtimes(filepath.Join(side, filepath.FromSlash(rel)), when, when); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return when
+}
+
+// F20: the batch sends what the copy would send file by file, and only
+// that. twin.txt has its size and mtime on both sides, so the scan holds it
+// as equal, though its bytes differ. One session over the whole folder, as
+// before, sent it: rsync's -c compares the bytes.
+func TestScenarioBatchSendsOnlyTheFilesThatDiffer(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "l"), filepath.Join(root, "r")
+	writeFile(t, filepath.Join(left, "d", "new.txt"), "only on the left")
+	writeFile(t, filepath.Join(left, "d", "changed.txt"), "the new version")
+	writeFile(t, filepath.Join(right, "d", "changed.txt"), "old")
+	writeFile(t, filepath.Join(left, "d", "twin.txt"), "left body")
+	writeFile(t, filepath.Join(right, "d", "twin.txt"), "rght body")
+	sameTimes(t, []string{"d/twin.txt"}, left, right)
+	sameTimes(t, []string{"d/changed.txt"}, right) // older than the left one
+	s := batchScenario(t, left, right)
+	mark := len(transport.Log.Lines())
+	if p := s.copy(t, "d", true, false); p.Failed.Load() != 0 || p.Total.Load() != 2 {
+		t.Errorf("failed=%d total=%d, want 0 and 2", p.Failed.Load(), p.Total.Load())
+	}
+	if !logged(mark, "BATCH d (2 files") || !logged(mark, "BATCH d OK") {
+		t.Errorf("the batch did not send the two files that differ: %q", transport.Log.Lines()[mark:])
+	}
+	for rel, body := range map[string]string{"d/new.txt": "only on the left", "d/changed.txt": "the new version", "d/twin.txt": "rght body"} {
+		if got := readFile(t, filepath.Join(right, rel)); got != body {
+			t.Errorf("%s = %q, want %q", rel, got, body)
+		}
+	}
+}
+
+// With nothing that differs there is nothing to send, and no session runs.
+func TestScenarioBatchDoesNotRunWhenNothingDiffers(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "l"), filepath.Join(root, "r")
+	for _, side := range []string{left, right} {
+		writeFile(t, filepath.Join(side, "d", "a.txt"), "same")
+	}
+	sameTimes(t, []string{"d/a.txt"}, left, right)
+	s := batchScenario(t, left, right)
+	mark := len(transport.Log.Lines())
+	if p := s.copy(t, "d", true, false); p.Failed.Load() != 0 {
+		t.Errorf("failed=%d, want 0", p.Failed.Load())
+	}
+	if logged(mark, "BATCH d") {
+		t.Errorf("a batch ran with nothing to send: %q", transport.Log.Lines()[mark:])
+	}
 }

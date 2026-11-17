@@ -280,20 +280,26 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 	})
 }
 
-// SendLocalTree uploads everything under srcRoot/relPath in one rsync
-// session. -c stands in for --ignore-times: rsync then skips only files whose
-// size, mtime and checksum all match, so a content-different file is never
-// dropped while a mostly identical tree is not resent. --progress makes the
-// sender print each filename as it starts, which feeds onFile. Each file
-// goes through a temp file renamed into place, as rsyncTransferFlags says.
-func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
+// SendLocalTree uploads the listed paths under srcRoot/relPath, and the
+// folders above them, in one rsync session: nothing else of the folder
+// (F20). -c stands in for --ignore-times: rsync then skips only a listed
+// file whose size, mtime and checksum all match, so a content-different
+// file is never dropped. --progress makes the sender print each filename as
+// it starts, which feeds onFile. Each file goes through a temp file renamed
+// into place, as rsyncTransferFlags says.
+func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error {
+	names, err := namesUnder(relPath, files)
+	if err != nil || len(names) == 0 {
+		// Never a run without a list: the client then sends everything.
+		return err
+	}
 	srcPath := filepath.Join(srcRoot, relPath) + string(filepath.Separator)
 	remoteDest := b.abs(relPath) + "/"
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(remoteDest)); err != nil {
 		return err
 	}
 	client, err := newRsyncClient([]string{"-t", "-O", "-W", "-r", "-c", "--progress"},
-		rsyncclient.WithSender(), rsyncclient.WithStdout(&filenameLineParser{onFile: onFile}))
+		rsyncclient.WithSender(), rsyncclient.WithSendOnly(names), rsyncclient.WithStdout(&filenameLineParser{onFile: onFile}))
 	if err != nil {
 		return err
 	}
@@ -307,6 +313,26 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 		Log.Add(b.proto, DirIn, "BATCH OK")
 	}
 	return err
+}
+
+// namesUnder names files as a send of relPath's contents lists them:
+// relative to relPath. A path that is not under relPath is refused.
+func namesUnder(relPath string, files []string) ([]string, error) {
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		name, ok := f, true
+		if relPath != "" {
+			name, ok = strings.CutPrefix(f, relPath+"/")
+		}
+		for part := range strings.SplitSeq(name, "/") {
+			ok = ok && model.IsFileName(part) // no "", ".", ".." or empty part
+		}
+		if !ok {
+			return nil, fmt.Errorf("batch send %s: %q is not in it", relPath, f)
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 // filenameLineParser parses gorsync's sender --progress stdout. Per file the

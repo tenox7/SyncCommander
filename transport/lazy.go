@@ -547,8 +547,8 @@ func (b *lazyBackend) SendLocalFile(ctx context.Context, srcPath, relPath string
 	return doAs(b, ctx, "send "+relPath, func(s model.LocalSender) error { return s.SendLocalFile(ctx, srcPath, relPath, p) })
 }
 
-func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error {
-	return doAs(b, ctx, "batch send "+relPath, func(s model.BatchSender) error { return s.SendLocalTree(ctx, srcRoot, relPath, onFile) })
+func (b *lazyBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error {
+	return doAs(b, ctx, "batch send "+relPath, func(s model.BatchSender) error { return s.SendLocalTree(ctx, srcRoot, relPath, files, onFile) })
 }
 
 func (b *lazyBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath string) error {

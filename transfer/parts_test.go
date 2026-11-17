@@ -289,10 +289,11 @@ func TestPartsAreNotCopied(t *testing.T) {
 	}
 }
 
-// One rsync session sends a whole local folder, the parts in it too, as
-// files under their part names. A folder that holds one is copied file by
-// file, which leaves the parts out. (Until T1 this ran without -batch, so
-// it never reached the batch it is about.)
+// The batch sends the copy's own list, and a part is not on it: the folder
+// goes in one session and the part stays behind, as file by file. (Until
+// T1 this ran without -batch, so it never reached the batch it is about.
+// Until F20 one session sent the whole folder, parts too, so a folder with
+// a part went file by file.)
 func TestBatchSendLeavesPartsOut(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("no rsync binary")
@@ -317,8 +318,11 @@ func TestBatchSendLeavesPartsOut(t *testing.T) {
 		t.Errorf("copy failed")
 	}
 	wantTree(t, "after copying d over rsync", right, "d/", "d/e/", "d/e/g.txt", "d/f.txt")
-	if !logged(mark, "BATCH d: holds unfinished copies") || logged(mark, "BATCH d (") {
-		t.Error("the log does not say the folder went file by file for its part")
+	if !logged(mark, "BATCH d (2 files") || !logged(mark, "BATCH d OK") {
+		t.Errorf("the folder did not go in one session: %q", transport.Log.Lines()[mark:])
+	}
+	if !logged(mark, "COPY d/e/"+model.PartPath("h.txt")+": skipped, a partial copy") {
+		t.Error("the log does not say the part was left out")
 	}
 }
 

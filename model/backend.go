@@ -307,20 +307,23 @@ type LocalReceiver interface {
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
 }
 
-// BatchSender is implemented by destination backends that can transfer an
-// entire local subtree in one protocol session (e.g. rsync streaming all
-// files over a single SSH channel) instead of N per-file calls. The receiver
-// recreates the tree under its base + relPath.
+// BatchSender is implemented by destination backends that can transfer
+// many local paths in one protocol session (e.g. rsync streaming all files
+// over a single SSH channel) instead of N per-file calls. The receiver
+// recreates them under its base + relPath.
+//
+// files are what to send: paths relative to the base, as relPath, and under
+// relPath; files, and folders to create. The session sends those and the
+// folders above them, and nothing else of relPath (F20). An empty list
+// sends nothing.
 //
 // onFile fires once per file as the sender begins it, with the path relative
-// to srcRoot. The implementation MUST credit progress.Bytes through the
+// to relPath. The implementation MUST credit progress.Bytes through the
 // context counter as data flows; the caller seeds Total/TotalBytes before the
-// call and does not top-up afterwards. --ignore-times semantics are assumed:
-// every file in the source tree is transferred unconditionally so files the
-// caller previously flagged as different can never be silently skipped by an
-// mtime+size match.
+// call and does not top-up afterwards. A listed file is never skipped on an
+// mtime+size match: the caller listed it because it differs.
 type BatchSender interface {
-	SendLocalTree(ctx context.Context, srcRoot, relPath string, onFile func(name string)) error
+	SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error
 }
 
 // BackendRangeOpener adapts a Backend + relPath into a RangeOpener. OpenAt

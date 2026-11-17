@@ -74,7 +74,7 @@ func TestRsyncSSHRefusedTransfersFail(t *testing.T) {
 		writeTestFile(t, src, rel, rel)
 	}
 	chmodTest(t, filepath.Join(src, "tree/secret.txt"), 0o000)
-	err = b.SendLocalTree(context.Background(), src, "tree", nil)
+	err = b.SendLocalTree(context.Background(), src, "tree", []string{"tree/a.txt", "tree/secret.txt", "tree/z.txt"}, nil)
 	if err == nil && !(exists(mod, "tree/a.txt") && exists(mod, "tree/secret.txt") && exists(mod, "tree/z.txt")) {
 		t.Errorf("SendLocalTree with a file the client cannot read: no error; on the server a=%v secret=%v z=%v", exists(mod, "tree/a.txt"), exists(mod, "tree/secret.txt"), exists(mod, "tree/z.txt"))
 	}

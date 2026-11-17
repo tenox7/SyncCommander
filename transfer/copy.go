@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -427,37 +425,30 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	if !isLocal {
 		return false
 	}
-	// Asked before the walk below, which counts every file of the local
-	// folder: a remote's wrapper has every optional method, so the walk ran
-	// for every remote and was thrown away when the backend behind it took
-	// no batch (F20, D2).
+	// Asked first: a remote's wrapper has every optional method (D2).
 	bs, ok := capable[model.BatchSender](c.ctx, c.dst, func(caps model.Caps) bool { return caps.Batch })
 	if !ok {
 		return false
 	}
-	srcRoot := lp.LocalPath("")
+	// The session sends what the copy would send file by file, and only
+	// that: not the rest of the folder, and nothing when nothing differs
+	// (F20). Links, devices and the parts cut-off copies left are not sent:
+	// copyOne skips them, and so does the batch.
+	var paths []string
+	var skipped []item
 	var batchFiles, batchBytes int64
-	parts := false
-	_ = filepath.WalkDir(filepath.Join(srcRoot, c.req.RelPath), func(_ string, d fs.DirEntry, werr error) error {
-		if werr != nil || !d.Type().IsRegular() {
-			return nil // rsync skips links, pipes and devices without -l and -D
-		}
-		if model.IsPartName(d.Name()) {
-			parts = true
-			return fs.SkipAll
-		}
-		if info, err := d.Info(); err == nil {
+	for _, f := range files {
+		switch {
+		case f.src == nil:
+			return false // file by file, it counts as failed
+		case f.src.IsSpecial():
+			skipped = append(skipped, f)
+			continue
+		case !f.src.IsDir:
 			batchFiles++
-			batchBytes += info.Size()
+			batchBytes += f.src.Size
 		}
-		return nil
-	})
-	// One rsync session sends every file in the folder, the parts that
-	// cut-off copies left too: the client sender does not apply --exclude to
-	// its own list. File by file, the parts stay behind.
-	if parts {
-		transport.Log.Add("copy", transport.DirOut, "BATCH "+c.req.RelPath+": holds unfinished copies (.sc-part), which one rsync session would send too; copying file by file")
-		return false
+		paths = append(paths, f.relPath)
 	}
 	if batchFiles == 0 || !c.clearAllTwins() {
 		return false
@@ -469,7 +460,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.Parallel.Store(1)
 	p.Batched.Store(true)
 	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("BATCH %s (%d files, %s)", c.req.RelPath, batchFiles, model.FormatSize(batchBytes)))
-	err := bs.SendLocalTree(c.ctx, srcRoot, c.req.RelPath, func(name string) {
+	err := bs.SendLocalTree(c.ctx, lp.LocalPath(""), c.req.RelPath, paths, func(name string) {
 		p.File.Store(name)
 		if p.Done.Load() < p.Total.Load() {
 			p.Done.Add(1)
@@ -493,6 +484,9 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	p.CompletedBytes.Store(p.Bytes.Load())
 	p.CompletedBaseBytes.Store(p.BaseBytes.Load())
 	transport.Log.Add("copy", transport.DirIn, "BATCH "+c.req.RelPath+" OK")
+	for _, f := range skipped {
+		logSkipped(f) // only now: a batch that failed goes file by file, which says so
+	}
 	return true
 }
 
@@ -565,11 +559,7 @@ func (c *copier) copyOne(f item) {
 	// file (L14). It goes before the twin: nothing is written at its name, so
 	// nothing there is removed.
 	if srcEntry.IsSpecial() {
-		why := "sc copies files and folders only"
-		if srcEntry.IsPart() {
-			why = "what a cut-off copy left, never copied itself"
-		}
-		transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+srcEntry.Kind()+" ("+why+")")
+		logSkipped(f)
 		return
 	}
 	// Before the twin too: nothing is written, so nothing is removed.
@@ -698,6 +688,15 @@ func (c *copier) copyOne(f item) {
 		return
 	}
 	finish("")
+}
+
+// logSkipped says why f, a link, device or part, is not copied.
+func logSkipped(f item) {
+	why := "sc copies files and folders only"
+	if f.src.IsPart() {
+		why = "what a cut-off copy left, never copied itself"
+	}
+	transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+f.src.Kind()+" ("+why+")")
 }
 
 // mirrorDelete removes the entries only on the destination that the plan
