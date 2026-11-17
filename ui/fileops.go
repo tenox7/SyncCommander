@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -35,6 +36,11 @@ func (m *Model) openRename(node *model.TreeNode) {
 		}
 		if strings.ContainsAny(newName, "/\\") {
 			transport.Log.Add("rename", transport.DirErr, oldName+": a name cannot contain a path separator")
+			return nil
+		}
+		if !model.IsFileName(newName) {
+			// "." and ".." name the folder itself and its parent (W-C2).
+			m.input.SetError(fmt.Sprintf("%q is no file name", newName))
 			return nil
 		}
 		var taken string

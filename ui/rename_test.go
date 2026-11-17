@@ -150,3 +150,38 @@ func TestRenameOntoOtherSidesNameIsAllowed(t *testing.T) {
 		t.Error("right x.txt was not renamed to y.txt")
 	}
 }
+
+// W-C2: "." and ".." are no file names; as a new name they are the folder
+// itself and its parent. The dialog took them and sent the rename, which
+// only the backends refused. It now keeps the dialog open with the reason
+// and sends nothing.
+func TestRenameRefusesNamesThatAreNoFileNames(t *testing.T) {
+	root := t.TempDir()
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	for _, side := range []string{left, right} {
+		writeTestFile(t, filepath.Join(side, "a.txt"), "AAA")
+		writeTestFile(t, filepath.Join(side, "d", "b.txt"), "BBB")
+	}
+	m := scannedModel(t, left, right)
+	for _, rel := range []string{"a.txt", "d/b.txt"} {
+		for _, name := range []string{".", ".."} {
+			m.openRename(firstNode(m.scanner.Tree(), func(n *model.TreeNode) bool { return n.RelPath == rel }))
+			m.input.ed.set(name)
+			if cmd := m.input.Confirm(); cmd != nil {
+				t.Errorf("%s renamed to %q: the rename was sent", rel, name)
+				m.Update(runFirst(cmd)) // the rename runs and ends
+			}
+			if !m.input.IsOpen() || !strings.Contains(m.input.err, "no file name") {
+				t.Errorf("%s renamed to %q: dialog open=%v err=%q, want it open with the reason", rel, name, m.input.IsOpen(), m.input.err)
+			}
+			m.input.Close()
+		}
+	}
+	for _, side := range []string{left, right} {
+		for rel, body := range map[string]string{"a.txt": "AAA", "d/b.txt": "BBB"} {
+			if b, err := os.ReadFile(filepath.Join(side, rel)); err != nil || string(b) != body {
+				t.Errorf("%s/%s = %q, %v after a refused rename", filepath.Base(side), rel, b, err)
+			}
+		}
+	}
+}
