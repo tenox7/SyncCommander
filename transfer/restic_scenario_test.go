@@ -2,14 +2,18 @@ package transfer
 
 import (
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +158,44 @@ func TestScenarioMirrorToResticDeletesOnlyWhenAllowed(t *testing.T) {
 				t.Errorf("with -restic-delete the mirror kept the pack the source does not have: %q", transport.Log.Lines()[mark:])
 			}
 		})
+	}
+}
+
+// W-H6: rclone answers a path that does not exist as an empty repository,
+// and a mirror from one deletes what the other side holds. A restic://
+// path with no config is refused unless sc runs with -restic-new; with it
+// the path opens empty, and a repository folder copies into it whole. Its
+// folders are the layout's, and that an object keeps no time is no
+// failure and no line in the log for each file.
+func TestScenarioCopyRepositoryIntoANewResticPath(t *testing.T) {
+	root := t.TempDir()
+	folder, served := filepath.Join(root, "folder"), filepath.Join(root, "served")
+	paths := resticRepo(t, folder)
+	if err := os.MkdirAll(served, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := startResticServer(t, served)
+
+	transport.SetResticNew(false)
+	_, err := openRestic(t, url).List(context.Background(), "")
+	if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "-restic-new") {
+		t.Fatalf("List of a path with no repository = %v; want it refused, naming -restic-new", err)
+	}
+
+	transport.SetResticNew(true)
+	defer transport.SetResticNew(false)
+	dst := openRestic(t, url)
+	s := scanned(t, folder, served, transport.NewLocalBackend(folder), dst)
+	mark := len(transport.Log.Lines())
+	if p := s.copy(t, "", true, false); p.Failed.Load() != 0 {
+		t.Errorf("%d files failed: %q", p.Failed.Load(), transport.Log.Lines()[mark:])
+	}
+	if logged(mark, "settimes") {
+		t.Errorf("the copy logged for each object that it keeps no time: %q", transport.Log.Lines()[mark:])
+	}
+	for _, rel := range paths {
+		if !onDisk(filepath.Join(served, rel)) {
+			t.Errorf("%s is not on the server", rel)
+		}
 	}
 }

@@ -156,6 +156,8 @@ func TestPutSendsTheSizeItIsTold(t *testing.T) {
 		}
 	})
 	t.Run("restic", func(t *testing.T) {
+		SetResticNew(true) // an object is written into an empty path
+		defer SetResticNew(false)
 		port, _ := startRcloneRestic(t, t.TempDir())
 		l, addr := startLengths(t, port)
 		var b *ResticBackend

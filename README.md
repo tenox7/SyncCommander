@@ -60,7 +60,10 @@ file there. Resumed (appended) copies are checksum-verified and recopied
 in full on mismatch — disable with `--verify-resume=false`.
 
 A restic repository is a backup: sc deletes nothing in one over restic://,
-a mirror's deletes included, unless started with `-restic-delete`. Its
+a mirror's deletes included, unless started with `-restic-delete`. A
+restic:// path with no repository (no `config`) is refused, because
+`rclone serve restic` answers a mistyped path as an empty repository; start
+sc with `-restic-new` to copy a repository into an empty path. Its
 `data/` shows as restic stores it on disk, `data/<first two characters>/<name>`,
 so a repository folder and the same repository over restic:// compare name
 for name.

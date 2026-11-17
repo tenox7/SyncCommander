@@ -207,6 +207,8 @@ func TestStatRclone(t *testing.T) {
 
 // restic:// has a fixed top level; config and objects are asked by HEAD.
 func TestStatRestic(t *testing.T) {
+	SetResticNew(true) // the repository is written into an empty path
+	defer SetResticNew(false)
 	root := t.TempDir()
 	port, _ := startRcloneRestic(t, root)
 	open := func() *ResticBackend {

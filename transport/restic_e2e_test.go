@@ -101,6 +101,8 @@ func resticPut(t *testing.T, b *ResticBackend, relPath string, content []byte) {
 func TestResticRoundTrip(t *testing.T) {
 	SetResticDeletes(true)
 	defer SetResticDeletes(false)
+	SetResticNew(true) // the repository is written into an empty path
+	defer SetResticNew(false)
 	root := t.TempDir()
 	port, stop := startRcloneRestic(t, root)
 

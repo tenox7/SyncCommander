@@ -41,6 +41,16 @@ var resticDeletes atomic.Bool
 // SetResticDeletes lets restic:// delete objects.
 func SetResticDeletes(on bool) { resticDeletes.Store(on) }
 
+// resticNew is -restic-new. A path without a config holds no repository,
+// and rclone answers a listing of a path that does not exist as an empty
+// one: a mistyped path opened as an empty repository, and a mirror from it
+// deleted what the other side holds (W-H6). Off, such a path is refused;
+// on, it opens as an empty repository, for one to be copied into it.
+var resticNew atomic.Bool
+
+// SetResticNew lets restic:// open a path that holds no repository yet.
+func SetResticNew(on bool) { resticNew.Store(on) }
+
 func resticDeleteAllowed(rel string) error {
 	if resticDeletes.Load() {
 		return nil
@@ -150,30 +160,27 @@ func NewResticBackend(ctx context.Context, rawURL string, insecure bool, paralle
 
 func (b *ResticBackend) BasePath() string { return b.display }
 
-// validate confirms the endpoint speaks the restic REST API before we commit
-// to it. An existing config means a live repo; a freshly created repo has none
-// yet, so a 2xx listing of the data type is accepted instead. A bare 404 is
-// not: any web server answers that.
+// validate confirms a repository is at the path: it has a config. A path
+// without one is refused unless -restic-new (resticNew): rclone answers a
+// listing of a path that does not exist as an empty one, so only the config
+// tells a repository from a mistyped path. A path taken without a config
+// must still answer a listing, as any web server answers a 404.
 func (b *ResticBackend) validate(ctx context.Context) error {
-	resp, err := b.do(ctx, "HEAD", b.urlFor("config", false), nil, nil)
+	if _, ok, err := b.statConfig(ctx); err != nil || ok {
+		return err
+	}
+	if !resticNew.Load() {
+		return fmt.Errorf("restic: %s: no repository here, it has no config (a mistyped path looks the same); start sc with -restic-new to copy a repository into an empty path: %w", b.display, fs.ErrNotExist)
+	}
+	resp, err := b.do(ctx, "GET", b.typeURL("keys"), nil, nil)
 	if err != nil {
 		return err
 	}
 	drainClose(resp.Body)
-	if resp.StatusCode/100 == 2 {
-		return nil
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("restic: %s: no config, and GET keys/ answers %s", b.display, resp.Status)
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		lresp, err := b.do(ctx, "GET", b.urlFor("data", true), nil, nil)
-		if err != nil {
-			return err
-		}
-		drainClose(lresp.Body)
-		if lresp.StatusCode/100 == 2 {
-			return nil
-		}
-	}
-	return fmt.Errorf("restic: %s: %s", b.display, resp.Status)
+	return nil
 }
 
 // objectURL addresses one object by its REST path: config, data/<name>,
@@ -207,7 +214,7 @@ func (b *ResticBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 	rel := strings.Trim(relDir, "/")
 	switch {
 	case rel == "":
-		return b.rootEntries(ctx), nil
+		return b.rootEntries(ctx)
 	case rel == "data" || isResticShard(rel):
 		return b.listData(ctx, rel)
 	case isResticType(rel):
@@ -256,25 +263,36 @@ func dataFolders(objs []model.FileEntry) map[string][]model.FileEntry {
 
 // rootEntries is the repo's fixed top level: the five type dirs plus config
 // when present. It needs no listing call, only a cheap HEAD to size config.
-func (b *ResticBackend) rootEntries(ctx context.Context) []model.FileEntry {
+func (b *ResticBackend) rootEntries(ctx context.Context) ([]model.FileEntry, error) {
 	entries := make([]model.FileEntry, 0, len(resticTypes)+1)
 	for _, t := range resticTypes {
 		entries = append(entries, model.FileEntry{RelPath: t, Name: t, IsDir: true, Mode: os.ModeDir | 0755})
 	}
-	if e, ok := b.statConfig(ctx); ok {
+	e, ok, err := b.statConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		entries = append(entries, e)
 	}
-	return entries
+	return entries, nil
 }
 
-func (b *ResticBackend) statConfig(ctx context.Context) (model.FileEntry, bool) {
+// statConfig is config's row, and whether the repository has one: a 404
+// says it has none, and any other failure is an error. Every failure said
+// "no config", so a 502 left config out of the listing, and a mirror from
+// this side deleted the other repository's (W-H6).
+func (b *ResticBackend) statConfig(ctx context.Context) (model.FileEntry, bool, error) {
 	resp, err := b.do(ctx, "HEAD", b.objectURL("config"), nil, nil)
 	if err != nil {
-		return model.FileEntry{}, false
+		return model.FileEntry{}, false, err
 	}
 	drainClose(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		return model.FileEntry{}, false
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return model.FileEntry{}, false, nil
+	case resp.StatusCode/100 != 2:
+		return model.FileEntry{}, false, fmt.Errorf("restic: HEAD config: %s", resp.Status)
 	}
 	return model.FileEntry{
 		RelPath: "config",
@@ -282,7 +300,7 @@ func (b *ResticBackend) statConfig(ctx context.Context) (model.FileEntry, bool) 
 		Size:    max(resp.ContentLength, 0),
 		ModTime: parseWDTime(resp.Header.Get("Last-Modified")),
 		Mode:    0644,
-	}, true
+	}, true, nil
 }
 
 func (b *ResticBackend) listType(ctx context.Context, typeName string) ([]model.FileEntry, error) {
@@ -291,7 +309,10 @@ func (b *ResticBackend) listType(ctx context.Context, typeName string) ([]model.
 		return nil, err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusNotFound {
+	if resp.StatusCode == http.StatusNotFound && !strings.HasPrefix(resp.Header.Get("Server"), "rclone/") {
+		// The repository has no such folder, as restic's own client reads
+		// a 404. rclone lists a folder it does not have as empty, and
+		// answers 404 for a listing that failed (W-H6).
 		return nil, nil
 	}
 	if resp.StatusCode/100 != 2 {
@@ -339,8 +360,15 @@ func (b *ResticBackend) decodeListV1(resp *http.Response, typeName string) ([]mo
 	Log.Add("restic", DirIn, fmt.Sprintf("v1 %s/: %d objects, HEAD per object for sizes", typeName, len(names)))
 	entries := make([]model.FileEntry, 0, len(names))
 	for _, name := range names {
-		if validResticName(name) {
-			entries = append(entries, objectEntry(typeName, name, b.statSize(resp.Request.Context(), typeName+"/"+name)))
+		if !validResticName(name) {
+			continue
+		}
+		size, ok, err := b.objectSize(resp.Request.Context(), typeName+"/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("restic: list %s (v1): %w", typeName, err)
+		}
+		if ok { // one deleted since the listing is not there
+			entries = append(entries, objectEntry(typeName, name, size))
 		}
 	}
 	return entries, nil
@@ -383,16 +411,21 @@ func (b *ResticBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 	return objectEntry(typ, name, max(resp.ContentLength, 0)), nil
 }
 
-func (b *ResticBackend) statSize(ctx context.Context, relPath string) int64 {
-	resp, err := b.do(ctx, "HEAD", b.objectURL(relPath), nil, nil)
+// objectSize is the size of object obj, from a HEAD, and false when it is
+// not there. A failed HEAD made the size 0 (W-H6).
+func (b *ResticBackend) objectSize(ctx context.Context, obj string) (int64, bool, error) {
+	resp, err := b.do(ctx, "HEAD", b.objectURL(obj), nil, nil)
 	if err != nil {
-		return 0
+		return 0, false, err
 	}
 	drainClose(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		return 0
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return 0, false, nil
+	case resp.StatusCode/100 != 2:
+		return 0, false, fmt.Errorf("restic: HEAD %s: %s", obj, resp.Status)
 	}
-	return max(resp.ContentLength, 0)
+	return max(resp.ContentLength, 0), true, nil
 }
 
 // PreloadRecursive fills the list cache for the whole repo (scope "") or a
@@ -408,7 +441,12 @@ func (b *ResticBackend) runRecursiveList(ctx context.Context, scope string, emit
 	types := resticTypes
 	switch {
 	case scope == "":
-		emit("", b.rootEntries(ctx))
+		root, err := b.rootEntries(ctx)
+		if err != nil {
+			Log.Add("restic", DirErr, "preload: "+err.Error())
+			return err
+		}
+		emit("", root)
 	case isResticType(scope):
 		// A scoped preload (rescan of one type dir) lists just that type
 		// and skips the root emit.
@@ -487,10 +525,11 @@ func isHexSHA256(s string) bool {
 	return true
 }
 
-// SetTimes is a no-op: restic objects are immutable and content addressed, with
-// no settable modification time.
-func (b *ResticBackend) SetTimes(context.Context, string, time.Time, time.Time, time.Time) error {
-	return nil
+// SetTimes sets nothing: an object keeps no time, and the API has no call
+// for one. A nil said the times were set, and a touch then took the object
+// for one with the time it asked for (W-H6).
+func (b *ResticBackend) SetTimes(_ context.Context, relPath string, _, _, _ time.Time) error {
+	return fmt.Errorf("restic: %s: an object in a repository keeps no time: %w", strings.Trim(relPath, "/"), ErrUnsupported)
 }
 
 // CopyFrom uploads an object with a single POST. restic objects are immutable
@@ -528,9 +567,17 @@ func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	return nil
 }
 
-// Mkdir is a no-op: the five type dirs are the only directories and they are
-// implicit; objects POST straight into them.
-func (b *ResticBackend) Mkdir(context.Context, string, os.FileMode) error { return nil }
+// Mkdir makes nothing. The folders of a repository are its layout's: the
+// five types, which a listing always shows, and the shard folders of data,
+// which an object's POST fills. Any other cannot be made, and a nil said it
+// was (W-H6).
+func (b *ResticBackend) Mkdir(_ context.Context, relPath string, _ os.FileMode) error {
+	rel := strings.Trim(relPath, "/")
+	if rel == "" || isResticType(rel) || isResticShard(rel) {
+		return nil
+	}
+	return fmt.Errorf("restic: mkdir %s: a repository has only its own folders (data/<aa>, index, keys, locks, snapshots): %w", rel, ErrUnsupported)
+}
 
 // Rename is unsupported: the restic REST API has no MOVE verb, and renaming a
 // content-addressed object would break the name == hash(content) invariant.
@@ -588,13 +635,20 @@ func (b *ResticBackend) delete(ctx context.Context, obj, relPath string) error {
 		return err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
-		err := fmt.Errorf("restic: DELETE %s: %s", relPath, resp.Status)
-		Log.Add("restic", DirErr, err.Error())
-		return err
-	}
 	b.listCache.invalidateAncestors(relPath)
-	return nil
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		// Nothing was deleted: the object is not there by that name. A 404
+		// was a success, so a delete the server could not do said it was
+		// done (W-H6).
+		err = fmt.Errorf("restic: DELETE %s: %s: %w", relPath, resp.Status, fs.ErrNotExist)
+	case resp.StatusCode/100 != 2:
+		err = fmt.Errorf("restic: DELETE %s: %s", relPath, resp.Status)
+	}
+	if err != nil {
+		Log.Add("restic", DirErr, err.Error())
+	}
+	return err
 }
 
 func (b *ResticBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {

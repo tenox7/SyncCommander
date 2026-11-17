@@ -24,21 +24,45 @@ type fakeRestic struct {
 	lists   map[string]int // listings of each type
 	writes  int
 	deletes int
+	fail    map[string]int // "METHOD path" answered with this status
+	server  string         // the Server header
+	v1      bool           // lists names only, as a v1 server does
+	reqs    []string       // "METHOD path" of each request
 }
 
 func (f *fakeRestic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := strings.TrimPrefix(r.URL.Path, "/")
+	f.reqs = append(f.reqs, r.Method+" "+p)
+	if f.server != "" {
+		w.Header().Set("Server", f.server)
+	}
+	switch code := f.fail[r.Method+" "+p]; {
+	case code < 0: // the connection drops
+		if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			c.Close()
+		}
+		return
+	case code > 0:
+		http.Error(w, http.StatusText(code), code)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && strings.HasSuffix(p, "/"):
 		typ := strings.TrimSuffix(p, "/")
 		f.lists[typ]++
-		list := []map[string]any{}
+		list, names := []map[string]any{}, []string{}
 		for k, body := range f.objects {
 			if t, name, _ := strings.Cut(k, "/"); t == typ {
 				list = append(list, map[string]any{"name": name, "size": len(body)})
+				names = append(names, name)
 			}
+		}
+		if f.v1 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(names)
+			return
 		}
 		w.Header().Set("Content-Type", resticAPIV2)
 		json.NewEncoder(w).Encode(list)
@@ -57,6 +81,10 @@ func (f *fakeRestic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.objects[p] = string(body)
 		f.writes++
 	case r.Method == http.MethodDelete:
+		if _, ok := f.objects[p]; !ok {
+			http.NotFound(w, r)
+			return
+		}
 		delete(f.objects, p)
 		f.deletes++
 	default:
@@ -128,7 +156,7 @@ func TestResticOnePathPerObject(t *testing.T) {
 		}
 	}
 
-	b, f := openFakeRestic(t, map[string]string{"data/" + packA: "pack a"})
+	b, f := openFakeRestic(t, map[string]string{"config": "cfg", "data/" + packA: "pack a"})
 	ctx := context.Background()
 	folders := map[string]bool{"": true, "data": true, "keys": true, "data/9f": true}
 	for _, p := range second {
@@ -154,7 +182,7 @@ func TestResticOnePathPerObject(t *testing.T) {
 // A name the server lists that is not one path element would put the
 // object under another folder's path; it is not listed.
 func TestResticListsOnlyNames(t *testing.T) {
-	b, _ := openFakeRestic(t, map[string]string{"keys/" + keyA: "k", "keys/..": "x", "keys/.": "y"})
+	b, _ := openFakeRestic(t, map[string]string{"config": "cfg", "keys/" + keyA: "k", "keys/..": "x", "keys/.": "y"})
 	entries, err := b.List(context.Background(), "keys")
 	if err != nil {
 		t.Fatal(err)
