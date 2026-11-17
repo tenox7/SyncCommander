@@ -427,6 +427,54 @@ func TestScenarioMirrorCaseSensitiveDestination(t *testing.T) {
 	}
 }
 
+// formsFolded reports whether dir's file system takes the two Unicode forms
+// of a name (é as one letter, NFC, or as e and an accent, NFD) for one.
+func formsFolded(t *testing.T, dir string) bool {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, ".form-probe-e\u0301"), "")
+	_, err := os.Stat(filepath.Join(dir, ".form-probe-\u00e9"))
+	os.Remove(filepath.Join(dir, ".form-probe-e\u0301"))
+	return err == nil
+}
+
+// L4: a Mac disk takes the two Unicode forms of café.txt for one file and
+// keeps the name it already had. The copy of the source's NFC name went
+// into the NFD file on the destination; the tree showed the NFD name as on
+// the destination alone, and the mirror pass deleted it: the file just
+// copied. A name that is really only on the destination, in another
+// folder, is still deleted.
+func TestScenarioMirrorUnicodeFormsDestination(t *testing.T) {
+	root := t.TempDir()
+	if !formsFolded(t, root) {
+		t.Skip("this filesystem keeps Unicode forms apart")
+	}
+	nfc, nfd := "caf\u00e9.txt", "cafe\u0301.txt"
+	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
+	writeFile(t, filepath.Join(left, "album", nfc), "the new text")
+	writeFile(t, filepath.Join(right, "album", nfd), "the old text")
+	writeFile(t, filepath.Join(right, "gone.txt"), "only on the destination")
+	s := newScenario(t, left, right)
+
+	p := s.copy(t, "", true, true)
+	if p.Failed.Load() != 0 {
+		t.Errorf("failed=%d", p.Failed.Load())
+	}
+	album, err := os.ReadDir(filepath.Join(right, "album"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(album) != 1 {
+		t.Errorf("album/ holds %d entries after the mirror, want 1: café.txt", len(album))
+	}
+	b, err := os.ReadFile(filepath.Join(right, "album", nfc))
+	if err != nil || string(b) != "the new text" {
+		t.Errorf("album/café.txt after the mirror: %q, %v; want the new text", b, err)
+	}
+	if onDisk(filepath.Join(right, "gone.txt")) {
+		t.Error("gone.txt, only on the destination, was not deleted")
+	}
+}
+
 // The tree is a snapshot: a name that reached the source after the scan is
 // not destination-only any more, and the mirror pass keeps it.
 func TestScenarioMirrorKeepsNameThatIsNowOnTheSource(t *testing.T) {
