@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,26 @@ type FileEntry struct {
 	BirthTime UnixNano
 	IsDir     bool
 	Mode      os.FileMode
+}
+
+// IsFileName reports whether name can be the name of one entry in a
+// folder: one path part, so that joined onto the folder it names that entry
+// and nothing else. A server sends names in its listings as it likes, and
+// "../../.ssh/authorized_keys" joined onto a folder points outside it; on a
+// server that runs Windows, which takes a backslash for a slash too,
+// "..\..\x" does (L7). A backslash is kept otherwise: on Unix it is a
+// character of the name.
+func IsFileName(name string) bool {
+	if name == "" || name == "." || strings.ContainsAny(name, "/\x00") {
+		return false
+	}
+	// "..", and ".." between backslashes.
+	for part := range strings.SplitSeq(name, `\`) {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // IsSpecial reports an entry that is neither a folder nor a regular file: a

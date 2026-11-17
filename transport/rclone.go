@@ -310,8 +310,10 @@ func (b *RcloneBackend) object(ctx context.Context, relPath string) (fs.Object, 
 	return o, nil
 }
 
+// Every method cleans its path first (cleanRel): rclone joins a path onto
+// the remote's root as it is given, so a ".." would climb above it (L7).
 func (b *RcloneBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	return b.listCache.serve(ctx, relDir, b.liveList)
+	return b.listCache.serve(ctx, cleanRel(relDir), b.liveList)
 }
 
 func (b *RcloneBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -330,7 +332,7 @@ func (b *RcloneBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 // folder, so when no file is there the parent folder is listed, as rclone's
 // own stat does.
 func (b *RcloneBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
-	rel := strings.Trim(relPath, "/")
+	rel := cleanRel(relPath)
 	if rel == "" {
 		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
 	}
@@ -383,6 +385,7 @@ func (b *RcloneBackend) convert(ctx context.Context, dirEntries fs.DirEntries) [
 }
 
 func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	relPath = cleanRel(relPath)
 	ht, err := b.hashType(algo)
 	if err != nil {
 		return "", err
@@ -402,6 +405,7 @@ func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (str
 }
 
 func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
+	relPath = cleanRel(relPath)
 	if put, ok := b.putMtime.LoadAndDelete(relPath); ok && put.(time.Time).Equal(mtime) {
 		return nil
 	}
@@ -435,6 +439,7 @@ func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, ati
 }
 
 func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
+	relPath = cleanRel(relPath)
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		return err
 	}
@@ -498,6 +503,7 @@ func spoolToTemp(src io.Reader) (io.Reader, int64, func(), error) {
 }
 
 func (b *RcloneBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
+	relPath = cleanRel(relPath)
 	if err := b.ensureDir(ctx, relPath); err != nil {
 		return err
 	}
@@ -527,6 +533,7 @@ func (b *RcloneBackend) ensureDir(ctx context.Context, relPath string) error {
 }
 
 func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	oldRelPath, newRelPath = cleanRel(oldRelPath), cleanRel(newRelPath)
 	if taken, err := nameTaken(ctx, b.liveList, newRelPath); err != nil {
 		return err
 	} else if taken {
@@ -557,6 +564,7 @@ func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 }
 
 func (b *RcloneBackend) Remove(ctx context.Context, relPath string) error {
+	relPath = cleanRel(relPath)
 	defer func() {
 		b.objs.drop(relPath)
 		b.listCache.invalidateAncestors(relPath)
@@ -572,7 +580,8 @@ func (b *RcloneBackend) Remove(ctx context.Context, relPath string) error {
 }
 
 func (b *RcloneBackend) RemoveAll(ctx context.Context, relPath string) error {
-	if strings.Trim(relPath, "/") == "" {
+	relPath = cleanRel(relPath)
+	if relPath == "" {
 		return errors.New("rclone: refuse to purge the remote root")
 	}
 	b.dirs.Clear()
@@ -591,6 +600,7 @@ func (b *RcloneBackend) RemoveAll(ctx context.Context, relPath string) error {
 }
 
 func (b *RcloneBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
+	relPath = cleanRel(relPath)
 	o, err := b.object(ctx, relPath)
 	if err != nil {
 		return nil, err
@@ -603,6 +613,7 @@ func (b *RcloneBackend) Open(ctx context.Context, relPath string) (io.ReadCloser
 }
 
 func (b *RcloneBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+	relPath = cleanRel(relPath)
 	o, err := b.object(ctx, relPath)
 	if err != nil {
 		return nil, err
@@ -639,6 +650,7 @@ func (b *RcloneBackend) canListRecursive() bool {
 // arrive instead of buffering the whole tree. Remotes with neither are a
 // no-op and fall through to per-directory List.
 func (b *RcloneBackend) PreloadRecursive(ctx context.Context, scope string) error {
+	scope = cleanRel(scope)
 	if !b.canListRecursive() {
 		return nil
 	}

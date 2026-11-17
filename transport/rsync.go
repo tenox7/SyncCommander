@@ -95,8 +95,10 @@ func (b *RsyncBackend) modulePath(relPath string, dir bool) (string, error) {
 	return full, nil
 }
 
-// baseRel is relPath below the module: the base joined with relPath.
+// baseRel is relPath below the module: the base joined with relPath
+// (cleanRel).
 func (b *RsyncBackend) baseRel(relPath string) string {
+	relPath = cleanRel(relPath)
 	switch {
 	case b.base == "":
 		return relPath
@@ -511,7 +513,7 @@ func (b *RsyncBackend) transferArgs(extra ...string) []string {
 // the same trick Mkdir uses. Callers populate leaf, then send stageTop to the
 // module root with -r.
 func stageUploadPath(tmpDir, relPath string) (stageTop, leaf string, err error) {
-	clean := strings.Trim(path.Clean(relPath), "/")
+	clean := cleanRel(relPath)
 	leaf = filepath.Join(tmpDir, filepath.FromSlash(clean))
 	if err := os.MkdirAll(filepath.Dir(leaf), 0755); err != nil {
 		return "", "", err
@@ -659,8 +661,8 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 }
 
 func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMode) error {
-	clean := strings.Trim(path.Clean(relPath), "/")
-	if clean == "" || clean == "." {
+	clean := cleanRel(relPath)
+	if clean == "" {
 		return nil
 	}
 	tmpDir, err := os.MkdirTemp("", "rsync-mkdir-*")
@@ -722,7 +724,7 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	if isBaseRel(relPath) {
 		return errors.New("rsync: refusing to remove module root")
 	}
-	clean := strings.Trim(path.Clean(relPath), "/")
+	clean := cleanRel(relPath)
 	if strings.ContainsAny(clean, "\r\n") {
 		return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", clean)
 	}

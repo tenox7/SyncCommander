@@ -150,10 +150,10 @@ func (h *httpBase) Close() error {
 	return nil
 }
 
-// pathFor is the absolute server path of relPath under base.
+// pathFor is the absolute server path of relPath under base (cleanRel).
 func (h *httpBase) pathFor(relPath string) string {
 	p := "/" + h.base
-	if rel := strings.Trim(relPath, "/"); rel != "" {
+	if rel := cleanRel(relPath); rel != "" {
 		p = strings.TrimSuffix(p, "/") + "/" + rel
 	}
 	return p

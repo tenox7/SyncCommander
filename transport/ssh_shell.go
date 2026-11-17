@@ -39,7 +39,7 @@ type sshShell struct {
 
 func (s *sshShell) BasePath() string { return s.display }
 
-func (s *sshShell) abs(relPath string) string { return path.Join(s.base, relPath) }
+func (s *sshShell) abs(relPath string) string { return path.Join(s.base, cleanRel(relPath)) }
 
 // exec runs cmd on client with the given stdin and stdout. A failure carries
 // the command's stderr, which is what "exited with status 1" hides.
@@ -741,12 +741,6 @@ func (s *sshShell) RemoveAll(ctx context.Context, relPath string) error {
 	_, err := s.run(ctx, "rm -rf "+shellQuote(s.abs(relPath)))
 	s.listCache.forgetRemoved(relPath)
 	return err
-}
-
-// isBaseRel reports whether relPath names the backend base itself.
-func isBaseRel(relPath string) bool {
-	c := strings.Trim(path.Clean(relPath), "/")
-	return c == "" || c == "."
 }
 
 func (s *sshShell) tailCmd(relPath string, offset int64) string {

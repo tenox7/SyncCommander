@@ -28,6 +28,7 @@ type fakeFTPD struct {
 	// on it. With noRenameOver, RNTO refuses a name in use, as some
 	// servers do.
 	store        map[string][]byte
+	rmd          []string // the folders RMD removed; the listings stay
 	noRenameOver bool
 	dashAIsName  bool
 	// hashes makes FEAT name XSHA256, which sums a file of store. A sum
@@ -442,6 +443,11 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("250 Delete operation successful.")
+		case "RMD":
+			f.mu.Lock()
+			f.rmd = append(f.rmd, path.Clean(arg))
+			f.mu.Unlock()
+			reply("250 Remove directory operation successful.")
 		case "QUIT":
 			f.mu.Lock()
 			f.quits = append(f.quits, n)

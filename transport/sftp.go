@@ -582,6 +582,15 @@ func removeAll(c *sftp.Client, fullPath string) error {
 	if err != nil {
 		return err
 	}
+	// Each listed name is joined onto fullPath, so each must name a
+	// child. The library drops "." and "..", but of a name with a slash it
+	// keeps the last part, which may be "..": then nothing in fullPath is
+	// removed (L7).
+	for _, e := range entries {
+		if !model.IsFileName(e.Name()) {
+			return fmt.Errorf("sftp: %s lists %q, which is no file name: nothing in it is removed", fullPath, e.Name())
+		}
+	}
 	for _, e := range entries {
 		child := path.Join(fullPath, e.Name())
 		if e.IsDir() {

@@ -432,6 +432,9 @@ func (b *FTPBackend) unlockPrimary() { <-b.prim }
 
 func (b *FTPBackend) BasePath() string { return b.display }
 
+// abs is relPath's path on the server, under the base (cleanRel).
+func (b *FTPBackend) abs(relPath string) string { return path.Join(b.base, cleanRel(relPath)) }
+
 // SetParallel keeps n-1 extra connections; the n-th transfer shares the
 // primary under prim.
 func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
@@ -573,7 +576,7 @@ func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir stri
 	if ctx.Err() != nil {
 		return "", nil, ctx.Err()
 	}
-	dir = path.Join(b.base, relDir)
+	dir = b.abs(relDir)
 	entries, err = b.listLocked(dir)
 	if err == nil && len(entries) == 0 {
 		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
@@ -640,7 +643,7 @@ func (b *FTPBackend) statLocked(ctx context.Context, relPath string) (model.File
 	if ctx.Err() != nil {
 		return model.FileEntry{}, ctx.Err()
 	}
-	p := path.Join(b.base, relPath)
+	p := b.abs(relPath)
 	if !b.conn.IsTimePreciseInList() { // the library offers MLST with MLSD
 		return b.statByListingLocked(ctx, relPath, p)
 	}
@@ -900,7 +903,7 @@ func (c *captureConn) Read(p []byte) (int, error) {
 // found dead is dialed again and asked once more: an idle one the server
 // ended while a long listing ran fails no file.
 func (b *FTPBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
-	full := path.Join(b.base, relPath)
+	full := b.abs(relPath)
 	for try := 0; ; try++ {
 		h, err := b.hash.get(ctx)
 		if err != nil {
@@ -942,7 +945,7 @@ func (b *FTPBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
 }
 
 func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
-	err := b.withPrimary(ctx, func() error { return b.conn.SetTime(path.Join(b.base, relPath), mtime) })
+	err := b.withPrimary(ctx, func() error { return b.conn.SetTime(b.abs(relPath), mtime) })
 	if err != nil {
 		Log.Add("ftp", DirErr, "MFMT "+relPath+": "+err.Error())
 	}
@@ -953,7 +956,7 @@ func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ t
 // an extra connection when one is free and on the locked primary otherwise.
 // No retry: src is consumed.
 func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, offset int64) error {
-	fullPath := path.Join(b.base, relPath)
+	fullPath := b.abs(relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
 		defer release()
 		return b.storeOn(ctx, ex.conn, ex.socks, fullPath, src, offset)
@@ -1013,7 +1016,7 @@ func (b *FTPBackend) size(ctx context.Context, relPath string) (int64, error) {
 	var n int64
 	err := b.withPrimary(ctx, func() error {
 		var err error
-		n, err = b.conn.FileSize(path.Join(b.base, relPath))
+		n, err = b.conn.FileSize(b.abs(relPath))
 		return err
 	})
 	return n, err
@@ -1035,7 +1038,7 @@ func (b *FTPBackend) PartSize(ctx context.Context, relPath string) (int64, error
 // deleted first, and only while the part is still there to take its place.
 // A folder is never deleted (DELE refuses one). FTP has no mode and no sync.
 func (b *FTPBackend) CommitPart(ctx context.Context, relPath string, _ os.FileMode) error {
-	part, final := path.Join(b.base, model.PartPath(relPath)), path.Join(b.base, relPath)
+	part, final := b.abs(model.PartPath(relPath)), b.abs(relPath)
 	Log.Add("ftp", DirOut, "COMMIT "+relPath)
 	err := b.withPrimary(ctx, func() error {
 		err := b.conn.Rename(part, final)
@@ -1057,7 +1060,7 @@ func (b *FTPBackend) CommitPart(ctx context.Context, relPath string, _ os.FileMo
 }
 
 func (b *FTPBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
-	fullPath := path.Join(b.base, relPath)
+	fullPath := b.abs(relPath)
 	Log.Add("ftp", DirOut, "MKDIR "+fullPath)
 	return b.withPrimary(ctx, func() error { return b.ensureDir(b.conn, fullPath) })
 }
@@ -1094,7 +1097,7 @@ func (b *FTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) 
 	}
 	b.dirs.Clear()
 	err := b.withPrimary(ctx, func() error {
-		return b.conn.Rename(path.Join(b.base, oldRelPath), path.Join(b.base, newRelPath))
+		return b.conn.Rename(b.abs(oldRelPath), b.abs(newRelPath))
 	})
 	if err != nil {
 		Log.Add("ftp", DirErr, "RENAME "+oldRelPath+": "+err.Error())
@@ -1103,7 +1106,7 @@ func (b *FTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) 
 }
 
 func (b *FTPBackend) Remove(ctx context.Context, relPath string) error {
-	err := b.withPrimary(ctx, func() error { return b.conn.Delete(path.Join(b.base, relPath)) })
+	err := b.withPrimary(ctx, func() error { return b.conn.Delete(b.abs(relPath)) })
 	if err != nil {
 		Log.Add("ftp", DirErr, "DELETE "+relPath+": "+err.Error())
 	}
@@ -1115,7 +1118,7 @@ func (b *FTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 		return errors.New("ftp: refusing to remove the base directory")
 	}
 	b.dirs.Clear()
-	err := b.withPrimary(ctx, func() error { return b.removeAllLocked(path.Join(b.base, relPath)) })
+	err := b.withPrimary(ctx, func() error { return b.removeAllLocked(b.abs(relPath)) })
 	if err != nil {
 		Log.Add("ftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}
@@ -1126,6 +1129,14 @@ func (b *FTPBackend) removeAllLocked(fullPath string) error {
 	entries, err := b.listLocked(fullPath)
 	if err != nil {
 		return b.conn.Delete(fullPath)
+	}
+	// Each listed name is joined onto fullPath, so each must name a
+	// child: with a slash or a ".." in it, it points elsewhere, and then
+	// nothing in fullPath is removed (L7).
+	for _, e := range entries {
+		if e.Name != "." && e.Name != ".." && !model.IsFileName(e.Name) {
+			return fmt.Errorf("ftp: %s lists %q, which is no file name: nothing in it is removed", fullPath, e.Name)
+		}
 	}
 	for _, e := range entries {
 		if e.Name == "." || e.Name == ".." {
@@ -1156,7 +1167,7 @@ func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (
 // it holds the primary's lock until the reader is closed.
 func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	Log.Add("ftp", DirOut, fmt.Sprintf("RETR %s @%d", relPath, offset))
-	fullPath := path.Join(b.base, relPath)
+	fullPath := b.abs(relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
 		stop := CancelCloser(ctx, ex.socks)
 		resp, err := retrFrom(ex.conn, fullPath, offset)

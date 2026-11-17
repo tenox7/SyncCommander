@@ -45,13 +45,13 @@ func (b *LocalBackend) nameRule() model.NameRule {
 }
 
 // LocalPath maps a slash-separated relPath onto the host filesystem. The path
-// is cleaned as if absolute first, so ".." segments can never climb above
-// base.
+// is cleaned by cleanRel first, so ".." segments can never climb above base,
+// and isBaseRel knows the paths that land on base itself.
 func (b *LocalBackend) LocalPath(relPath string) string {
 	if filepath.Separator != '/' {
 		relPath = strings.ReplaceAll(relPath, string(filepath.Separator), "/")
 	}
-	return filepath.Join(b.base, filepath.FromSlash(path.Clean("/"+relPath)))
+	return filepath.Join(b.base, filepath.FromSlash(cleanRel(relPath)))
 }
 
 func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {

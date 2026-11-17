@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1229,7 +1230,7 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 		c, cancel := s.listCtx(ctx, b)
 		defer cancel()
 		e, err := b.List(c, relDir)
-		return e, wrapListErr(side, relDir, err)
+		return listedEntries(side, relDir, e), wrapListErr(side, relDir, err)
 	}
 	if !listLeft {
 		e, err := one(right, "right")
@@ -1271,6 +1272,54 @@ func (s *Scanner) listDir(ctx context.Context, relDir string, listLeft, listRigh
 		}
 	}
 	return le, re, firstErr
+}
+
+// listedEntries is a listing of relDir less the entries that do not name a
+// child of relDir: a name that is not a file name (IsFileName), or a path
+// other than relDir joined with the name. A server lists the names it
+// likes, and a tree path is where copies and deletes act, on both sides:
+// "../../.ssh/authorized_keys" from a source would be written outside the
+// destination's base (L7). What is left out is logged as a scan error.
+func listedEntries(side, relDir string, entries []FileEntry) []FileEntry {
+	bad, first := 0, ""
+	for i := range entries {
+		e := &entries[i]
+		if namesChild(relDir, e) {
+			continue
+		}
+		if bad == 0 {
+			first = e.Name
+			if IsFileName(e.Name) {
+				first = e.RelPath
+			}
+		}
+		bad++
+	}
+	if bad == 0 {
+		return entries
+	}
+	// A new slice: a backend may serve the listing from its cache.
+	kept := make([]FileEntry, 0, len(entries)-bad)
+	for _, e := range entries {
+		if namesChild(relDir, &e) {
+			kept = append(kept, e)
+		}
+	}
+	shown, what := relDir, "entries that do not"
+	if shown == "" {
+		shown = "/"
+	}
+	if bad == 1 {
+		what = "entry that does not"
+	}
+	logScanErr(fmt.Errorf("list %s %s: left out %d listed %s name a file in the folder, the first %q",
+		side, shown, bad, what, first))
+	return kept
+}
+
+// namesChild reports whether e, listed in relDir, names a child of relDir.
+func namesChild(relDir string, e *FileEntry) bool {
+	return IsFileName(e.Name) && e.RelPath == path.Join(relDir, e.Name)
 }
 
 func wrapListErr(side, relDir string, err error) error {
