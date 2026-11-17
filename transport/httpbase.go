@@ -126,7 +126,7 @@ func newHTTPBase(proto string, secure bool, host, port, base, user, pass string,
 		displayHost = hostport
 	}
 	return &httpBase{
-		client:      &http.Client{Transport: tr},
+		client:      &http.Client{Transport: tr, CheckRedirect: noRedirect},
 		baseURL:     baseURL,
 		base:        strings.Trim(base, "/"),
 		displayHost: displayHost,
@@ -183,10 +183,71 @@ func (h *httpBase) newReq(ctx context.Context, method, rawurl string, body io.Re
 	return req, nil
 }
 
+// noRedirect keeps the client from following a redirect. Go sends a
+// request that got a 301, 302 or 303 again as a GET, whatever its method,
+// and sc took the GET's answer for the MOVE's, PUT's or DELETE's (W-H3).
+// doReq decides what a redirect means.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// folderMethods may name a folder, whose path ends with a slash.
+var folderMethods = map[string]bool{"PROPFIND": true, "PROPPATCH": true, "DELETE": true, "MOVE": true, "COPY": true, "MKCOL": true}
+
+// folderSlash reports a redirect to the request's own path with a slash at
+// its end: Apache's answer (mod_dir) to any method on a folder's path
+// without one. It returns the request's URL with that slash, on the host
+// the request went to.
+func folderSlash(req *http.Request, resp *http.Response) (*url.URL, bool) {
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return nil, false
+	}
+	loc, err := resp.Location()
+	if err != nil || strings.HasSuffix(req.URL.Path, "/") || loc.Path != req.URL.Path+"/" {
+		return nil, false
+	}
+	to := *req.URL
+	to.Path += "/"
+	if to.RawPath != "" {
+		to.RawPath += "/"
+	}
+	return &to, true
+}
+
+// doReq sends req. A redirect is no answer (noRedirect): one that names the
+// path a folder sends a method that may name one again there, once, and
+// any other fails the call.
 func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
 	Log.Add(h.proto, DirOut, req.Method+" "+req.URL.Redacted())
 	resp, err := h.client.Do(req)
 	if err != nil {
+		Log.Add(h.proto, DirErr, err.Error())
+		return nil, err
+	}
+	to, folder := folderSlash(req, resp)
+	if folder && folderMethods[req.Method] && (req.Body == nil || req.GetBody != nil) {
+		drainClose(resp.Body)
+		again := req.Clone(req.Context())
+		again.URL = to
+		if req.GetBody != nil {
+			if again.Body, err = req.GetBody(); err != nil {
+				return nil, err
+			}
+		}
+		req = again
+		Log.Add(h.proto, DirOut, req.Method+" "+req.URL.Redacted()+" (a folder, says the server)")
+		if resp, err = h.client.Do(req); err != nil {
+			Log.Add(h.proto, DirErr, err.Error())
+			return nil, err
+		}
+		folder = false
+	}
+	if resp.StatusCode/100 == 3 {
+		drainClose(resp.Body)
+		err := fmt.Errorf("%s %s: %s to %s: sc follows no redirect", req.Method, req.URL.Redacted(), resp.Status, resp.Header.Get("Location"))
+		if folder {
+			err = fmt.Errorf("%s %s: the server says it is a folder (%s)", req.Method, req.URL.Redacted(), resp.Status)
+		}
 		Log.Add(h.proto, DirErr, err.Error())
 		return nil, err
 	}

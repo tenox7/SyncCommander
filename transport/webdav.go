@@ -421,8 +421,8 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 
 // Stat asks for relPath alone, a PROPFIND of depth 0, never from the listing
 // cache. The path goes without a slash at its end, as a file's: servers
-// answer that for a folder too, where a redirect to the slash would turn
-// the PROPFIND into a GET. Sums in the answer are kept, as a listing keeps
+// answer that for a folder too, and one that redirects to the slash is
+// asked again there (doReq). Sums in the answer are kept, as a listing keeps
 // them.
 func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
 	rel := strings.Trim(relPath, "/")
@@ -708,7 +708,7 @@ type mkcol struct {
 // ensureDir MKCOLs dir and any missing parents, remembering what exists.
 // Uploads racing into one new directory share a single MKCOL, because the Go
 // webdav server behind rclone answers concurrent MKCOLs of one path with 423
-// Locked. 405 and 301 mean the collection is already there; 409 is tolerated
+// Locked. 405 means the collection is already there; 409 is tolerated
 // because some servers answer it for existing collections too.
 func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 	dir = strings.Trim(dir, "/")
@@ -744,7 +744,7 @@ func (b *WebDAVBackend) mkcolOnce(ctx context.Context, dir string) error {
 	}
 	drainClose(resp.Body)
 	switch code := resp.StatusCode; {
-	case code/100 == 2, code == http.StatusMethodNotAllowed, code == http.StatusConflict, code == http.StatusMovedPermanently:
+	case code/100 == 2, code == http.StatusMethodNotAllowed, code == http.StatusConflict:
 		b.dirs.Store(dir, struct{}{})
 		return nil
 	default:
