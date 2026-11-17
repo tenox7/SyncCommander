@@ -78,6 +78,7 @@ type CopyPopupData struct {
 	Listing            bool
 	DoneFiles          int64
 	FailedFiles        int64
+	TimesNotSet        int64
 	TotalFiles         int64
 	InFlight           int64
 	Parallel           int64
@@ -142,6 +143,9 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	}
 	if d.FailedFiles > 0 {
 		header += fmt.Sprintf("  %d FAILED", d.FailedFiles)
+	}
+	if d.TimesNotSet > 0 {
+		header += fmt.Sprintf("  %d NO TIMES", d.TimesNotSet)
 	}
 	switch {
 	case d.Batched:

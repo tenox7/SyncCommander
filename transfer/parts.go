@@ -39,6 +39,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 	attempt := 0
 	// ctx from here on says this Retry owns the tries: a backend call under
 	// it runs once, and a failed one fails this try (D4).
+	timesSet := true // by the try that went through
 	err = transport.Retry(ctx, "copy", "copy "+f.relPath, func(ctx context.Context) error {
 		attempt++
 		bytes0, base0 := slotBytes.Load(), slotBase.Load()
@@ -58,7 +59,9 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 		if err == nil {
 			// The times go on the part, so the file has them from the moment
 			// it has its name.
-			if terr := c.dst.SetTimes(ctx, part, src.ModTime, src.ATime.Time(), src.BirthTime.Time()); terr != nil {
+			terr := c.dst.SetTimes(ctx, part, src.ModTime, src.ATime.Time(), src.BirthTime.Time())
+			timesSet = terr == nil || errors.Is(terr, transport.ErrUnsupported)
+			if !timesSet {
 				transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+terr.Error())
 			}
 			err = pw.CommitPart(ctx, f.relPath, src.Mode)
@@ -72,6 +75,9 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 		resumed = offset > 0
 		return nil
 	})
+	if err == nil && !timesSet {
+		c.p.TimesNotSet.Add(1)
+	}
 	return resumed, err
 }
 

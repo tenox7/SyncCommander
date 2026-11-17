@@ -145,8 +145,13 @@ func TestScenarioMirrorToResticDeletesOnlyWhenAllowed(t *testing.T) {
 			dst := openRestic(t, startResticServer(t, served))
 			s := scanned(t, folder, served, transport.NewLocalBackend(folder), dst)
 			mark := len(transport.Log.Lines())
-			if p := s.copy(t, "data", true, true); p.Failed.Load() != 0 {
-				t.Errorf("%d files failed", p.Failed.Load())
+			// A refused delete did not happen: a failure (F17).
+			want := int64(1)
+			if allowed {
+				want = 0
+			}
+			if p := s.copy(t, "data", true, true); p.Failed.Load() != want {
+				t.Errorf("%d failed, want %d", p.Failed.Load(), want)
 			}
 			kept := onDisk(filepath.Join(served, extra))
 			switch {

@@ -102,6 +102,7 @@ func (m *Model) copyPopup() string {
 		Listing:            p.Listing.Load(),
 		DoneFiles:          p.Done.Load(),
 		FailedFiles:        p.Failed.Load(),
+		TimesNotSet:        p.TimesNotSet.Load(),
 		TotalFiles:         p.Total.Load(),
 		InFlight:           p.InFlight.Load(),
 		Parallel:           p.Parallel.Load(),

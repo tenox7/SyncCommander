@@ -121,3 +121,27 @@ func TestViewShowsOnlyTheOpenModal(t *testing.T) {
 		t.Fatal("main view lacks the panel title")
 	}
 }
+
+// F17: the copy popup says how many files went without their times, and
+// still has room for the files in flight on an 80-column screen.
+func TestCopyPopupSaysFilesWithoutTimes(t *testing.T) {
+	out := RenderCopyPopup(CopyPopupData{DoneFiles: 3, TotalFiles: 9, FailedFiles: 1, TimesNotSet: 2, InFlight: 1, Parallel: 4, TotalElapsed: time.Second}, popupWidth(80))
+	if !strings.Contains(out, "1 FAILED  2 NO TIMES  [1/4 in flight]") {
+		t.Errorf("the popup does not count both, or cuts the header:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Errorf("a line is %d wide on an 80-column screen: %q", w, line)
+		}
+	}
+}
+
+// The popup the model draws takes the count from the running copy.
+func TestCopyPopupTakesFilesWithoutTimesFromTheCopy(t *testing.T) {
+	m, _, _ := recordedModel(t)
+	m.copyProgress.Reset(2, true)
+	m.copyProgress.TimesNotSet.Store(3)
+	if out := m.copyPopup(); !strings.Contains(out, "3 NO TIMES") {
+		t.Errorf("the popup does not show the copy's count:\n%s", out)
+	}
+}

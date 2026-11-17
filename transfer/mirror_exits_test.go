@@ -141,16 +141,17 @@ func TestScenarioMirrorSkipsAFolderItCannotListAgain(t *testing.T) {
 		writeFile(t, filepath.Join(side, "b", "keep.txt"), "same")
 	}
 	writeFile(t, filepath.Join(right, "a", "x.txt"), "only on the destination")
+	writeFile(t, filepath.Join(right, "a", "x2.txt"), "only on the destination")
 	writeFile(t, filepath.Join(right, "b", "y.txt"), "only on the destination")
 	s := newScenario(t, left, right)
 	mark := len(transport.Log.Lines())
-	if p := s.mirrorTopRow(t, context.Background(), noFreshList{Backend: s.rb, dir: "a"}); p.Failed.Load() != 0 {
-		t.Errorf("failed=%d, want 0", p.Failed.Load())
+	if p := s.mirrorTopRow(t, context.Background(), noFreshList{Backend: s.rb, dir: "a"}); p.Failed.Load() != 2 {
+		t.Errorf("failed=%d, want 2: the two deletes in a did not run (F17)", p.Failed.Load())
 	}
 	if !logged(mark, "mirror delete in a skipped: listing the destination: the server went away") {
 		t.Error("the log does not say the mirror skipped a")
 	}
-	wantTree(t, "after the mirror", right, "a/", "a/keep.txt", "a/x.txt", "b/", "b/keep.txt")
+	wantTree(t, "after the mirror", right, "a/", "a/keep.txt", "a/x.txt", "a/x2.txt", "b/", "b/keep.txt")
 }
 
 // A folder only on the destination is one delete; the dialog counts it

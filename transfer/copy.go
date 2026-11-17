@@ -168,16 +168,21 @@ func Copy(ctx context.Context, req Request) Result {
 	}
 
 	res := Result{Changed: &model.ChangedPaths{}}
+	failed := p.Failed.Load() // the copies'; the mirror's deletes count after
 	if isDir {
 		c.mirrorDelete()
 		res.RescanRoot = req.Node
 	} else {
 		res.RescanRoot = req.Scanner.FindNearestDestNode(model.DirOf(req.RelPath), req.LeftToRight)
 	}
-	if failed := p.Failed.Load(); c.stopped.Load() {
+	if c.stopped.Load() {
 		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY stopped: %d of %d tried, %d of them failed", p.Done.Load(), p.Total.Load(), failed))
 	} else if failed > 0 {
 		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
+	}
+	if n := p.TimesNotSet.Load(); n > 0 {
+		// WARN: the copies went through; each file's own ERR line says why.
+		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY: %d file(s) copied without their times: they show as different, and the next copy sends them again", n))
 	}
 	// Batch rewrites every file in the subtree, not just the diff set, so the
 	// whole subtree's cached checksums go rather than the diff paths alone.
@@ -623,6 +628,7 @@ func (c *copier) copyOne(f item) {
 	finish := func(how string) {
 		// A destination that keeps no times (restic) says so for every file.
 		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil && !errors.Is(err, transport.ErrUnsupported) {
+			p.TimesNotSet.Add(1)
 			transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
 		}
 		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
@@ -729,12 +735,22 @@ func (c *copier) mirrorDelete() {
 		byDir[dir] = append(byDir[dir], d)
 	}
 	kept := 0 // still only on the destination: the next copy asks
+	// A delete that failed, or that an error kept from running, counts as a
+	// failure where the user sees it: the popup, the status bar (F17).
+	delFailed := 0
+	defer func() {
+		if delFailed > 0 {
+			c.p.Failed.Add(int64(delFailed))
+			transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("mirror delete finished with %d failure(s) of %d", delFailed, len(c.req.Plan.Deletes)))
+		}
+	}()
 	for _, dir := range dirs {
 		if c.ctx.Err() != nil {
 			return
 		}
 		keep, err := c.stillDestOnly(dir)
 		if err != nil {
+			delFailed += len(byDir[dir])
 			transport.Log.Add("copy", transport.DirErr, "mirror delete in "+displayPath(dir)+" skipped: "+err.Error())
 			continue
 		}
@@ -751,6 +767,7 @@ func (c *copier) mirrorDelete() {
 			}
 			c.markChanged(d.RelPath)
 			if err := c.remove(entry{relPath: d.RelPath, isDir: d.IsDir}); err != nil {
+				delFailed++
 				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.RelPath+": "+err.Error())
 				continue
 			}
