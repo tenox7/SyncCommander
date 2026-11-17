@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"strings"
 	"sync"
@@ -142,7 +141,7 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 	b.mu.Unlock()
 	if closed {
 		inner.Close()
-		return nil, net.ErrClosed
+		return nil, errClosed
 	}
 	Log.Add(b.proto, DirIn, "connected to "+b.display)
 	return inner, nil
@@ -170,13 +169,17 @@ func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 }
 
 // connectGateLocked returns why no call may reach the server now, or nil: a
-// refused login; a pause after connects failed in a row; the backoff after
-// the last failure, which returns that failure for the call's Retry to try
-// again after its own wait. It holds for a connected HTTP backend too,
-// whose every call opens a connection. mu held.
+// closed backend; a refused login; a pause after connects failed in a row;
+// the backoff after the last failure, which returns that failure for the
+// call's Retry to try again after its own wait. It holds for a connected
+// HTTP backend too, whose every call opens a connection. mu held.
 func (b *lazyBackend) connectGateLocked() error {
 	now := time.Now()
 	switch {
+	case b.closed:
+		// A call that comes after Close dialed, closed what it got, and
+		// was tried again: six connects for nothing (F23).
+		return errClosed
 	case b.authErr != nil:
 		return b.authErr
 	case b.failed == 0:

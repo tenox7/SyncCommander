@@ -19,13 +19,17 @@ import (
 // Never tried again.
 var errNotConnecting = errors.New("not connecting again yet")
 
+// errClosed is what a call returns once its backend is closed: it makes no
+// connect, and no try after it would either (F23).
+var errClosed = errors.New("the location is closed")
+
 // GivesUp reports an error after which no other file of a copy can get
 // through: a refused login, a side that stopped connecting after its
-// connects failed in a row, a destination that is full or read-only. A copy
-// stops on it rather than fail every file the same way, each after its own
-// tries (F7).
+// connects failed in a row, a closed location, a destination that is full
+// or read-only. A copy stops on it rather than fail every file the same
+// way, each after its own tries (F7).
 func GivesUp(err error) bool {
-	return errors.Is(err, model.ErrAuth) || errors.Is(err, errNotConnecting) || cannotWrite(err)
+	return errors.Is(err, model.ErrAuth) || errors.Is(err, errNotConnecting) || errors.Is(err, errClosed) || cannotWrite(err)
 }
 
 // cannotWrite reports a destination that takes no more data: full, over its

@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"sc/model"
 )
 
 // CancelCloser starts a watcher that closes c when ctx is canceled. The
@@ -186,7 +184,7 @@ func isPermanentError(err error) bool {
 	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) {
 		return true
 	}
-	if errors.Is(err, model.ErrAuth) || errors.Is(err, errNotConnecting) || cannotWrite(err) {
+	if GivesUp(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
