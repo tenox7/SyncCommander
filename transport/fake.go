@@ -998,6 +998,9 @@ func (b *FakeBackend) mkdirAllLocked(relPath string, mode os.FileMode) error {
 // Rename moves oldRelPath, and what is in it, to newRelPath, whose folder
 // must be there. It refuses a name in use.
 func (b *FakeBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	if err := renameBase("fake", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	hit, err := b.enter(ctx, FakeRename, oldRelPath, newRelPath)
 	if err != nil {
 		return err

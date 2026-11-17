@@ -298,6 +298,17 @@ func (m *Model) presence(node *model.TreeNode) model.Presence {
 	return p
 }
 
+// isTopRow reports whether node is the top row, which stands for the base
+// of each side. d, e and t act on a file or folder below it, never on the
+// bases: a delete there was a recursive delete of both sides, which
+// restic:// sent as a DELETE of the repository, a rename renamed a base,
+// and a touch set a base folder's times (U11).
+func (m *Model) isTopRow(node *model.TreeNode) bool {
+	var top bool
+	m.readTree(func(*model.TreeNode) { top = node.IsRoot() })
+	return top
+}
+
 // nodeLabel is node's name as the dialogs show it, under the read lock.
 func (m *Model) nodeLabel(node *model.TreeNode) string {
 	var name string

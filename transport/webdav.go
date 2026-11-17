@@ -753,6 +753,9 @@ func (b *WebDAVBackend) mkcolOnce(ctx context.Context, dir string) error {
 }
 
 func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	if err := renameBase("webdav", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	if err := b.ensureDir(ctx, parentDir(newRelPath)); err != nil {
 		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
 	}

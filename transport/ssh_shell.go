@@ -723,6 +723,9 @@ func renameCmd(src, dst string) string {
 
 // Rename refuses a taken destination; see renameCmd.
 func (s *sshShell) Rename(ctx context.Context, oldRel, newRel string) error {
+	if err := renameBase(s.proto, oldRel, newRel); err != nil {
+		return err
+	}
 	_, err := s.run(ctx, renameCmd(s.abs(oldRel), s.abs(newRel)))
 	s.listCache.forgetRenamed(oldRel, newRel)
 	return err

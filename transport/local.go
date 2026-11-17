@@ -378,6 +378,9 @@ func specialFileErr(p string, m os.FileMode) error {
 // that is the same file, as in a case-only rename on a case-insensitive disk,
 // is not in the way.
 func (b *LocalBackend) Rename(_ context.Context, oldRelPath, newRelPath string) error {
+	if err := renameBase("local", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	oldPath, newPath := b.LocalPath(oldRelPath), b.LocalPath(newRelPath)
 	if ni, err := os.Lstat(newPath); err == nil {
 		if oi, err := os.Lstat(oldPath); err != nil || !os.SameFile(oi, ni) {

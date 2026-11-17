@@ -1090,6 +1090,9 @@ func (b *FTPBackend) ensureDir(conn *ftp.ServerConn, dir string) error {
 }
 
 func (b *FTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	if err := renameBase("ftp", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	if taken, err := nameTaken(ctx, b.List, newRelPath); err != nil {
 		return err
 	} else if taken {

@@ -24,7 +24,7 @@ type renameDoneMsg struct {
 const undoTimeout = 2 * time.Minute
 
 func (m *Model) openRename(node *model.TreeNode) {
-	if node == nil {
+	if node == nil || m.isTopRow(node) {
 		return
 	}
 	var oldName string
@@ -137,7 +137,7 @@ func renameBoth(ctx context.Context, left, right model.Backend, oldRel, newRel s
 // older side of a file present on both. A touch that x stopped is not a
 // failure: the log says the user canceled it.
 func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
-	if node == nil || m.presence(node) != model.PresenceBoth {
+	if node == nil || m.isTopRow(node) || m.presence(node) != model.PresenceBoth {
 		return nil
 	}
 	left, right, scanner, opts := m.left.backend, m.right.backend, m.scanner, *m.cmpOpts

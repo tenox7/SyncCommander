@@ -47,7 +47,7 @@ type pendingDeleteInfo struct {
 // openDelete asks before deleting the node; a both-side node also asks which
 // side.
 func (m *Model) openDelete(node *model.TreeNode) {
-	if node == nil {
+	if node == nil || m.isTopRow(node) {
 		return
 	}
 	m.readTree(func(*model.TreeNode) {

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"fmt"
 	"path"
 	"strings"
 )
@@ -16,3 +17,14 @@ func cleanRel(relPath string) string {
 
 // isBaseRel reports whether relPath names the backend base itself.
 func isBaseRel(relPath string) bool { return cleanRel(relPath) == "" }
+
+// renameBase refuses a rename from or onto the base itself, which no
+// caller means: the UI asks for none (U11). Asked for one, rclone moved
+// every object of a remote without folder moves into the new name and
+// joined the paths wrongly ("d/c.txt" became "xd/c.txt").
+func renameBase(proto, oldRelPath, newRelPath string) error {
+	if isBaseRel(oldRelPath) || isBaseRel(newRelPath) {
+		return fmt.Errorf("%s: refusing to rename the base directory", proto)
+	}
+	return nil
+}

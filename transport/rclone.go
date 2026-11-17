@@ -534,6 +534,9 @@ func (b *RcloneBackend) ensureDir(ctx context.Context, relPath string) error {
 
 func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
 	oldRelPath, newRelPath = cleanRel(oldRelPath), cleanRel(newRelPath)
+	if err := renameBase("rclone", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	if taken, err := nameTaken(ctx, b.liveList, newRelPath); err != nil {
 		return err
 	} else if taken {

@@ -525,6 +525,9 @@ func (b *SFTPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMod
 // hard links on OpenSSH. A case-only rename skips the check: on a
 // case-insensitive server the target is the file itself.
 func (b *SFTPBackend) Rename(ctx context.Context, oldRelPath, newRelPath string) error {
+	if err := renameBase("sftp", oldRelPath, newRelPath); err != nil {
+		return err
+	}
 	taken := false
 	err := b.onMain(ctx, func(c *sftp.Client) error {
 		if !strings.EqualFold(oldRelPath, newRelPath) {
