@@ -100,42 +100,12 @@ func transferErr(xferErrors, ioErrors int) error {
 	return nil
 }
 
-// md4Cache holds the MD4 sums an rsync file list delivers in bulk. It has no
-// TTL, so every write that changes a file's body must drop its entry.
-type md4Cache struct {
-	mu sync.Mutex
-	m  map[string]string
-}
-
-func (c *md4Cache) get(relPath string) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	sum, ok := c.m[relPath]
-	return sum, ok
-}
-
-func (c *md4Cache) invalidate(relPath string) {
-	c.mu.Lock()
-	delete(c.m, relPath)
-	c.mu.Unlock()
-}
-
-func (c *md4Cache) invalidateTree(prefix string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k := range c.m {
-		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			delete(c.m, k)
-		}
-	}
-}
-
-// lookup serves Checksum for md4: the cache first, then one fetch scoped to
-// the file.
-func (c *md4Cache) lookup(ctx context.Context, relPath string, fetch func(context.Context, string, bool) (map[string]string, error)) (string, error) {
-	if sum, ok := c.get(relPath); ok {
-		return sum, nil
-	}
+// md4Of serves Checksum for md4: one fetch scoped to the file. No sum is
+// kept from one ask to the next. A cache of the sums bulk fetches gave,
+// with no size or time to tell a file someone else changed since, served
+// the old sum as current, "equal" to the other side (R11); the scanner
+// keeps each sum with the size and time it is for.
+func md4Of(ctx context.Context, relPath string, fetch func(context.Context, string, bool) (map[string]string, error)) (string, error) {
 	got, err := fetch(ctx, relPath, false)
 	if err != nil {
 		return "", err
@@ -147,9 +117,9 @@ func (c *md4Cache) lookup(ctx context.Context, relPath string, fetch func(contex
 	return sum, nil
 }
 
-// fromFileList stores the non-zero checksums of a dry-run file list keyed by
-// path relative to the backend base and returns them.
-func (c *md4Cache) fromFileList(scope string, recursive bool, list []rsyncpkg.FileInfo) map[string]string {
+// md4Sums are the non-zero checksums of a dry-run file list, keyed by path
+// relative to the backend base.
+func md4Sums(scope string, recursive bool, list []rsyncpkg.FileInfo) map[string]string {
 	prefix := ""
 	if recursive {
 		prefix = scope
@@ -163,14 +133,6 @@ func (c *md4Cache) fromFileList(scope string, recursive bool, list []rsyncpkg.Fi
 			got[path.Join(prefix, fi.Name)] = hex.EncodeToString(fi.Checksum[:])
 		}
 	}
-	c.mu.Lock()
-	if c.m == nil {
-		c.m = make(map[string]string, len(got))
-	}
-	for k, v := range got {
-		c.m[k] = v
-	}
-	c.mu.Unlock()
 	return got
 }
 

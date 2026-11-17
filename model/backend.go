@@ -184,10 +184,12 @@ func WantsFreshListing(ctx context.Context) bool {
 // than per-file Checksum calls (e.g. rsync MD4 returns checksums via filelist).
 // scope is a relPath under the backend's base; "" means whole base.
 // recursive is true when scope refers to a directory subtree. algo is the
-// algorithm the Checksum calls that follow ask for; one the backend cannot
-// fetch in bulk is no error, and nothing is fetched.
+// algorithm asked for; one the backend cannot fetch in bulk is no error, and
+// nothing is fetched. The sums come back by relPath, for the caller to use
+// now: the backend keeps none, so a later Checksum reads the file as it is
+// then (R11).
 type ChecksumPrefetcher interface {
-	PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error
+	PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error)
 }
 
 // RangeOpener is a handle to a source file the destination can open from byte

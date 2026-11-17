@@ -19,7 +19,6 @@ import (
 
 type RsyncSSHBackend struct {
 	sshShell
-	md4  md4Cache
 	pool *connPool[*ssh.Client]
 }
 
@@ -198,7 +197,7 @@ func (s *sessionRW) Close() error                { return s.w.Close() }
 // shell's commands.
 func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
 	if algo == "md4" {
-		return b.md4.lookup(ctx, relPath, b.fetchMD4)
+		return md4Of(ctx, relPath, b.fetchMD4)
 	}
 	return b.sshShell.Checksum(ctx, relPath, algo)
 }
@@ -213,12 +212,11 @@ func (b *RsyncSSHBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
 
 // PrefetchChecksums fetches md4 for scope in one rsync run; the shell's
 // algorithms are asked file by file.
-func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
+func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {
 	if algo != "md4" {
-		return nil
+		return nil, nil
 	}
-	_, err := b.fetchMD4(ctx, scope, recursive)
-	return err
+	return b.fetchMD4(ctx, scope, recursive)
 }
 
 func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
@@ -239,34 +237,14 @@ func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive 
 	if err != nil {
 		return nil, err
 	}
-	got := b.md4.fromFileList(scope, recursive, result.FileList)
+	got := md4Sums(scope, recursive, result.FileList)
 	Log.Add(b.proto, DirIn, fmt.Sprintf("MD4 %d checksums", len(got)))
 	return got, nil
-}
-
-func (b *RsyncSSHBackend) Rename(ctx context.Context, oldRel, newRel string) error {
-	err := b.sshShell.Rename(ctx, oldRel, newRel)
-	b.md4.invalidateTree(oldRel)
-	b.md4.invalidate(newRel)
-	return err
-}
-
-func (b *RsyncSSHBackend) Remove(ctx context.Context, relPath string) error {
-	err := b.sshShell.Remove(ctx, relPath)
-	b.md4.invalidate(relPath)
-	return err
-}
-
-func (b *RsyncSSHBackend) RemoveAll(ctx context.Context, relPath string) error {
-	err := b.sshShell.RemoveAll(ctx, relPath)
-	b.md4.invalidateTree(relPath)
-	return err
 }
 
 func (b *RsyncSSHBackend) invalidateAfterTreeSend(relPath string) {
 	b.listCache.invalidateTree(relPath)
 	b.listCache.invalidateAncestors(relPath)
-	b.md4.invalidateTree(relPath)
 }
 
 func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
@@ -372,7 +350,6 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	}
 	_, err = b.runPooled(ctx, label, client, remoteDest+"/", []string{srcPath}, countingRW(ctx, adder))
 	b.listCache.invalidateAncestors(relPath)
-	b.md4.invalidate(relPath)
 	settlePush(ctx, adder, budget, err)
 	return err
 }

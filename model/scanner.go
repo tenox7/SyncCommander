@@ -1039,9 +1039,12 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			continue
 		}
 		setDir(g.dir, true, true)
+		// One bulk fetch sums the group's folder for this pass; a file it
+		// has no sum for is summed by itself.
+		var prefetched map[string]string
 		if prefetcher != nil && g.dir != nil {
 			if e := g.dir.Sides[side].Entry; e != nil && e.IsDir {
-				_ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, algo, true)
+				prefetched, _ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, algo, true)
 			}
 		}
 
@@ -1049,6 +1052,15 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		for _, f := range g.files {
 			if ctx.Err() != nil {
 				break
+			}
+			if sum, ok := prefetched[f.RelPath]; ok {
+				s.lockTree()
+				done := recordSideSum(f, side, f.Sides[side].Entry, sum, nil)
+				s.unlockTree()
+				if done && onPairDone != nil {
+					onPairDone()
+				}
+				continue
 			}
 			wg.Add(1)
 			sem <- struct{}{}
@@ -1089,9 +1101,15 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 			return false
 		}
 	}
-
 	s.lockTree()
 	defer s.unlockTree()
+	return recordSideSum(node, side, entry, sum, err)
+}
+
+// recordSideSum stores what summing entry, node's file on side, gave: the
+// sum, or the failure. It says whether this completed the pair, which is
+// counted once. Tree lock held.
+func recordSideSum(node *TreeNode, side Side, entry *FileEntry, sum string, err error) bool {
 	st := &node.Sides[side]
 	st.ChecksumDone = true
 	switch {

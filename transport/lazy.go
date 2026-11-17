@@ -444,12 +444,17 @@ func (b *lazyBackend) SetParallel(n int) {
 	}
 }
 
-func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
-	err := doAs(b, ctx, "prefetch "+scope, func(p model.ChecksumPrefetcher) error { return p.PrefetchChecksums(ctx, scope, algo, recursive) })
+func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {
+	var sums map[string]string
+	err := doAs(b, ctx, "prefetch "+scope, func(p model.ChecksumPrefetcher) error {
+		var e error
+		sums, e = p.PrefetchChecksums(ctx, scope, algo, recursive)
+		return e
+	})
 	if errors.Is(err, ErrUnsupported) {
-		return nil
+		return nil, nil
 	}
-	return err
+	return sums, err
 }
 
 func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {

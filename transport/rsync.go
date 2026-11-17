@@ -31,7 +31,6 @@ type RsyncBackend struct {
 	module    string
 	base      string
 	display   string
-	md4       md4Cache
 	listCache *listCache
 	sentMtime sync.Map // mtime each upload sent with -t, see SetTimes
 }
@@ -453,15 +452,14 @@ func (b *RsyncBackend) Checksum(ctx context.Context, relPath, algo string) (stri
 	if algo != "md4" {
 		return "", fmt.Errorf("rsync: no %q checksum, only md4", algo)
 	}
-	return b.md4.lookup(ctx, relPath, b.fetchMD4)
+	return md4Of(ctx, relPath, b.fetchMD4)
 }
 
-func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) error {
+func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {
 	if algo != "md4" {
-		return nil
+		return nil, nil
 	}
-	_, err := b.fetchMD4(ctx, scope, recursive)
-	return err
+	return b.fetchMD4(ctx, scope, recursive)
 }
 
 func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
@@ -473,7 +471,7 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 	if err != nil {
 		return nil, err
 	}
-	got := b.md4.fromFileList(scope, recursive, result.FileList)
+	got := md4Sums(scope, recursive, result.FileList)
 	Log.Add("rsync", DirIn, fmt.Sprintf("MD4 %d checksums", len(got)))
 	return got, nil
 }
@@ -571,7 +569,6 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 		b.noteSent(relPath, srcPath)
 	}
 	b.listCache.invalidateAncestors(relPath)
-	b.md4.invalidate(relPath)
 	return err
 }
 
@@ -615,7 +612,6 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 		b.noteSent(relPath, tmpFile)
 	}
 	b.listCache.invalidateAncestors(relPath)
-	b.md4.invalidate(relPath)
 	return err
 }
 
@@ -659,7 +655,6 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 		b.noteSent(relPath, srcPath)
 	}
 	b.listCache.invalidateAncestors(relPath)
-	b.md4.invalidate(relPath)
 	return err
 }
 
@@ -753,9 +748,6 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	err = b.transfer(ctx, args, dest+"/", []string{tmpDir + "/"}, true, nil)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
-		b.md4.invalidateTree(relPath)
-	} else {
-		b.md4.invalidate(relPath)
 	}
 	b.listCache.invalidate(parentDir(relPath))
 	if err != nil {
