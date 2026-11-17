@@ -638,10 +638,13 @@ func (s *Scanner) ChecksumNode(ctx context.Context, node *TreeNode) {
 	if !ok {
 		return
 	}
+	s.mu.RLock()
+	both := node.Compare.Presence == PresenceBoth && !node.IsSpecial
+	s.mu.RUnlock()
 	var groups []checksumGroup
 	if node.IsDir {
 		groups = s.groupFiles(node, false)
-	} else if node.Compare.Presence == PresenceBoth && !node.IsSpecial {
+	} else if both {
 		groups = []checksumGroup{{files: []*TreeNode{node}}}
 	}
 	s.resetChecksumPhase(groups)
@@ -1028,7 +1031,9 @@ func (s *Scanner) settleChecksumPhase(groups []checksumGroup) {
 }
 
 // runChecksumSides launches two goroutines, one per side, that march through
-// groups independently. Each side does its own prefetch (if its backend
+// groups independently. A write may run beside the pass: a relist changes
+// the nodes' entries and a rename their paths, under the lock, so the pass
+// reads both under it too (F27). Each side does its own prefetch (if its backend
 // supports it) and then per-file Checksum calls, up to s.concurrency in
 // parallel. The faster side pipelines ahead, so the spinner on the left panel
 // can be on a different dir than the right panel.
@@ -1067,8 +1072,11 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		// has no sum for is summed by itself.
 		var prefetched map[string]string
 		if prefetcher != nil && g.dir != nil {
-			if e := g.dir.Sides[side].Entry; e != nil && e.IsDir {
-				prefetched, _ = prefetcher.PrefetchChecksums(ctx, g.dir.RelPath, algo, true)
+			s.mu.RLock()
+			e, rel := g.dir.Sides[side].Entry, g.dir.RelPath
+			s.mu.RUnlock()
+			if e != nil && e.IsDir {
+				prefetched, _ = prefetcher.PrefetchChecksums(ctx, rel, algo, true)
 			}
 		}
 
@@ -1077,7 +1085,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			if ctx.Err() != nil {
 				break
 			}
-			if sum, ok := prefetched[f.RelPath]; ok {
+			if sum, ok := prefetched[s.relPathOf(f)]; ok {
 				s.lockTree()
 				done := recordSideSum(f, side, f.Sides[side].Entry, sum, nil)
 				s.unlockTree()
@@ -1101,6 +1109,13 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 	}
 }
 
+// relPathOf is n's path, which a rename changes under the lock.
+func (s *Scanner) relPathOf(n *TreeNode) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return n.RelPath
+}
+
 func markChecksumInFlight(node *TreeNode, side Side, delta int32) {
 	for p := node.Parent; p != nil; p = p.Parent {
 		p.ChecksumInFlight[side].Add(delta)
@@ -1112,12 +1127,14 @@ func markChecksumInFlight(node *TreeNode, side Side, delta int32) {
 // done); the caller uses that to increment the file-count progress exactly
 // once per pair.
 func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Side, algo string) bool {
-	entry := node.Sides[side].Entry
+	s.mu.RLock()
+	entry, rel := node.Sides[side].Entry, node.RelPath
+	s.mu.RUnlock()
 	var sum string
 	var err error
 	if entry != nil {
 		markChecksumInFlight(node, side, 1)
-		sum, err = s.backend(side).Checksum(ctx, node.RelPath, algo)
+		sum, err = s.backend(side).Checksum(ctx, rel, algo)
 		markChecksumInFlight(node, side, -1)
 		if err != nil && ctx.Err() != nil {
 			// Stopped: this side keeps the sum it had, and the end of the
