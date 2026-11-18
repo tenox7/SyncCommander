@@ -88,13 +88,33 @@ func (m *Model) setExpandedAll(expand bool) {
 	m.refreshTree()
 }
 
+// openSearch asks for a name to find, with the last search filled in.
+// Enter goes to the next match after the cursor, and after the last match
+// to the first again: each search went to the first match, so there was
+// no next (U24). A pattern that is not a regular expression, or that no
+// name matches, keeps the dialog open and says so: the dialog closed, and
+// nothing told why the cursor did not move.
 func (m *Model) openSearch() {
-	m.input.Open("Search (regex):", "", func(query string) tea.Cmd {
-		re, err := regexp.Compile(query)
-		if query == "" || err != nil {
+	m.input.Open("Search (regex):", m.lastSearch, func(query string) tea.Cmd {
+		if query == "" {
 			return nil
 		}
-		m.jumpToMatch(func(tree *model.TreeNode) *model.TreeNode { return model.FindByName(tree, nil, re) })
+		re, err := regexp.Compile(query)
+		if err != nil {
+			m.input.SetError(err.Error())
+			return nil
+		}
+		m.lastSearch = query
+		after := m.activePanel().CursorFile()
+		found := m.jumpToMatch(func(tree *model.TreeNode) *model.TreeNode {
+			if n := model.FindByName(tree, after, re); n != nil {
+				return n
+			}
+			return model.FindByName(tree, nil, re)
+		})
+		if !found {
+			m.input.SetError("no name matches")
+		}
 		return nil
 	})
 }
@@ -111,8 +131,8 @@ func (m *Model) jumpToNextDiff() {
 }
 
 // jumpToMatch runs find under the tree lock, then expands the way to the
-// match and puts the cursor on it.
-func (m *Model) jumpToMatch(find func(tree *model.TreeNode) *model.TreeNode) {
+// match and puts the cursor on it. It reports whether find found one.
+func (m *Model) jumpToMatch(find func(tree *model.TreeNode) *model.TreeNode) bool {
 	var target *model.TreeNode
 	m.changeView(func(tree *model.TreeNode) bool {
 		if tree == nil {
@@ -127,9 +147,10 @@ func (m *Model) jumpToMatch(find func(tree *model.TreeNode) *model.TreeNode) {
 		return true
 	})
 	if target == nil {
-		return
+		return false
 	}
 	m.refreshTree()
 	m.activePanel().jumpTo(target)
 	m.syncPanels()
+	return true
 }

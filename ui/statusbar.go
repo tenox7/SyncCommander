@@ -370,7 +370,10 @@ func RenderPanelTopBar(stats *TreeStats, isLeft bool, prefix string, width int) 
 			formatDelta(fileDelta),
 			formatSizeDelta(sizeDelta)))
 	}
-	return styleBar.Width(width).Render(sb.String())
+	// One line: a longer text wrapped onto a second, and the two halves,
+	// joined with +, broke the top of the screen (U24). The bar's padding
+	// takes a cell on each side.
+	return styleBar.Width(width).Render(ansi.Truncate(sb.String(), max(width-2, 0), "…"))
 }
 
 func formatDelta(d int) string {

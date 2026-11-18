@@ -76,6 +76,7 @@ type Model struct {
 	diffCancel context.CancelFunc // aborts that load when the view closes
 
 	cachedStats    *TreeStats // rollup cache, see refreshTree
+	lastSearch     string     // the search the / dialog starts with
 	statsRev       uint64
 	statsOpts      model.CompareOpts // the options cachedStats was counted with
 	lastPropagate  time.Time
