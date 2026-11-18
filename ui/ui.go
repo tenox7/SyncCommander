@@ -69,6 +69,7 @@ type Model struct {
 	help       *HelpDialog
 	info       *InfoDialog
 	logView    *LogDialog
+	logWaits   bool // a dialog held the log back: it opens when that closes (U18)
 	openDlg    *OpenDialog
 	diffView   *DiffView
 	diffGen    uint64             // identity of the load the diff view is waiting for
@@ -201,7 +202,16 @@ func (m *Model) deleting() bool     { return m.running(opDelete) }
 func (m *Model) busy() bool { return m.scanning() || m.checksumming() || m.writing() }
 
 // autoOpenLog pops the log up when new errors or failures have arrived.
+// It waits while another dialog is open: the log came up over it and took
+// the keys typed for it, so s saved a log file and e switched the filter
+// in place of the new name being typed (U18). The problems stay unseen,
+// and the log opens when that dialog closes (handleKey).
 func (m *Model) autoOpenLog() {
+	if m.dialogOpen() {
+		m.logWaits = true
+		return
+	}
+	m.logWaits = false
 	m.logView.AutoOpen(problems(), transport.Log.FatalCount())
 }
 

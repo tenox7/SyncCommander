@@ -12,10 +12,15 @@ type modal interface {
 	View(width, height int) string
 }
 
-// openModal returns the open dialog, if any, in one fixed priority order
-// shared by key routing and rendering.
+// dialogs lists every dialog in one fixed priority order, shared by key
+// routing and rendering.
+func (m *Model) dialogs() []modal {
+	return []modal{m.diffView, m.logView, m.info, m.help, m.confirm, m.input, m.openDlg, m.settings}
+}
+
+// openModal returns the open dialog, if any, first in dialogs.
 func (m *Model) openModal() modal {
-	for _, d := range []modal{m.diffView, m.logView, m.info, m.help, m.confirm, m.input, m.openDlg, m.settings} {
+	for _, d := range m.dialogs() {
 		if d.IsOpen() {
 			return d
 		}
@@ -23,12 +28,32 @@ func (m *Model) openModal() modal {
 	return nil
 }
 
+// dialogOpen reports whether a dialog other than the log is open.
+func (m *Model) dialogOpen() bool {
+	for _, d := range m.dialogs() {
+		if d != modal(m.logView) && d.IsOpen() {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) handleModalKey(d modal, msg tea.KeyMsg) tea.Cmd {
 	switch d := d.(type) {
 	case *DiffView:
 		m.handleDiffViewKey(msg)
 	case *LogDialog:
-		handleLogKey(d, msg)
+		// x stops what runs under the log too, and + and - change a
+		// copy's files in flight: an error opens the log, and x did
+		// nothing while it was up (U18).
+		switch k := msg.String(); {
+		case k == "x" || k == "X":
+			m.stopRunning()
+		case m.writing() && (k == "-" || k == "+" || k == "="):
+			m.handleWriteKey(k)
+		default:
+			handleLogKey(d, msg)
+		}
 	case *InfoDialog:
 		if k := msg.String(); k == "esc" || k == "q" || k == "i" {
 			d.Close()

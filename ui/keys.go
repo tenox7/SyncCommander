@@ -13,7 +13,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if d := m.openModal(); d != nil {
-		return m, m.handleModalKey(d, msg)
+		cmd := m.handleModalKey(d, msg)
+		// The log a dialog held back opens once it is closed (U18).
+		if m.logWaits {
+			m.autoOpenLog()
+		}
+		return m, cmd
 	}
 	if m.writing() {
 		m.handleWriteKey(k)

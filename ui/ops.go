@@ -208,6 +208,16 @@ func (m *Model) stopScanOps() {
 	}
 }
 
+// stopRunning is x: it stops the running write, or the scan and the
+// checksums when no write runs.
+func (m *Model) stopRunning() {
+	if m.writing() {
+		m.stopWrite()
+		return
+	}
+	m.stopScanOps()
+}
+
 // stopWrite is x while a write runs: it stops it, and its done message
 // ends it. The log calls a stopped copy a transfer, as it always has.
 func (m *Model) stopWrite() {
