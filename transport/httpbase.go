@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -244,29 +245,72 @@ func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode/100 == 3 {
 		drainClose(resp.Body)
-		err := fmt.Errorf("%s %s: %s to %s: sc follows no redirect", req.Method, req.URL.Redacted(), resp.Status, resp.Header.Get("Location"))
+		msg := fmt.Sprintf("%s %s: %s to %s: sc follows no redirect", req.Method, req.URL.Redacted(), resp.Status, resp.Header.Get("Location"))
 		if folder {
-			err = fmt.Errorf("%s %s: the server says it is a folder (%s)", req.Method, req.URL.Redacted(), resp.Status)
+			msg = fmt.Sprintf("%s %s: the server says it is a folder (%s)", req.Method, req.URL.Redacted(), resp.Status)
 		}
+		err := &statusError{code: resp.StatusCode, msg: msg}
 		Log.Add(h.proto, DirErr, err.Error())
 		return nil, err
 	}
-	// The answers no backend reads for itself, marked by kind (D3): the
-	// login refused, and the server full.
-	var kind error
+	// The answers no backend reads for itself, of the kind their code says
+	// (D3): the login refused, and the server full.
 	switch resp.StatusCode {
-	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
-		kind = model.ErrAuth
-	case http.StatusInsufficientStorage:
-		kind = model.ErrNoSpace
-	}
-	if kind != nil {
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired, http.StatusInsufficientStorage:
 		drainClose(resp.Body)
-		err := model.WithKind(kind, fmt.Errorf("%s %s: %s", req.Method, req.URL.Redacted(), resp.Status))
+		err := statusErr(resp, "%s %s", req.Method, req.URL.Redacted())
 		Log.Add(h.proto, DirErr, err.Error())
 		return nil, err
 	}
 	return resp, nil
+}
+
+// statusError is an HTTP answer that failed a request. What it means is
+// read from its code, never from its text, which holds the path: a 404 or
+// a 403 was tried again and again, and a 502 for "no such file.bin" was
+// taken for a missing file and tried once (W-M1).
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// Unwrap is the kind the code says: a missing file (404, 410), one sc may
+// not touch (403), a refused login (401, 407), a full server (507).
+func (e *statusError) Unwrap() error {
+	switch e.code {
+	case http.StatusNotFound, http.StatusGone:
+		return fs.ErrNotExist
+	case http.StatusForbidden:
+		return fs.ErrPermission
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		return model.ErrAuth
+	case http.StatusInsufficientStorage:
+		return model.ErrNoSpace
+	}
+	return nil
+}
+
+// final reports an answer another try of the same request gets again: a
+// redirect; a 4xx but a timeout (408), a lock (423, which rclone answers
+// to two requests on one path at once), too early (425) and too many
+// (429); and the 5xx that say what the server cannot do.
+func (e *statusError) final() bool {
+	switch e.code {
+	case http.StatusRequestTimeout, http.StatusLocked, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	case http.StatusNotImplemented, http.StatusHTTPVersionNotSupported, http.StatusInsufficientStorage,
+		http.StatusLoopDetected, http.StatusNotExtended, http.StatusNetworkAuthenticationRequired:
+		return true
+	}
+	return e.code/100 == 3 || e.code/100 == 4
+}
+
+// statusErr is the error of resp failing the request what:
+// "what: 404 Not Found".
+func statusErr(resp *http.Response, what string, args ...any) error {
+	return &statusError{code: resp.StatusCode, msg: fmt.Sprintf(what, args...) + ": " + resp.Status}
 }
 
 func (h *httpBase) do(ctx context.Context, method, rawurl string, body io.Reader, hdrs map[string]string) (*http.Response, error) {

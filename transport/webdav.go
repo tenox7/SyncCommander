@@ -143,11 +143,11 @@ func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*w
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("PROPFIND %s: %s", relPath, resp.Status)
+		return nil, statusErr(resp, "PROPFIND %s", relPath)
 	}
 	var ms wdMultistatus
 	if err := readMultistatus(resp.Body, func(r wdResponse) error { ms.Response = append(ms.Response, r); return nil }); err != nil {
-		err = fmt.Errorf("PROPFIND %s: %w", relPath, err)
+		err = &fs.PathError{Op: "PROPFIND", Path: relPath, Err: err}
 		Log.Add("webdav", DirErr, err.Error())
 		return nil, err
 	}
@@ -439,7 +439,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 			continue // deeper than asked; listed with its own folder
 		}
 		if err != nil {
-			err = fmt.Errorf("PROPFIND %s: %w", b.pathFor(relDir), err)
+			err = &fs.PathError{Op: "PROPFIND", Path: b.pathFor(relDir), Err: err}
 			Log.Add("webdav", DirErr, err.Error())
 			return nil, err
 		}
@@ -475,7 +475,7 @@ func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 	case resp.StatusCode == http.StatusNotFound:
 		return model.FileEntry{}, fmt.Errorf("PROPFIND %s: %w", b.pathFor(rel), fs.ErrNotExist)
 	case resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK:
-		return model.FileEntry{}, fmt.Errorf("PROPFIND %s: %s", b.pathFor(rel), resp.Status)
+		return model.FileEntry{}, statusErr(resp, "PROPFIND %s", b.pathFor(rel))
 	}
 	var e model.FileEntry
 	found := false
@@ -495,7 +495,7 @@ func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 		err = errors.New("the answer does not include the path itself")
 	}
 	if err != nil {
-		err = fmt.Errorf("PROPFIND %s: %w", b.pathFor(rel), err)
+		err = &fs.PathError{Op: "PROPFIND", Path: b.pathFor(rel), Err: err}
 		Log.Add("webdav", DirErr, err.Error())
 		return model.FileEntry{}, err
 	}
@@ -552,7 +552,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 		return fmt.Errorf("PROPFIND infinity %s: %s: %w", scope, resp.Status, ErrUnsupported)
 	}
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
+		err := statusErr(resp, "PROPFIND infinity %s", scope)
 		Log.Add("webdav", DirErr, "RPROPFIND: "+err.Error())
 		return err
 	}
@@ -757,7 +757,7 @@ func (b *WebDAVBackend) proppatchMtime(ctx context.Context, relPath string, mtim
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode/100 != 2 {
-		err := fmt.Errorf("PROPPATCH %s: %s", relPath, resp.Status)
+		err := statusErr(resp, "PROPPATCH %s", relPath)
 		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
@@ -798,7 +798,7 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		err := fmt.Errorf("PUT %s: %s", relPath, resp.Status)
+		err := statusErr(resp, "PUT %s", relPath)
 		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
@@ -871,7 +871,7 @@ func (b *WebDAVBackend) mkcolOnce(ctx context.Context, dir string) error {
 		b.dirs.Store(dir, struct{}{})
 		return nil
 	default:
-		return fmt.Errorf("MKCOL %s: %s", dir, resp.Status)
+		return statusErr(resp, "MKCOL %s", dir)
 	}
 }
 
@@ -896,7 +896,7 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 		return renameTargetTaken("webdav", newRelPath)
 	}
 	if resp.StatusCode/100 != 2 {
-		err := fmt.Errorf("MOVE %s: %s", oldRelPath, resp.Status)
+		err := statusErr(resp, "MOVE %s", oldRelPath)
 		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
@@ -938,7 +938,7 @@ func (b *WebDAVBackend) delete(ctx context.Context, relPath string, recursive bo
 	case resp.StatusCode == http.StatusMultiStatus:
 		err = fmt.Errorf("DELETE %s: %s", relPath, multistatusFailures(resp.Body))
 	case resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound:
-		err = fmt.Errorf("DELETE %s: %s", relPath, resp.Status)
+		err = statusErr(resp, "DELETE %s", relPath)
 	case recursive:
 		err = b.gone(ctx, relPath)
 	}
@@ -990,7 +990,7 @@ func (b *WebDAVBackend) gone(ctx context.Context, relPath string) error {
 	case http.StatusMultiStatus, http.StatusOK:
 		return fmt.Errorf("DELETE %s: still exists afterwards", relPath)
 	}
-	return fmt.Errorf("DELETE %s: verify: %s", relPath, resp.Status)
+	return statusErr(resp, "DELETE %s: verify", relPath)
 }
 
 func (b *WebDAVBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
@@ -1019,7 +1019,7 @@ func (b *WebDAVBackend) OpenAt(ctx context.Context, relPath string, offset int64
 		return resp.Body, nil
 	default:
 		drainClose(resp.Body)
-		return nil, fmt.Errorf("GET %s @%d: %s", relPath, offset, resp.Status)
+		return nil, statusErr(resp, "GET %s @%d", relPath, offset)
 	}
 }
 

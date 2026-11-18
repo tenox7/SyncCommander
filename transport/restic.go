@@ -178,7 +178,7 @@ func (b *ResticBackend) validate(ctx context.Context) error {
 	}
 	drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("restic: %s: no config, and GET keys/ answers %s", b.display, resp.Status)
+		return &statusError{code: resp.StatusCode, msg: fmt.Sprintf("restic: %s: no config, and GET keys/ answers %s", b.display, resp.Status)}
 	}
 	return nil
 }
@@ -292,7 +292,7 @@ func (b *ResticBackend) statConfig(ctx context.Context) (model.FileEntry, bool, 
 	case resp.StatusCode == http.StatusNotFound:
 		return model.FileEntry{}, false, nil
 	case resp.StatusCode/100 != 2:
-		return model.FileEntry{}, false, fmt.Errorf("restic: HEAD config: %s", resp.Status)
+		return model.FileEntry{}, false, statusErr(resp, "restic: HEAD config")
 	}
 	return model.FileEntry{
 		RelPath: "config",
@@ -310,14 +310,19 @@ func (b *ResticBackend) listType(ctx context.Context, typeName string) ([]model.
 		return nil, err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusNotFound && !strings.HasPrefix(resp.Header.Get("Server"), "rclone/") {
-		// The repository has no such folder, as restic's own client reads
-		// a 404. rclone lists a folder it does not have as empty, and
-		// answers 404 for a listing that failed (W-H6).
-		return nil, nil
+	if resp.StatusCode == http.StatusNotFound {
+		if !strings.HasPrefix(resp.Header.Get("Server"), "rclone/") {
+			// The repository has no such folder, as restic's own client
+			// reads a 404.
+			return nil, nil
+		}
+		// rclone lists a folder it does not have as empty, and answers
+		// 404 for a listing that failed (W-H6): no missing folder, and
+		// worth another try.
+		return nil, fmt.Errorf("restic: GET %s/: %s", typeName, resp.Status)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("restic: GET %s/: %s", typeName, resp.Status)
+		return nil, statusErr(resp, "restic: GET %s/", typeName)
 	}
 	return b.decodeList(resp, typeName)
 }
@@ -405,7 +410,7 @@ func (b *ResticBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 	case resp.StatusCode == http.StatusNotFound:
 		return model.FileEntry{}, fmt.Errorf("restic: %s: %w", rel, fs.ErrNotExist)
 	case resp.StatusCode/100 != 2:
-		return model.FileEntry{}, fmt.Errorf("restic: HEAD %s: %s", rel, resp.Status)
+		return model.FileEntry{}, statusErr(resp, "restic: HEAD %s", rel)
 	}
 	if rel == "config" {
 		return model.FileEntry{RelPath: rel, Name: rel, Size: max(resp.ContentLength, 0), ModTime: parseWDTime(resp.Header.Get("Last-Modified")), TimeRes: model.TimeNone, Mode: 0644}, nil
@@ -426,7 +431,7 @@ func (b *ResticBackend) objectSize(ctx context.Context, obj string) (int64, bool
 	case resp.StatusCode == http.StatusNotFound:
 		return 0, false, nil
 	case resp.StatusCode/100 != 2:
-		return 0, false, fmt.Errorf("restic: HEAD %s: %s", obj, resp.Status)
+		return 0, false, statusErr(resp, "restic: HEAD %s", obj)
 	}
 	return max(resp.ContentLength, 0), true, nil
 }
@@ -562,7 +567,7 @@ func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 { // restic POST succeeds with 200, not 201
-		err := fmt.Errorf("restic: POST %s: %s", relPath, resp.Status)
+		err := statusErr(resp, "restic: POST %s", relPath)
 		Log.Add("restic", DirErr, err.Error())
 		return err
 	}
@@ -646,7 +651,7 @@ func (b *ResticBackend) delete(ctx context.Context, obj, relPath string) error {
 		// done (W-H6).
 		err = fmt.Errorf("restic: DELETE %s: %s: %w", relPath, resp.Status, fs.ErrNotExist)
 	case resp.StatusCode/100 != 2:
-		err = fmt.Errorf("restic: DELETE %s: %s", relPath, resp.Status)
+		err = statusErr(resp, "restic: DELETE %s", relPath)
 	}
 	if err != nil {
 		Log.Add("restic", DirErr, err.Error())
@@ -685,6 +690,6 @@ func (b *ResticBackend) OpenAt(ctx context.Context, relPath string, offset int64
 		return resp.Body, nil
 	default:
 		drainClose(resp.Body)
-		return nil, fmt.Errorf("restic: GET %s @%d: %s", relPath, offset, resp.Status)
+		return nil, statusErr(resp, "restic: GET %s @%d", relPath, offset)
 	}
 }

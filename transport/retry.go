@@ -192,6 +192,17 @@ func isPermanentError(err error) bool {
 	if GivesUp(err) {
 		return true
 	}
+	// An HTTP answer is read by its code. The words below are read in what
+	// was said, never in the path put with it, as an fs.PathError puts it:
+	// a file or folder named "no such file" made any error final (W-M1).
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.final()
+	}
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		return isPermanentError(pe.Err)
+	}
 	msg := strings.ToLower(err.Error())
 	for _, sub := range []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported", "unknown module"} {
 		if strings.Contains(msg, sub) {
