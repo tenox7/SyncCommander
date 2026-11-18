@@ -2,13 +2,16 @@ package transport
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -87,7 +90,7 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	scheme, user, pass, alias, port, remotePath := parseRemoteURL(rawURL)
 	host := alias
 
-	cfgHost, cfgUser, cfgPort, cfgKeys := lookupSSHConfig(alias)
+	cfgHost, cfgUser, cfgPort, cfgKeys, cfgKeyAlias := lookupSSHConfig(alias)
 	if cfgHost != "" {
 		host = cfgHost
 	}
@@ -153,6 +156,16 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	}
 
 	addr := net.JoinHostPort(host, port)
+	// known_hosts files a server's keys under its name and port, or under
+	// its HostKeyAlias alone, with no port, as ssh does: through ssh -L the
+	// server answers at a localhost port that changes (S15).
+	filed := addr
+	if cfgKeyAlias != "" {
+		filed = net.JoinHostPort(cfgKeyAlias, "22")
+	}
+	if insecure {
+		warnInsecure(scheme, addr, pass != "")
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -163,10 +176,13 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	tracked := &trackedConn{Conn: LimitConn(rawConn)}
 	tracked.touch()
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            auths,
-		HostKeyCallback: hostKeys,
-		Timeout:         10 * time.Second,
+		User: user,
+		Auth: auths,
+		HostKeyCallback: func(_ string, remote net.Addr, key ssh.PublicKey) error {
+			return hostKeys(filed, remote, key)
+		},
+		HostKeyAlgorithms: knownKeyAlgos(hostKeys, filed),
+		Timeout:           10 * time.Second,
 	}
 	c, chans, reqs, err := ssh.NewClientConn(tracked, addr, cfg)
 	if !stopWatch() && err == nil {
@@ -210,18 +226,23 @@ func loginUser() string {
 	return name
 }
 
-// hostKeyCallback verifies against ~/.ssh/known_hosts unless -insecure.
+// hostKeyCallback verifies against the known_hosts files unless -insecure:
+// the user's, then the system's, as ssh reads them. The system's were not
+// read (S15).
 func hostKeyCallback(insecure bool) (ssh.HostKeyCallback, error) {
 	if insecure {
 		return ssh.InsecureIgnoreHostKey(), nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
 	var files []string
-	for _, name := range []string{"known_hosts", "known_hosts2"} {
-		if p := filepath.Join(home, ".ssh", name); fileExists(p) {
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, name := range []string{"known_hosts", "known_hosts2"} {
+			if p := filepath.Join(home, ".ssh", name); fileExists(p) {
+				files = append(files, p)
+			}
+		}
+	}
+	for _, p := range globalKnownHosts {
+		if fileExists(p) {
 			files = append(files, p)
 		}
 	}
@@ -229,6 +250,86 @@ func hostKeyCallback(insecure bool) (ssh.HostKeyCallback, error) {
 		return nil, errors.New("ssh: no ~/.ssh/known_hosts; connect with ssh once or pass -insecure")
 	}
 	return knownhosts.New(files...)
+}
+
+// globalKnownHosts is the system's known_hosts files, which ssh reads
+// after the user's own.
+var globalKnownHosts = systemKnownHosts()
+
+func systemKnownHosts() []string {
+	dir := "/etc/ssh"
+	if runtime.GOOS == "windows" {
+		pd := os.Getenv("ProgramData")
+		if pd == "" {
+			return nil // never a path from the folder sc runs in
+		}
+		dir = filepath.Join(pd, "ssh")
+	}
+	return []string{filepath.Join(dir, "ssh_known_hosts"), filepath.Join(dir, "ssh_known_hosts2")}
+}
+
+// knownKeyAlgos is the host key algorithms to ask the server for: first
+// those of the keys check holds for name, in x/crypto's order, then the
+// rest. x/crypto asks for ECDSA before Ed25519 whatever known_hosts holds:
+// a server with both keys, known_hosts holding only its Ed25519 one, was a
+// "HOST KEY MISMATCH" (S15). nil, the default order, when none is known.
+// The keys known come from a check of a key no known_hosts holds, whose
+// error lists them, so knownhosts' own matching (patterns, hashed names,
+// markers) decides.
+func knownKeyAlgos(check ssh.HostKeyCallback, name string) []string {
+	var ke *knownhosts.KeyError
+	if err := check(name, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, probeKey); !errors.As(err, &ke) || len(ke.Want) == 0 {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, k := range ke.Want {
+		known[k.Key.Type()] = true
+	}
+	var first, rest []string
+	for _, a := range ssh.SupportedAlgorithms().HostKeys {
+		if known[keyTypeOf(a)] {
+			first = append(first, a)
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	if len(first) == 0 {
+		return nil
+	}
+	return append(first, rest...)
+}
+
+// keyTypeOf is the type of key a host key algorithm signs with.
+func keyTypeOf(algo string) string {
+	if algo == ssh.KeyAlgoRSASHA256 || algo == ssh.KeyAlgoRSASHA512 {
+		return ssh.KeyAlgoRSA
+	}
+	return algo
+}
+
+// probeKey is a key no known_hosts holds.
+var probeKey = func() ssh.PublicKey {
+	k, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public())
+	if err != nil {
+		panic(err)
+	}
+	return k
+}()
+
+// insecureWarned holds the addresses -insecure has warned of.
+var insecureWarned sync.Map
+
+// warnInsecure says once for addr that its host key goes unchecked, and,
+// with a password, that the password goes to whoever answers there (S15).
+func warnInsecure(proto, addr string, password bool) {
+	if _, seen := insecureWarned.LoadOrStore(addr, true); seen {
+		return
+	}
+	msg := "-insecure: the host key of " + addr + " is not checked"
+	if password {
+		msg += ", and the password goes to whoever answers there"
+	}
+	Log.Add(proto, DirWarn, msg)
 }
 
 // sshLoginFailure marks a handshake error the server refused as model.ErrAuth:
@@ -344,7 +445,7 @@ func sshDisplayURL(conn *sshConn, remotePath string) string {
 	return fmt.Sprintf("%s://%s@%s%s", conn.scheme, conn.user, displayHost, remotePath)
 }
 
-func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles []string) {
+func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles []string, hostKeyAlias string) {
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		return
@@ -354,7 +455,7 @@ func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles [
 		return
 	}
 
-	var wHost, wUser, wPort string
+	var wHost, wUser, wPort, wKeyAlias string
 	var wKeys []string
 	matched, wild := false, false
 
@@ -402,6 +503,8 @@ func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles [
 				set(&port, val)
 			case "identityfile":
 				identityFiles = append(identityFiles, val)
+			case "hostkeyalias":
+				set(&hostKeyAlias, val)
 			}
 		} else {
 			switch key {
@@ -413,6 +516,8 @@ func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles [
 				set(&wPort, val)
 			case "identityfile":
 				wKeys = append(wKeys, val)
+			case "hostkeyalias":
+				set(&wKeyAlias, val)
 			}
 		}
 	}
@@ -428,6 +533,9 @@ func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles [
 	}
 	if len(identityFiles) == 0 {
 		identityFiles = wKeys
+	}
+	if hostKeyAlias == "" {
+		hostKeyAlias = wKeyAlias
 	}
 	return
 }
