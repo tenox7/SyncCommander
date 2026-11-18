@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -32,6 +33,12 @@ func (m *Model) openRename(node *model.TreeNode) {
 	m.readTree(func(*model.TreeNode) { oldName = node.Name })
 	m.input.Open("Rename: "+oldName, oldName, func(newName string) tea.Cmd {
 		if newName == "" || newName == oldName {
+			return nil
+		}
+		if !utf8.ValidString(oldName) && strings.ContainsRune(newName, utf8.RuneError) {
+			// The editor shows each byte that is not UTF-8 as U+FFFD, and
+			// the new name would hold that sign in place of the byte.
+			m.input.SetError("the name has bytes that are not text, shown as \ufffd: type the new name in full")
 			return nil
 		}
 		if strings.ContainsAny(newName, "/\\") {

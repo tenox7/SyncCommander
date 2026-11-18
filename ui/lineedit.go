@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -8,18 +9,31 @@ import (
 )
 
 // lineEditor is a single-line text field edited by rune, so the cursor and
-// backspace never split a multibyte character.
+// backspace never split a multibyte character. Each byte of a text that is
+// not UTF-8 is a U+FFFD rune: while the runes are the ones set made, String
+// gives the text set was given, byte for byte. A name of Latin-1 bytes
+// came back with U+FFFD in place of them, and Enter with nothing typed
+// renamed the file to that (U17).
 type lineEditor struct {
 	runes  []rune
 	cursor int
+	given  string // the text set was given
+	made   []rune // the runes set made of it
 }
 
 func (e *lineEditor) set(s string) {
+	e.given = s
 	e.runes = []rune(s)
+	e.made = slices.Clone(e.runes)
 	e.cursor = len(e.runes)
 }
 
-func (e *lineEditor) String() string { return string(e.runes) }
+func (e *lineEditor) String() string {
+	if slices.Equal(e.runes, e.made) {
+		return e.given
+	}
+	return string(e.runes)
+}
 
 // handleKey applies one key; it reports false for keys it does not handle so
 // the dialog can act on them.
