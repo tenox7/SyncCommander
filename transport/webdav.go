@@ -976,9 +976,42 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	return nil
 }
 
+// Remove removes the file relPath, or a folder with nothing in it, as
+// os.Remove does. A DELETE takes a collection with all it holds (RFC 4918
+// §9.6.1), and sc removes with Remove what it saw as a file: one that is a
+// folder on the server now went with its whole subtree, where the other
+// backends refuse (W-L3). So the path is looked at first, live, at one
+// PROPFIND more per file, and a folder that holds anything is refused, as
+// rmdir refuses it. One gone already goes to the DELETE all the same: its
+// 404 is no failure, and the listings forget the path.
 func (b *WebDAVBackend) Remove(ctx context.Context, relPath string) error {
+	e, err := b.Stat(ctx, relPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	case e.IsDir:
+		entries, err := b.liveList(ctx, relPath)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			err := &fs.PathError{Op: "DELETE", Path: b.pathFor(relPath), Err: errFolderNotEmpty}
+			Log.Add("webdav", DirErr, err.Error())
+			return err
+		}
+	}
 	return b.delete(ctx, relPath, false)
 }
+
+// errFolderNotEmpty refuses a Remove of a folder that holds something. It
+// is an fs.ErrExist, as ENOTEMPTY is, so it is final.
+var errFolderNotEmpty error = notEmptyError{}
+
+type notEmptyError struct{}
+
+func (notEmptyError) Error() string        { return "it is a folder on the server, and not empty" }
+func (notEmptyError) Is(target error) bool { return target == fs.ErrExist }
 
 func (b *WebDAVBackend) RemoveAll(ctx context.Context, relPath string) error {
 	return b.delete(ctx, relPath, true)

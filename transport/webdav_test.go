@@ -32,6 +32,13 @@ type wdDeleteServer struct {
 func (s *wdDeleteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "PROPFIND":
+		if r.URL.Path == "/f" && s.keep { // a file, as Remove looks first (W-L3)
+			w.WriteHeader(http.StatusMultiStatus)
+			w.Write([]byte(`<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/f</d:href>` +
+				`<d:propstat><d:status>HTTP/1.1 200 OK</d:status><d:prop><d:getcontentlength>3</d:getcontentlength>` +
+				`<d:resourcetype/></d:prop></d:propstat></d:response></d:multistatus>`))
+			return
+		}
 		if r.URL.Path == "/" || s.keep {
 			w.WriteHeader(http.StatusMultiStatus)
 			w.Write([]byte(wdCollectionBody))
@@ -99,7 +106,8 @@ func TestWebDAVRemoveAllDetectsSurvivingCollection(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "still exists") {
 		t.Fatalf("RemoveAll = %v, want a still-exists failure", err)
 	}
-	// A single file delete trusts the status: no read-back.
+	// A single file delete trusts the status: no read-back. (It looks
+	// first, for a folder there now: W-L3.)
 	if err := b.Remove(context.Background(), "f"); err != nil {
 		t.Fatalf("Remove = %v", err)
 	}
