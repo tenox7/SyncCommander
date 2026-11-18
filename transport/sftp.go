@@ -23,8 +23,9 @@ import (
 // the backend opens. The pkg/sftp defaults are pessimistic: maxPacket=32KB
 // and writes are synchronous (each Write blocks for STATUS), so per-stream
 // throughput collapses to roughly maxPacket/RTT. UseConcurrentWrites lets
-// File.ReadFrom (which io.Copy invokes) pipeline up to
-// maxConcurrentRequests packets at once. The packet size stays at the 32KB
+// a file's writes pipeline up to maxConcurrentRequests packets at once;
+// put asks for that (writeAll), as pkg/sftp's ReadFrom does it only for a
+// reader that tells its size. The packet size stays at the 32KB
 // default: MaxPacketChecked rejects anything larger and fails the connect,
 // and MaxPacketUnchecked silently truncates downloads, because the
 // concurrent reader treats a short READ reply as EOF while pkg/sftp servers
@@ -323,7 +324,9 @@ func (b *SFTPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 
 // put writes relPath on a pooled connection and then applies mode: a new
 // body when offset < 0, else the rest of the file after its offset bytes.
-// A mode the server will not take is ErrModeNotSet, the bytes in place.
+// size is the whole file's, 0 or less when not known. A failed write is
+// cut back to the first byte that may be missing (S21, writeAll). A mode
+// the server will not take is ErrModeNotSet, the bytes in place.
 // An append never creates the file and refuses one of another size (L14,
 // S8): writing past the end of a shorter file leaves a gap of zeros. The
 // source opens once the file is ready. The data is synced when the server
@@ -331,7 +334,7 @@ func (b *SFTPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 // so ignoring it would report a short file as copied. A cancel closes the
 // connection when the server does not answer (onPooled): closing the file
 // would wait behind the transfer.
-func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mode os.FileMode, open func() (io.ReadCloser, error)) error {
+func (b *SFTPBackend) put(ctx context.Context, relPath string, offset, size int64, mode os.FileMode, open func() (io.ReadCloser, error)) error {
 	fullPath := b.abs(relPath)
 	return b.onPooled(ctx, func(c *sftp.Client) error {
 		flags := os.O_WRONLY
@@ -361,8 +364,9 @@ func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mod
 		if err == nil {
 			src, err = open()
 		}
+		cut := int64(-1)
 		if err == nil {
-			_, err = io.Copy(f, src)
+			cut, err = writeAll(f, src, size-max(offset, 0))
 			src.Close()
 		}
 		if err == nil {
@@ -370,6 +374,15 @@ func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mod
 		}
 		if cerr := f.Close(); err == nil {
 			err = cerr
+		}
+		if cut >= 0 && !isConnLost(err) {
+			// After the close: a server that runs a file's writes side
+			// by side, as pkg/sftp's, finishes them before it closes the
+			// file, not before a SETSTAT, and a write still in flight
+			// would land past the cut.
+			if terr := c.Truncate(fullPath, cut); terr != nil {
+				err = fmt.Errorf("%w; cutting it at %d: %v", err, cut, terr)
+			}
 		}
 		if err == nil {
 			// The bytes are in place: a mode the server will not take
@@ -380,6 +393,38 @@ func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mod
 		}
 		return err
 	})
+}
+
+// sftpPacket is the size of one WRITE: pkg/sftp's default packet, which
+// sc keeps (sftpFastOpts).
+const sftpPacket = 32 << 10
+
+// writeAll writes src to f from f's offset on. pkg/sftp keeps many WRITEs
+// in flight only for a reader that tells its size, and the copy's readers
+// tell none: an upload sent one packet and waited for its answer, a round
+// trip for each 32 KiB (S21). writeAll asks for as many as pkg/sftp would
+// for a reader of remain bytes, what src is said to hold (0 or less when
+// not known: one at a time). With many in flight, a failed write can have
+// later ones land past it, which leaves zeros below the file's size.
+// pkg/sftp leaves f's offset at the first byte that may be missing, all
+// before it written, and writeAll returns that offset as where to cut f;
+// -1 when nothing can lie past it.
+func writeAll(f *sftp.File, src io.Reader, remain int64) (cut int64, err error) {
+	start, _ := f.Seek(0, io.SeekCurrent)
+	var read int64
+	if remain > sftpPacket {
+		// pkg/sftp caps it at its own limit, 64 by default.
+		read, err = f.ReadFromWithConcurrency(src, int(min(remain/sftpPacket+1, 64)))
+	} else {
+		read, err = f.ReadFrom(src)
+	}
+	if err == nil {
+		return -1, nil
+	}
+	if at, _ := f.Seek(0, io.SeekCurrent); at < start+read {
+		return at, err
+	}
+	return -1, err
 }
 
 // syncSFTP asks the server to sync f to disk (fsync@openssh.com, L14). A
@@ -395,7 +440,7 @@ func syncSFTP(f *sftp.File) error {
 
 func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	Log.Add("sftp", DirOut, "STOR "+relPath)
-	err := b.put(ctx, relPath, -1, p.Mode, func() (io.ReadCloser, error) { return io.NopCloser(src), nil })
+	err := b.put(ctx, relPath, -1, p.Size, p.Mode, func() (io.ReadCloser, error) { return io.NopCloser(src), nil })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
@@ -407,7 +452,7 @@ func (b *SFTPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reade
 // must hold exactly offset bytes (see put).
 func (b *SFTPBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	Log.Add("sftp", DirOut, fmt.Sprintf("APPEND %s @%d", relPath, offset))
-	err := b.put(ctx, relPath, offset, p.Mode, func() (io.ReadCloser, error) { return src.OpenAt(ctx, offset) })
+	err := b.put(ctx, relPath, offset, p.Size, p.Mode, func() (io.ReadCloser, error) { return src.OpenAt(ctx, offset) })
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, err.Error())
