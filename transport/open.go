@@ -282,8 +282,20 @@ func TryOpenBackend(arg string, insecure bool, parallel int) (model.Backend, err
 			return nil, err
 		}
 	}
+	// The list cache of the first connection's backend, which the backend
+	// of each next connection goes on with (S18). The lazy wrapper calls
+	// the factory for one connection at a time.
+	var carried *listCache
 	return NewLazyBackend(MaskURLPassword(arg), func(ctx context.Context) (model.Backend, error) {
-		return openBackend(ctx, arg, insecure, parallel)
+		b, err := openBackend(ctx, arg, insecure, parallel)
+		if c, ok := b.(listCacheCarrier); ok && err == nil {
+			if carried == nil {
+				carried = c.heldListCache()
+			} else {
+				c.takeListCache(carried)
+			}
+		}
+		return b, err
 	}), nil
 }
 

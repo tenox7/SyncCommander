@@ -244,6 +244,13 @@ func (b *SFTPBackend) PreloadRecursive(ctx context.Context, scope string) error 
 	return nil
 }
 
+// takeListCache has b go on with c, the list cache of the backend of the
+// connection before b's, and with the recursive listing it cut off (S18).
+func (b *SFTPBackend) takeListCache(c *listCache) {
+	b.listCache = c
+	c.resume(b.proto, b.findRecursive)
+}
+
 func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	dir := b.abs(relDir)
 	Log.Add("sftp", DirOut, "READDIR "+dir)

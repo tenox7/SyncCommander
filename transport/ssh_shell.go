@@ -40,6 +40,8 @@ type sshShell struct {
 
 func (s *sshShell) BasePath() string { return s.display }
 
+func (s *sshShell) heldListCache() *listCache { return s.listCache }
+
 func (s *sshShell) abs(relPath string) string { return path.Join(s.base, cleanRel(relPath)) }
 
 // exec runs cmd on client with the given stdin and stdout. A failure carries

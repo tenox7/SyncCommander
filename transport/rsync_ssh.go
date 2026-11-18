@@ -89,6 +89,13 @@ func (b *RsyncSSHBackend) PreloadRecursive(ctx context.Context, scope string) er
 	return nil
 }
 
+// takeListCache has b go on with c, the list cache of the backend of the
+// connection before b's, and with the recursive listing it cut off (S18).
+func (b *RsyncSSHBackend) takeListCache(c *listCache) {
+	b.listCache = c
+	c.resume(b.proto, b.runRecursiveList)
+}
+
 func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	// rsync quotes paths in its messages as absolute paths.
 	l := newRsyncListing(scope, emit, complete, func(p string) (string, bool) { return relUnder(b.base, p) })

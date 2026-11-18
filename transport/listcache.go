@@ -40,6 +40,17 @@ type listCache struct {
 	scope      string             // the folder the latest run lists, with all under it
 	retryProto string             // set: a failed run is tried again (retryingRuns)
 	kept       map[string]bool    // folders an earlier try of the run listed in full
+	cutShort   bool               // the latest run ended cut off (runRetryable): resume runs it again
+}
+
+// listCacheCarrier is a backend whose list cache goes on with the backend
+// of its next connection: the ssh family, whose backend a lost connection
+// drops (lazyBackend.markBrokenIf). The cache and the recursive listing it
+// ran went with the backend, and the rest of a scan listed each folder by
+// itself (S18). The opener's factory keeps the cache (open.go).
+type listCacheCarrier interface {
+	heldListCache() *listCache
+	takeListCache(*listCache) // before the backend serves a call
 }
 
 func newListCache() *listCache {
@@ -153,14 +164,40 @@ func (e *unreadDirs) Error() string { return e.why }
 // is to show. When run fails the partial contents are dropped, so List
 // falls back to live per-dir calls instead of trusting a truncated tree. A
 // run its connection cut off keeps the folders it completed (keepAfterLocked)
-// and, with retryingRuns, is tried again. An *unreadDirs failure drops only
-// the folders it names.
+// and, with retryingRuns, is tried again, or runs again on the backend of
+// the next connection (resume). An *unreadDirs failure drops only the
+// folders it names.
 func (c *listCache) start(ctx context.Context, scope string, run recursiveLister) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.active && !c.done && !model.WantsFreshListing(ctx) {
-		c.mu.Unlock()
 		return
 	}
+	c.reset()
+	c.launchLocked(ctx, scope, run)
+}
+
+// resume runs the latest run again with run, the lister of the backend of a
+// new connection, when the old connection cut it off, or it still runs
+// there: the folders it listed in full are kept, as a retry keeps them, and
+// the new run lists the rest. A run that ended whole, or on what the
+// server answered, is left as it is, and so is one whose ctx ended (S18).
+// proto names the backend in the log.
+func (c *listCache) resume(proto string, run recursiveLister) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ctx := c.preloadCtx
+	if !c.active || ctx == nil || ctx.Err() != nil || c.done && !c.cutShort {
+		return
+	}
+	kept := c.keepAfterLocked(model.ErrConnLost)
+	Log.Add(proto, DirRetry, fmt.Sprintf("the recursive listing of %s runs again on the new connection, keeping %d folders it listed in full", path.Join("/", c.scope), kept))
+	c.launchLocked(ctx, c.scope, run)
+}
+
+// launchLocked starts a run of scope under ctx in the background and stops
+// the run before it, whose listing goes on sending into nothing. mu held.
+func (c *listCache) launchLocked(ctx context.Context, scope string, run recursiveLister) {
 	if c.stopRun != nil {
 		c.stopRun()
 	}
@@ -168,12 +205,10 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 	c.runs++
 	id := c.runs
 	c.stopRun = stop
-	c.reset()
-	c.active, c.done = true, false
+	c.active, c.done, c.cutShort = true, false, false
 	c.preloadCtx = ctx
 	c.scope = scope
 	c.cond.Broadcast() // a waiter outside the new run's scope lists live
-	c.mu.Unlock()
 
 	emit := func(parent string, entries []model.FileEntry) {
 		c.mu.Lock()
@@ -221,6 +256,7 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 			}
 		case err != nil:
 			c.keepAfterLocked(err)
+			c.cutShort = runRetryable(err)
 		}
 		c.done = true
 		c.cond.Broadcast()
