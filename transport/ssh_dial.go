@@ -70,6 +70,7 @@ func parseRemoteURL(rawURL string) (scheme, user, pass, host, port, remotePath s
 
 type sshConn struct {
 	client   *ssh.Client
+	gone     <-chan struct{} // closed once the connection has ended
 	scheme   string
 	user     string
 	alias    string
@@ -198,10 +199,16 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	}
 	rawConn.SetDeadline(time.Time{})
 	client := ssh.NewClient(c, chans, reqs)
-	go sshKeepalive(client, tracked, scheme)
+	gone := make(chan struct{})
+	go func() {
+		_ = client.Wait()
+		close(gone)
+	}()
+	go sshKeepalive(client, tracked, scheme, gone)
 
 	return &sshConn{
 		client:   client,
+		gone:     gone,
 		scheme:   scheme,
 		user:     user,
 		alias:    alias,
@@ -397,15 +404,10 @@ func (c *trackedConn) idleFor() time.Duration {
 // interval: a recent read is proof the peer is alive, and probing while the
 // transport is saturated risks false-positive timeouts. Closes the client if
 // a probe errors or times out so any blocked session/SFTP write unblocks
-// with an error.
-func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string) {
+// with an error. done is closed once the connection has ended.
+func sshKeepalive(client *ssh.Client, conn *trackedConn, proto string, done <-chan struct{}) {
 	t := time.NewTicker(sshKeepaliveInterval)
 	defer t.Stop()
-	done := make(chan struct{})
-	go func() {
-		_ = client.Wait()
-		close(done)
-	}()
 	for {
 		select {
 		case <-done:

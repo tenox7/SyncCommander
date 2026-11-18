@@ -148,7 +148,7 @@ func newSFTPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure 
 	if err != nil {
 		return nil, err
 	}
-	b := &SFTPBackend{sshShell: sshShell{client: conn.client, proto: "sftp", listCache: newListCache()}, main: main}
+	b := &SFTPBackend{sshShell: sshShell{client: conn.client, gone: conn.gone, proto: "sftp", listCache: newListCache()}, main: main}
 	if err := b.onMain(ctx, func(c *sftp.Client) (err error) {
 		b.base, err = expandHome(conn.basePath, c.Getwd)
 		return err

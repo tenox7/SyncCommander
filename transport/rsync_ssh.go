@@ -30,7 +30,7 @@ func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, paral
 	if err != nil {
 		return nil, err
 	}
-	b := &RsyncSSHBackend{sshShell: sshShell{client: conn.client, proto: "rsync+ssh", listCache: newListCache()}}
+	b := &RsyncSSHBackend{sshShell: sshShell{client: conn.client, gone: conn.gone, proto: "rsync+ssh", listCache: newListCache()}}
 	if err := b.checkShell(ctx); err != nil {
 		conn.client.Close()
 		return nil, fmt.Errorf("rsync+ssh: %w", err)

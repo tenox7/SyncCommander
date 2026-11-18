@@ -27,7 +27,7 @@ type SCPBackend struct {
 // error the caller closes conn.client. rawURL lets the pool dial fresh
 // connections for parallel transfers (parallel-1 of them).
 func newSCPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure bool, parallel int) (*SCPBackend, error) {
-	b := &SCPBackend{sshShell: sshShell{client: conn.client, proto: "scp", listCache: newListCache()}}
+	b := &SCPBackend{sshShell: sshShell{client: conn.client, gone: conn.gone, proto: "scp", listCache: newListCache()}}
 	if err := b.checkShell(ctx); err != nil {
 		return nil, fmt.Errorf("scp: %w", err)
 	}

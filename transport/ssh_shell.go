@@ -26,6 +26,7 @@ import (
 // rsync+ssh embed it whole; SFTP uses it for the checksum commands only.
 type sshShell struct {
 	client  *ssh.Client
+	gone    <-chan struct{} // closed once client's connection has ended; nil: not known
 	proto   string
 	base    string
 	display string
@@ -55,6 +56,9 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 	var stderr bytes.Buffer
 	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, &stderr
 	if err := session.Run(cmd); err != nil {
+		if client == s.client {
+			err = s.lostIf(ctx, err)
+		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			err = &remoteError{msg: msg, err: err}
 		}
@@ -62,6 +66,31 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 		return err
 	}
 	return nil
+}
+
+// connGoneWait is how long lostIf waits to see the connection end:
+// x/crypto/ssh closes the channels of a connection that ended just before
+// it says the connection is gone.
+const connGoneWait = time.Second
+
+// lostIf is err, how a command on the shell's connection ended, as a lost
+// connection when the command ended with no exit status because the
+// connection ended under it. sc took that for a failure on the server's
+// answer: a recursive listing cut off so kept nothing it had listed in
+// full (S18). A command its ctx stopped is not looked at.
+func (s *sshShell) lostIf(ctx context.Context, err error) error {
+	var missing *ssh.ExitMissingError
+	if s.gone == nil || ctx.Err() != nil || !errors.As(err, &missing) {
+		return err
+	}
+	t := time.NewTimer(connGoneWait)
+	defer t.Stop()
+	select {
+	case <-s.gone:
+		return fmt.Errorf("%w: %w", model.ErrConnLost, err)
+	case <-t.C:
+		return err
+	}
 }
 
 // remoteError is what a remote command wrote on stderr, which says more than
