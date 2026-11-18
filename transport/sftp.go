@@ -288,6 +288,7 @@ func sftpEntry(relPath string, info os.FileInfo) model.FileEntry {
 		Name:    path.Base(relPath),
 		Size:    info.Size(),
 		ModTime: info.ModTime(),
+		TimeRes: model.TimeSecond, // SFTP v3 sends whole seconds
 		IsDir:   info.IsDir(),
 		Mode:    info.Mode(),
 	}

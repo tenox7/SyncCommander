@@ -61,14 +61,21 @@ type fakeFTPD struct {
 	dataOpen  chan string
 	stop      chan struct{} // closed by closeAll; a stall waits on it
 	stopOnce  sync.Once
-	dataConns []net.Conn
-	mu        sync.Mutex
-	lists     []string // LIST arguments, in order
-	listConns []int    // the connection each LIST came on
-	logins    int      // PASS commands answered
-	quits     []int    // the connections that said QUIT
-	conns     []net.Conn
-	listener  net.Listener
+	// mdtm makes FEAT name MDTM: "MDTM path" answers the time in mtimes,
+	// and "MDTM time path" sets it, as vsftpd's mdtm_write does. mfmt makes
+	// it name MFMT, which sets it too. setTimes hears each command that
+	// set a time.
+	mdtm, mfmt bool
+	mtimes     map[string]time.Time
+	setTimes   []string
+	dataConns  []net.Conn
+	mu         sync.Mutex
+	lists      []string // LIST arguments, in order
+	listConns  []int    // the connection each LIST came on
+	logins     int      // PASS commands answered
+	quits      []int    // the connections that said QUIT
+	conns      []net.Conn
+	listener   net.Listener
 }
 
 // fakeFTPFile is what RETR of a path sends: the body, then the final reply.
@@ -233,6 +240,12 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			}
 			if f.hashes {
 				feats += " XSHA256\r\n"
+			}
+			if f.mdtm {
+				feats += " MDTM\r\n"
+			}
+			if f.mfmt {
+				feats += " MFMT\r\n"
 			}
 			reply("211-Features:\r\n" + feats + "211 End")
 		case "XSHA256":
@@ -454,6 +467,37 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			f.mu.Unlock()
 			reply("221 Goodbye.")
 			return
+		case "MDTM", "MFMT":
+			verb := strings.ToUpper(cmd)
+			if verb == "MDTM" && !f.mdtm || verb == "MFMT" && !f.mfmt {
+				reply("502 Command not implemented.")
+				continue
+			}
+			stamp, p, two := strings.Cut(arg, " ")
+			if verb == "MFMT" || two && len(stamp) == 14 && strings.Trim(stamp, "0123456789") == "" {
+				t, err := time.ParseInLocation("20060102150405", stamp, time.UTC)
+				if err != nil {
+					reply("501 Bad time.")
+					continue
+				}
+				f.mu.Lock()
+				if f.mtimes == nil {
+					f.mtimes = map[string]time.Time{}
+				}
+				f.mtimes[path.Clean(p)] = t
+				f.setTimes = append(f.setTimes, verb+" "+arg)
+				f.mu.Unlock()
+				reply("213 Modify=" + stamp + "; " + p)
+				continue
+			}
+			f.mu.Lock()
+			t, ok := f.mtimes[path.Clean(arg)]
+			f.mu.Unlock()
+			if !ok {
+				reply("550 Could not get file modification time.")
+				continue
+			}
+			reply("213 " + t.UTC().Format("20060102150405"))
 		default:
 			reply("502 Command not implemented.")
 		}

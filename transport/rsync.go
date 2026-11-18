@@ -426,7 +426,7 @@ func statEntry(label, relPath string, result *rsyncclient.Result, peer *peerMsgs
 			continue
 		}
 		mode := rsyncModeToFileMode(fi.Mode)
-		e := model.FileEntry{RelPath: relPath, Name: path.Base(relPath), Size: fi.Length, ModTime: fi.ModTime, IsDir: mode.IsDir(), Mode: mode}
+		e := model.FileEntry{RelPath: relPath, Name: path.Base(relPath), Size: fi.Length, ModTime: fi.ModTime, TimeRes: model.TimeSecond, IsDir: mode.IsDir(), Mode: mode}
 		if relPath == "" {
 			e.Name = ""
 		}

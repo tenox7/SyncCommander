@@ -21,7 +21,10 @@ type FileEntry struct {
 	CTime     UnixNano
 	BirthTime UnixNano
 	IsDir     bool
-	Mode      os.FileMode
+	// TimeRes is how exact ModTime is as the backend keeps it (L17). It
+	// takes no room: it fills the gap before Mode.
+	TimeRes TimeRes
+	Mode    os.FileMode
 }
 
 // IsFileName reports whether name can be the name of one entry in a

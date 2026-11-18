@@ -172,6 +172,7 @@ func fileInfoEntry(scope string, fi rsyncpkg.FileInfo) (model.FileEntry, bool) {
 		Name:    path.Base(fi.Name),
 		Size:    fi.Length,
 		ModTime: fi.ModTime,
+		TimeRes: model.TimeSecond, // the file list has whole seconds
 		IsDir:   mode.IsDir(),
 		Mode:    mode,
 	}, true

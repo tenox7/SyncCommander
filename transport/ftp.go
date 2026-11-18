@@ -278,7 +278,10 @@ func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *t
 		}
 		return c, nil
 	}
-	opts := []ftp.DialOption{ftp.DialWithTimeout(10 * time.Second), ftp.DialWithDialFunc(dialFunc)}
+	// With writing MDTM, a server with no MFMT that offers MDTM sets times
+	// with "MDTM time path", as vsftpd does (mdtm_write): SetTimes failed
+	// on every vsftpd upload (L17). The library sends MFMT where it can.
+	opts := []ftp.DialOption{ftp.DialWithTimeout(10 * time.Second), ftp.DialWithDialFunc(dialFunc), ftp.DialWithWritingMDTM(true)}
 	if lc != nil {
 		opts = append(opts, ftp.DialWithDebugOutput(lc))
 	}
@@ -591,8 +594,9 @@ func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir stri
 }
 
 // entryLocked is the row of relPath, at p on the server, which a listing or
-// MLST described as e. MLSD and MLST carry exact times; only a listing that
-// came from LIST costs one MDTM, per entry.
+// MLST described as e. MLSD and MLST carry times to the second; only a
+// listing that came from LIST costs one MDTM, per entry. A LIST time with no
+// MDTM is kept to the minute, or the day (listTimeRes).
 func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntry {
 	mode := os.FileMode(0644)
 	switch e.Type {
@@ -603,10 +607,13 @@ func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntr
 	case ftpEntrySpecial:
 		mode = os.ModeIrregular | 0644
 	}
-	modTime := e.Time
-	if b.conn.IsGetTimeSupported() && !b.conn.IsTimePreciseInList() {
-		if t, err := b.conn.GetTime(p); err == nil {
-			modTime = t
+	modTime, res := e.Time, model.TimeSecond
+	if !b.conn.IsTimePreciseInList() {
+		res = listTimeRes(e.Time)
+		if b.conn.IsGetTimeSupported() {
+			if t, err := b.conn.GetTime(p); err == nil {
+				modTime, res = t, model.TimeSecond
+			}
 		}
 	}
 	fe := model.FileEntry{
@@ -614,6 +621,7 @@ func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntr
 		Name:    path.Base(relPath),
 		Size:    int64(e.Size),
 		ModTime: modTime,
+		TimeRes: res,
 		IsDir:   e.Type == ftp.EntryTypeFolder,
 		Mode:    mode,
 	}
@@ -621,6 +629,17 @@ func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntr
 		fe.Name = ""
 	}
 	return fe
+}
+
+// listTimeRes is how exact a time from a LIST line is: "Nov 16 10:00" is
+// to the minute; "Mar  4  2020", for a file more than six months old, is a
+// day, read as its midnight. A time compared to the second was "different"
+// after every copy (L17).
+func listTimeRes(t time.Time) model.TimeRes {
+	if h, m, s := t.Clock(); h == 0 && m == 0 && s == 0 {
+		return model.TimeDay
+	}
+	return model.TimeMinute
 }
 
 // Stat asks for relPath alone. With MLST that is one command on the control
@@ -947,7 +966,7 @@ func (b *FTPBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
 func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
 	err := b.withPrimary(ctx, func() error { return b.conn.SetTime(b.abs(relPath), mtime) })
 	if err != nil {
-		Log.Add("ftp", DirErr, "MFMT "+relPath+": "+err.Error())
+		Log.Add("ftp", DirErr, "setting the mtime of "+relPath+": "+err.Error())
 	}
 	return err
 }

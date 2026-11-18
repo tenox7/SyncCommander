@@ -500,7 +500,7 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 		return
 	}
 	n.Compare.Size = cmpAttr(l.Size == r.Size)
-	n.Compare.ModTime = cmpTime(l.ModTime, r.ModTime, opts)
+	n.Compare.ModTime = cmpModTime(l, r, opts)
 	n.Compare.ATime = cmpTime(l.ATime.Time(), r.ATime.Time(), opts)
 	n.Compare.CTime = cmpTime(l.CTime.Time(), r.CTime.Time(), opts)
 	n.Compare.BirthTime = cmpTime(l.BirthTime.Time(), r.BirthTime.Time(), opts)
@@ -514,6 +514,28 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 const maxZoneShift = 14 * time.Hour
 
 func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
+	return cmpTimeWithin(a, b, 0, opts)
+}
+
+// cmpModTime compares the mtimes of l and r as exactly as both keep them
+// (TimeRes): closer than the coarser one's step is equal. A side whose
+// mtime is not the file's leaves the mtime out of the compare (AttrNA), as
+// a time a side does not know (L17).
+func cmpModTime(l, r *FileEntry, opts CompareOpts) AttrStatus {
+	res := max(l.TimeRes, r.TimeRes)
+	if res == TimeNone {
+		return AttrNA
+	}
+	return cmpTimeWithin(l.ModTime, r.ModTime, res.Step(), opts)
+}
+
+// cmpTimeWithin is cmpTime for times kept to step: closer than step is
+// equal. The window is on the times as listed, not cut to the second: a
+// server that rounds a time up (FAT) is as close as one that cuts it.
+func cmpTimeWithin(a, b time.Time, step time.Duration, opts CompareOpts) AttrStatus {
+	if step > 0 {
+		opts.SubSecond = true
+	}
 	diff := timeDiff(a, b, opts)
 	// With IgnoreTZDST, times a whole number of hours apart are one moment
 	// in two zones: up to maxZoneShift. Further apart, they are two moments
@@ -525,7 +547,10 @@ func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
 			diff = time.Hour - diff
 		}
 	}
-	if opts.TimeGrace {
+	switch {
+	case diff < step:
+		return AttrEqual
+	case opts.TimeGrace:
 		return cmpAttr(diff <= time.Second)
 	}
 	return cmpAttr(diff == 0)
@@ -984,15 +1009,15 @@ func WalkCopyFiles(node *TreeNode, opts *CompareOpts, leftToRight bool, visit fu
 // OverwritesNewer says why a copy of n would put an older or smaller file
 // over the destination's: the file there is "newer", "larger", or "newer
 // and larger"; or "" (F16). A time the compare calls equal (to the second,
-// within the grace, a time-zone shift) is not newer, nor is a time a side
-// does not know.
+// within the grace, a time-zone shift, within what a side keeps of it) is
+// not newer, nor is a time a side does not know, nor an upload time.
 func OverwritesNewer(n *TreeNode, leftToRight bool, opts CompareOpts) string {
 	from, to := CopySides(leftToRight)
 	src, dst := n.Sides[from].Entry, n.Sides[to].Entry
 	if src == nil || dst == nil || src.IsDir || dst.IsDir || src.IsSpecial() || dst.IsSpecial() {
 		return ""
 	}
-	newer := !src.ModTime.IsZero() && dst.ModTime.After(src.ModTime) && cmpTime(src.ModTime, dst.ModTime, opts) == AttrDifferent
+	newer := !src.ModTime.IsZero() && dst.ModTime.After(src.ModTime) && cmpModTime(src, dst, opts) == AttrDifferent
 	larger := dst.Size > src.Size
 	switch {
 	case newer && larger:

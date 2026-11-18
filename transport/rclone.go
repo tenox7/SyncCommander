@@ -53,6 +53,7 @@ type RcloneBackend struct {
 	dirs      sync.Map // directories known to exist
 	putMtime  sync.Map // mtime stamped at Put, so SetTimes can skip a redundant round trip
 	closeOnce sync.Once
+	timeRes   model.TimeRes // how exact the listed mtimes are (rcloneTimeRes)
 }
 
 var rcloneInit sync.Once
@@ -234,6 +235,7 @@ func NewRcloneBackend(ctx context.Context, rawURL string, insecure bool) (*Rclon
 		listCache: newListCache(),
 	}
 	b.avail = rcloneHashNames(f.Hashes())
+	b.timeRes = rcloneTimeRes(b.feat.SlowModTime && ci.UseServerModTime, f.Precision())
 	Log.Add("rclone", DirIn, fmt.Sprintf("%s: %s hashes=%v listR=%v move=%v dirmove=%v",
 		b.url, f.String(), b.avail, b.canListRecursive(), b.feat.Move != nil, b.feat.DirMove != nil))
 	if b.feat.SlowModTime && ci.UseServerModTime {
@@ -378,7 +380,7 @@ func (b *RcloneBackend) convert(ctx context.Context, dirEntries fs.DirEntries) [
 			e.Size = 0
 			e.Mode = os.ModeDir | 0755
 		}
-		e.ModTime = d.ModTime(ctx)
+		e.ModTime, e.TimeRes = d.ModTime(ctx), b.timeRes
 		entries = append(entries, e)
 	}
 	return entries
@@ -841,6 +843,19 @@ func isRcloneSecret(key string) bool {
 		}
 	}
 	return false
+}
+
+// rcloneTimeRes is how exact a remote's listed mtimes are. With
+// UseServerModTime on a remote whose own mtime costs a request per file
+// (S3, Swift: SlowModTime), the listed time is the upload's, which no copy
+// sets: no time of the file's, so the compare leaves it out. It was
+// compared, and every file copied there was "different" after the copy
+// (L17).
+func rcloneTimeRes(uploadTime bool, precision time.Duration) model.TimeRes {
+	if uploadTime {
+		return model.TimeNone
+	}
+	return model.TimeResOf(precision)
 }
 
 // synthDirEntry is a directory sc invents for a path that only ever appeared
