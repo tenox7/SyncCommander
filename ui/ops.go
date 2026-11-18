@@ -278,7 +278,7 @@ func (m *Model) checksumNode(node *model.TreeNode) tea.Cmd {
 }
 
 func (m *Model) rescanNode(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
-	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
+	opts, scanner, target := *m.cmpOpts, m.scanner, m.targetLabel(node)
 	return m.startOp(opScan, func(ctx context.Context) {
 		timeScan("rescan", target, func() { scanner.RescanNode(ctx, node, opts, changed) })
 	})
@@ -292,8 +292,11 @@ func (m *Model) rescanCursor() tea.Cmd {
 		return nil
 	}
 	opts, scanner, node := *m.cmpOpts, m.scanner, row.Node
-	target := scanTargetLabel(node)
-	rescanCursor := node != nil && node.RelPath != ""
+	var target string
+	var rescanCursor bool
+	m.readTree(func(*model.TreeNode) {
+		target, rescanCursor = scanTargetLabel(node), node != nil && node.RelPath != ""
+	})
 	return m.startOp(opScan, func(ctx context.Context) {
 		timeScan("rescan", target, func() {
 			if rescanCursor {
@@ -317,12 +320,23 @@ func (m *Model) deepRescanAll() tea.Cmd {
 }
 
 func (m *Model) listNode(node *model.TreeNode) tea.Cmd {
-	opts, scanner, target := *m.cmpOpts, m.scanner, scanTargetLabel(node)
+	opts, scanner, target := *m.cmpOpts, m.scanner, m.targetLabel(node)
 	return m.startOp(opScan, func(ctx context.Context) {
 		timeScan("list", target, func() { scanner.ListNode(ctx, node, opts) })
 	})
 }
 
+// targetLabel is node's path as the log names it, read under the tree
+// lock. It was read without it, and a rename writes RelPath from its own
+// goroutine: a rescan that waited behind a scan starts while a rename may
+// run (U25).
+func (m *Model) targetLabel(node *model.TreeNode) string {
+	var label string
+	m.readTree(func(*model.TreeNode) { label = scanTargetLabel(node) })
+	return label
+}
+
+// scanTargetLabel is targetLabel for a caller that holds the lock.
 func scanTargetLabel(node *model.TreeNode) string {
 	if node == nil || node.RelPath == "" {
 		return "/"

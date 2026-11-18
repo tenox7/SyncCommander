@@ -59,12 +59,26 @@ func notFolderOnBoth(relPath string, left, right *model.FileEntry) string {
 	return ""
 }
 
-// Close closes the backends the panes hold now. A reopen may have replaced
-// the ones the program started with, and an rclone remote finishes its work
-// (dropbox's batched uploads) only when it is closed.
+// Close closes the backends the panes hold now, and waits for those a
+// reopen replaced to finish closing. A reopen may have replaced the ones
+// the program started with, and an rclone remote finishes its work
+// (dropbox's batched uploads) only when it is closed: one replaced just
+// before quitting closed in the background, and the program ended without
+// waiting for it (U25).
 func (m *Model) Close() {
 	transport.CloseBackend(m.left.backend)
 	transport.CloseBackend(m.right.backend)
+	m.closing.Wait()
+}
+
+// closeLater closes a backend a reopen replaced, off the UI goroutine, so
+// a slow close does not hold the screen. Close waits for it.
+func (m *Model) closeLater(b model.Backend) {
+	m.closing.Add(1)
+	go func() {
+		defer m.closing.Done()
+		transport.CloseBackend(b)
+	}()
 }
 
 // reopenOrExplain reopens both sides or, when one cannot be opened, shows the
@@ -114,13 +128,11 @@ func (m *Model) reopenBackends(leftPath, rightPath string) (tea.Cmd, string) {
 	m.cancelOps()
 
 	if newLeft != nil {
-		oldLeft := m.left.backend
-		go func() { transport.CloseBackend(oldLeft) }()
+		m.closeLater(m.left.backend)
 		m.left.backend, m.left.arg = newLeft, leftPath
 	}
 	if newRight != nil {
-		oldRight := m.right.backend
-		go func() { transport.CloseBackend(oldRight) }()
+		m.closeLater(m.right.backend)
 		m.right.backend, m.right.arg = newRight, rightPath
 	}
 

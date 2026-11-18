@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +33,7 @@ type pane struct {
 type Model struct {
 	left, right pane
 	insecure    bool
+	closing     sync.WaitGroup // backends a reopen replaced, still closing (closeLater)
 
 	scanner      *model.Scanner
 	cmpOpts      *model.CompareOpts

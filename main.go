@@ -141,10 +141,12 @@ func main() {
 	}
 	right, err := transport.TryOpenBackend(rightPath, *insecure, *parallel)
 	if err != nil {
+		transport.CloseBackend(left)
 		fail(err)
 	}
-	defer transport.CloseBackend(left)
-	defer transport.CloseBackend(right)
+	// The model owns the backends from here: it closes those its panes
+	// hold, and waits for those a reopen replaced. main closed the first
+	// pair as well, so after a reopen they were closed twice (U25).
 	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
 	progOpts := []tea.ProgramOption{tea.WithAltScreen()}
 	if *mouse {
@@ -154,11 +156,9 @@ func main() {
 	// rclone still ends the process on a few errors it calls fatal: the
 	// terminal is given back first, so the shell works and the reason shows.
 	transport.OnRcloneFatal(func() { _ = p.ReleaseTerminal() })
-	final, err := p.Run()
+	_, err = p.Run()
 	transport.OnRcloneFatal(nil)
-	if m, ok := final.(*ui.Model); ok {
-		m.Close()
-	}
+	mdl.Close()
 	if err != nil {
 		fail(err)
 	}
