@@ -365,18 +365,44 @@ func namesUnder(relPath string, files []string) ([]string, error) {
 	return names, nil
 }
 
-// sendFile pushes one local file into relPath's directory. prep runs after the
-// mkdir in the same round trip; the push credits adder as bytes flow and is
-// settled against budget afterwards.
+// sendFile pushes one local file into relPath's directory, which mkdir -p
+// makes first unless a Mkdir or a send made or went into it (sawDir). prep
+// runs after the mkdir in the same round trip; the push credits adder as
+// bytes flow and is settled against budget afterwards. A folder noted may
+// have been removed from elsewhere since: a plain send into one that fails
+// where the folder is gone makes it and sends again, once. No later try
+// would: "no such file" fails a file for good.
 func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath, prep string, extraFlags []string, adder *CappedAdder, budget int64) error {
-	remoteDest := b.abs(parentDir(relPath))
-	cmd := "mkdir -p " + shellQuote(remoteDest)
+	dir := parentDir(relPath)
+	remoteDest := b.abs(dir)
+	known := b.knowsDir(dir)
+	var cmds []string
+	if !known {
+		cmds = append(cmds, "mkdir -p "+shellQuote(remoteDest))
+	}
 	if prep != "" {
-		cmd += " && " + prep
+		cmds = append(cmds, prep)
 	}
-	if _, err := b.run(ctx, cmd); err != nil {
-		return err
+	if len(cmds) > 0 {
+		if _, err := b.run(ctx, strings.Join(cmds, " && ")); err != nil {
+			return err
+		}
 	}
+	err := b.pushFile(ctx, label, srcPath, relPath, remoteDest, extraFlags, adder, budget)
+	if err != nil && known && prep == "" && ctx.Err() == nil && b.remadeDir(ctx, dir) {
+		if adder != nil { // the failed push took back what it credited
+			adder = NewCappedAdder(adder.target, adder.cap)
+		}
+		err = b.pushFile(ctx, label, srcPath, relPath, remoteDest, extraFlags, adder, budget)
+	}
+	if err == nil {
+		b.sawDir(dir)
+	}
+	return err
+}
+
+// pushFile is one rsync session that sends srcPath into remoteDest.
+func (b *RsyncSSHBackend) pushFile(ctx context.Context, label, srcPath, relPath, remoteDest string, extraFlags []string, adder *CappedAdder, budget int64) error {
 	client, err := newRsyncClient(append(transferFlags(), extraFlags...), rsyncclient.WithSender())
 	if err != nil {
 		return err
@@ -385,6 +411,22 @@ func (b *RsyncSSHBackend) sendFile(ctx context.Context, label, srcPath, relPath,
 	b.listCache.invalidateAncestors(relPath)
 	settlePush(ctx, adder, budget, err)
 	return err
+}
+
+// remadeWord is the last line remadeDir's command prints when it made the
+// folder; a login script may print lines ahead of it.
+const remadeWord = "sc-made"
+
+// remadeDir makes dir when it is not there, and reports whether it was
+// gone.
+func (b *RsyncSSHBackend) remadeDir(ctx context.Context, dir string) bool {
+	d := shellQuote(b.abs(dir))
+	out, err := b.run(ctx, "[ -d "+d+" ] || { mkdir -p "+d+" && echo "+remadeWord+"; }")
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return lines[len(lines)-1] == remadeWord
 }
 
 // SendLocalFile sends an existing local file directly, no tmp copy. The push

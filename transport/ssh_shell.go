@@ -39,6 +39,37 @@ type sshShell struct {
 	// noBatch: an answer to ChecksumFiles was not the one asked for, so
 	// the connection sums file by file.
 	noBatch atomic.Bool
+	// dirs holds the folders a Mkdir or a send made or went into, and the
+	// folders above them: a send into one runs no mkdir (sawDir).
+	dirs sync.Map
+}
+
+// sawDir notes relDir, and each folder above it up to the base, as there.
+// rsync+ssh ran mkdir -p in an exec of its own before each file it sent:
+// a round trip per file, 14 hours for 1M files at 50 ms (R16).
+func (s *sshShell) sawDir(relDir string) {
+	for p := cleanRel(relDir); ; p = parentDir(p) {
+		s.dirs.Store(p, true)
+		if p == "" {
+			return
+		}
+	}
+}
+
+// knowsDir reports whether relDir is a folder sawDir noted.
+func (s *sshShell) knowsDir(relDir string) bool {
+	_, ok := s.dirs.Load(cleanRel(relDir))
+	return ok
+}
+
+// forgetDirs drops the folders noted, after a remove or a rename of relPath
+// when it was one of them: those under it are not there now. All go, so
+// the cost does not grow with the folders noted: a send into each runs
+// one mkdir again. A folder not noted has none noted under it.
+func (s *sshShell) forgetDirs(relPath string) {
+	if s.knowsDir(relPath) {
+		s.dirs.Clear()
+	}
 }
 
 func (s *sshShell) BasePath() string { return s.display }
@@ -963,6 +994,9 @@ func (s *sshShell) Mkdir(ctx context.Context, relPath string, mode os.FileMode) 
 		Log.Add(s.proto, DirWarn, fmt.Sprintf("MKDIR %s: chmod %04o: %v", relPath, mode.Perm(), err))
 		err = nil
 	}
+	if err == nil {
+		s.sawDir(relPath)
+	}
 	return err
 }
 
@@ -982,6 +1016,7 @@ func (s *sshShell) Rename(ctx context.Context, oldRel, newRel string) error {
 	}
 	_, err := s.run(ctx, renameCmd(s.abs(oldRel), s.abs(newRel)))
 	s.listCache.forgetRenamed(oldRel, newRel)
+	s.forgetDirs(oldRel)
 	return err
 }
 
@@ -997,6 +1032,7 @@ func (s *sshShell) RemoveAll(ctx context.Context, relPath string) error {
 	}
 	err := s.rmRF(ctx, relPath)
 	s.listCache.forgetRemoved(relPath)
+	s.forgetDirs(relPath)
 	return err
 }
 
