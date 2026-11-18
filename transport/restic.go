@@ -681,17 +681,5 @@ func (b *ResticBackend) OpenAt(ctx context.Context, relPath string, offset int64
 	if err != nil {
 		return nil, err
 	}
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
-		return resp.Body, nil
-	case http.StatusOK:
-		if _, err := io.CopyN(io.Discard, resp.Body, offset); err != nil {
-			drainClose(resp.Body)
-			return nil, err
-		}
-		return resp.Body, nil
-	default:
-		drainClose(resp.Body)
-		return nil, statusErr(resp, "restic: GET %s @%d", relPath, offset)
-	}
+	return rangeBody(ctx, resp, fmt.Sprintf("restic: GET %s @%d", relPath, offset), offset)
 }

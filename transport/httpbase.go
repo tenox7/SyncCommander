@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -311,6 +312,69 @@ func (e *statusError) final() bool {
 // "what: 404 Not Found".
 func statusErr(resp *http.Response, what string, args ...any) error {
 	return &statusError{code: resp.StatusCode, msg: fmt.Sprintf(what, args...) + ": " + resp.Status}
+}
+
+// rangeBody is the body of resp, the answer to a GET (what) of a file
+// from offset. The answer was not checked (W-L1): a 206 that started
+// elsewhere was taken for the rest, and the file came out with a part
+// twice; the prefix of a 200 was dropped with no sign of work, and the
+// stall guard ended a long one. Now a 206 must say it starts at offset,
+// and a 200 is the whole file, its prefix dropped with the guard touched
+// at each read. A 206 from elsewhere, a 416 and a file that ends before
+// offset are ErrUnsupported: a resume copies the whole file instead.
+func rangeBody(ctx context.Context, resp *http.Response, what string, offset int64) (io.ReadCloser, error) {
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		cr := resp.Header.Get("Content-Range")
+		if start, ok := rangeStart(cr); !ok || start != offset {
+			drainClose(resp.Body)
+			return nil, fmt.Errorf("%s: the server sent the part %q, not the one from %d: %w", what, cr, offset, ErrUnsupported)
+		}
+		return resp.Body, nil
+	case http.StatusOK:
+		if _, err := io.CopyN(io.Discard, touchReader{ctx, resp.Body}, offset); err != nil {
+			drainClose(resp.Body)
+			if err == io.EOF {
+				return nil, fmt.Errorf("%s: the file ends before %d: %w", what, offset, ErrUnsupported)
+			}
+			return nil, err
+		}
+		return resp.Body, nil
+	case http.StatusRequestedRangeNotSatisfiable:
+		drainClose(resp.Body)
+		return nil, fmt.Errorf("%w: %w", statusErr(resp, "%s", what), ErrUnsupported)
+	}
+	drainClose(resp.Body)
+	return nil, statusErr(resp, "%s", what)
+}
+
+// rangeStart is the first byte of a Content-Range, "bytes 6-9/10".
+func rangeStart(cr string) (int64, bool) {
+	rest, ok := strings.CutPrefix(cr, "bytes ")
+	if !ok {
+		return 0, false
+	}
+	first, _, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(first, 10, 64)
+	return n, err == nil && n >= 0
+}
+
+// touchReader touches the stall guard over ctx at each read that gives
+// bytes: work no progress shows.
+type touchReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (t touchReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		Touch(t.ctx)
+	}
+	return n, err
 }
 
 // putBody is src as the body of a PUT or POST of size bytes, 0 or less
