@@ -535,8 +535,12 @@ func appendVerifySilence(offset int64) time.Duration { return 2 * HashTime(offse
 
 // stageUpload spools src into tmpFile so rsync can send from disk, crediting
 // half the progress budget for the read (the push credits the rest). Returns
-// the push-phase adder and its budget, nil without progress.
+// the push-phase adder and its budget, nil without progress. A file the
+// temp folder has no room for fails before a byte is read (roomFor).
 func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.PutParams) (*CappedAdder, int64, error) {
+	if err := roomFor(filepath.Dir(tmpFile), p.Size); err != nil {
+		return nil, 0, err
+	}
 	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, p.Mode)
 	if err != nil {
 		return nil, 0, err
@@ -551,13 +555,17 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.Put
 		readAdder = NewCappedAdder(counter, readBudget)
 		pushAdder = NewCappedAdder(counter, pushBudget)
 	}
-	var dst io.Writer = f
+	spool := &spoolWriter{w: f}
+	var dst io.Writer = spool
 	if readAdder != nil {
-		dst = &CountingWriter{W: f, Adder: readAdder}
+		dst = &CountingWriter{W: spool, Adder: readAdder}
 	}
 	_, err = io.Copy(dst, ActiveReader(ctx, src))
+	if spool.err != nil {
+		err = tempFull(err)
+	}
 	if cerr := f.Close(); err == nil {
-		err = cerr
+		err = tempFull(cerr)
 	}
 	if err == nil {
 		err = stampModTime(tmpFile, p.ModTime)
@@ -577,6 +585,9 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.Put
 // shows it (the engine credited the prefix, the push credits the rest), so
 // each read tells the stall guard it works (R7).
 func spoolTo(ctx context.Context, src model.RangeOpener, path string, p model.PutParams) error {
+	if err := roomFor(filepath.Dir(path), src.Size()); err != nil {
+		return err
+	}
 	rd, err := src.Open(ctx)
 	if err != nil {
 		return err
@@ -586,9 +597,13 @@ func spoolTo(ctx context.Context, src model.RangeOpener, path string, p model.Pu
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(f, ActiveReader(ctx, rd))
+	spool := &spoolWriter{w: f}
+	n, err := io.Copy(spool, ActiveReader(ctx, rd))
+	if spool.err != nil {
+		err = tempFull(err)
+	}
 	if cerr := f.Close(); err == nil {
-		err = cerr
+		err = tempFull(cerr)
 	}
 	if cerr := rd.Close(); err == nil && cerr != nil {
 		err = cerr

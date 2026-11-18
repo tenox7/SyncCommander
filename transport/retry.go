@@ -188,7 +188,7 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) || errors.Is(err, ErrTempRoom) {
 		return true
 	}
 	if GivesUp(err) {
