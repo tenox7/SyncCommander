@@ -249,4 +249,4 @@ require (
 	storj.io/uplink v1.14.5 // indirect
 )
 
-replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20261118114119-b6c94b56da17 // branch: main
+replace github.com/gokrazy/rsync => github.com/tenox7/gorsync v0.0.0-20261118115630-e5e717e1eedf // branch: main
