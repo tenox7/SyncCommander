@@ -885,13 +885,22 @@ func (s *sshShell) ChecksumRange(ctx context.Context, relPath, algo string, off,
 
 const touchLayout = "2006-01-02T15:04:05.000000000Z"
 
+// touchPOSIX is a time as touch -t takes it, POSIX's form: to the second,
+// in the zone TZ names.
+const touchPOSIX = "200601021504.05"
+
+// SetTimes sets relPath's times with touch -d, to the nanosecond. A touch
+// that does not take -d so (busybox, older Unix) gets -t in UTC, to the
+// second: the command failed, the times stayed those of the copy, and the
+// next compare found every file different (S20).
 func (s *sshShell) SetTimes(ctx context.Context, relPath string, mtime, atime, _ time.Time) error {
 	if atime.IsZero() {
 		atime = mtime
 	}
 	fp := shellQuote(s.abs(relPath))
-	_, err := s.run(ctx, fmt.Sprintf("touch -m -d %s %s && touch -a -d %s %s",
-		shellQuote(mtime.UTC().Format(touchLayout)), fp, shellQuote(atime.UTC().Format(touchLayout)), fp))
+	m, a := mtime.UTC(), atime.UTC()
+	_, err := s.run(ctx, fmt.Sprintf("{ touch -m -d %s %s && touch -a -d %s %s; } 2>/dev/null || { TZ=UTC0 touch -m -t %s %s && TZ=UTC0 touch -a -t %s %s; }",
+		shellQuote(m.Format(touchLayout)), fp, shellQuote(a.Format(touchLayout)), fp, m.Format(touchPOSIX), fp, a.Format(touchPOSIX), fp))
 	s.listCache.invalidate(parentDir(relPath))
 	return err
 }
@@ -900,10 +909,16 @@ func (s *sshShell) Mkdir(ctx context.Context, relPath string, mode os.FileMode) 
 	fp := shellQuote(s.abs(relPath))
 	cmd := "mkdir -p " + fp
 	if mode != 0 {
-		cmd += fmt.Sprintf(" && chmod %04o %s", mode.Perm(), fp)
+		cmd += fmt.Sprintf(" && { chmod %04o %s || exit %d; }", mode.Perm(), fp, exitModeNotSet)
 	}
 	_, err := s.run(ctx, cmd)
 	s.listCache.invalidateAncestors(relPath)
+	if exitCode(err) == exitModeNotSet {
+		// The folder is made: a mode the server will not take is no
+		// failure, as over SFTP (S20).
+		Log.Add(s.proto, DirWarn, fmt.Sprintf("MKDIR %s: chmod %04o: %v", relPath, mode.Perm(), err))
+		err = nil
+	}
 	return err
 }
 

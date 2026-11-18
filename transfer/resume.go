@@ -245,7 +245,8 @@ func resumeAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPath
 		bytes.Add(-added.Load())
 		baseBytes.Add(-offset)
 	}
-	if err := resumer.AppendFrom(ctx, dstPath, opener, putParams(srcEntry, mode), offset); err != nil {
+	// A mode the destination would not take is noted, not failed (S20).
+	if err := modeTaken(ctx, resumer.AppendFrom(ctx, dstPath, opener, putParams(srcEntry, mode), offset)); err != nil {
 		rollback()
 		return err
 	}
@@ -295,8 +296,9 @@ func fullCopyAttempt(ctx context.Context, src, dst model.Backend, relPath, dstPa
 	counted := &countingReader{r: srcReader}
 	srcReader = &cancelReader{r: counted, ctx: ctx}
 	// This try opened the source itself, so a failure after the first byte
-	// is the copy layer's to retry, with the source opened again (F29).
-	err = transport.Unconsumed(dst.CopyFrom(ctx, dstPath, srcReader, putParams(srcEntry, mode)))
+	// is the copy layer's to retry, with the source opened again (F29). A
+	// mode the destination would not take is noted, not failed (S20).
+	err = modeTaken(ctx, transport.Unconsumed(dst.CopyFrom(ctx, dstPath, srcReader, putParams(srcEntry, mode))))
 	if err == nil {
 		// A destination that takes the listed number of bytes and stops
 		// (rclone's Put is told the size) leaves the rest of a source that

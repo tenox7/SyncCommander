@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"sc/model"
 )
 
 // CancelCloser starts a watcher that closes c when ctx is canceled. The
@@ -231,7 +233,9 @@ type retryOwnerKey struct{}
 
 // Retry runs op up to MaxRetries+1 times with exponential backoff. Returns
 // immediately if ctx is canceled. Each retry is logged to the global Log;
-// a missing capability is reported to the caller without a FAIL line.
+// a missing capability, and a mode the destination would not take after
+// the work was done (model.ErrModeNotSet), are reported to the caller
+// without a FAIL line and without another try.
 //
 // The first Retry on a call path owns the tries (D4): op gets a ctx that
 // says so, and a Retry under it, as a backend call inside a copy that is
@@ -260,7 +264,7 @@ func Retry(ctx context.Context, proto, what string, op func(ctx context.Context)
 			return ctx.Err()
 		}
 		var consumed *consumedError
-		if errors.Is(err, ErrUnsupported) || errors.As(err, &consumed) {
+		if errors.Is(err, ErrUnsupported) || errors.Is(err, model.ErrModeNotSet) || errors.As(err, &consumed) {
 			return err
 		}
 		if isPermanentError(err) {

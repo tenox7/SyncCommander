@@ -126,7 +126,9 @@ func TestViewShowsOnlyTheOpenModal(t *testing.T) {
 // still has room for the files in flight on an 80-column screen.
 func TestCopyPopupSaysFilesWithoutTimes(t *testing.T) {
 	out := RenderCopyPopup(CopyPopupData{DoneFiles: 3, TotalFiles: 9, FailedFiles: 1, TimesNotSet: 2, InFlight: 1, Parallel: 4, TotalElapsed: time.Second}, popupWidth(80))
-	if !strings.Contains(out, "1 FAILED  2 NO TIMES  [1/4 in flight]") {
+	// The count has a row of its own since S20, beside the files without
+	// their modes.
+	if !strings.Contains(out, "1 FAILED  [1/4 in flight]") || !strings.Contains(out, "│ 2 NO TIMES ") {
 		t.Errorf("the popup does not count both, or cuts the header:\n%s", out)
 	}
 	for _, line := range strings.Split(out, "\n") {

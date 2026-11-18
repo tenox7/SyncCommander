@@ -182,7 +182,9 @@ type PutParams struct {
 	// leaves the size out costs a spool, never a short file.
 	Size int64
 	// Mode is the new file's mode, for a backend that sets one; its
-	// permission bits are used.
+	// permission bits are used. A backend that writes the file but cannot
+	// give it the mode returns an error that wraps ErrModeNotSet: the
+	// bytes are in place.
 	Mode os.FileMode
 	// ModTime is the source's modification time, zero when not known. A
 	// backend that stores it with the data does; SetTimes follows anyway.
@@ -265,7 +267,9 @@ type PartWriter interface {
 	PartSize(ctx context.Context, relPath string) (int64, error)
 	// CommitPart makes relPath's part durable, gives it mode, and renames
 	// it over relPath. A file or a link at relPath is replaced, a folder
-	// is not.
+	// is not. A mode the destination will not take does not keep the part
+	// from its name: the part is renamed, and the error wraps
+	// ErrModeNotSet.
 	CommitPart(ctx context.Context, relPath string, mode os.FileMode) error
 }
 
@@ -273,6 +277,14 @@ type PartWriter interface {
 // part's name, such as a link. The name belongs to sc, so the engine removes
 // it and copies from the start.
 var ErrPartInTheWay = errors.New("not a part file")
+
+// ErrModeNotSet is a write or a commit that put the file in place but could
+// not give it its mode: an SFTP server that refuses SETSTAT, a disk with no
+// modes. The copy is no failure, as one whose times could not be set is
+// none: it is counted, and never sent again. A failed chmod failed the
+// copy, which sent the file up to six times and could leave it under its
+// part's name (S20).
+var ErrModeNotSet = errors.New("mode not set")
 
 // RegionChecksummer is implemented by backends that can checksum n bytes of a
 // file from off with algo, as Checksum sums a whole file. Before resuming

@@ -40,6 +40,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 	// ctx from here on says this Retry owns the tries: a backend call under
 	// it runs once, and a failed one fails this try (D4).
 	timesSet := true // by the try that went through
+	ctx, modes := withModeNote(ctx)
 	err = transport.Retry(ctx, "copy", "copy "+f.relPath, func(ctx context.Context) error {
 		attempt++
 		bytes0, base0 := slotBytes.Load(), slotBase.Load()
@@ -66,7 +67,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 			}
 		}
 		if err == nil {
-			err = pw.CommitPart(ctx, f.relPath, src.Mode)
+			err = modeTaken(ctx, pw.CommitPart(ctx, f.relPath, src.Mode))
 		}
 		if err != nil {
 			// What this try credited is undone; the next one counts again.
@@ -79,6 +80,9 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 	})
 	if err == nil && !timesSet {
 		c.p.TimesNotSet.Add(1)
+	}
+	if err == nil {
+		c.countMode(f.relPath, modes)
 	}
 	return resumed, err
 }

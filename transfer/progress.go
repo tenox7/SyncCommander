@@ -17,6 +17,7 @@ type Progress struct {
 	Done               atomic.Int64
 	Failed             atomic.Int64
 	TimesNotSet        atomic.Int64 // copied, but not their times: no failure, a mirror still runs (F17)
+	ModesNotSet        atomic.Int64 // copied, but not their modes: no failure either (S20)
 	InFlight           atomic.Int64
 	Parallel           atomic.Int64
 	Batched            atomic.Bool
@@ -76,7 +77,7 @@ type SlotSnapshot struct {
 // Reset rearms every counter for a new transfer, so the popup never shows the
 // previous copy's numbers while the subtree is still being listed.
 func (p *Progress) Reset(parallel int, leftToRight bool) {
-	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.TimesNotSet, &p.InFlight, &p.Bytes, &p.BaseBytes,
+	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.TimesNotSet, &p.ModesNotSet, &p.InFlight, &p.Bytes, &p.BaseBytes,
 		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStart, &p.FileStartBytes, &p.FileStartBaseBytes} {
 		c.Store(0)
 	}

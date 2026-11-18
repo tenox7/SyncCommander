@@ -323,6 +323,7 @@ func (b *SFTPBackend) SetTimes(ctx context.Context, relPath string, mtime, atime
 
 // put writes relPath on a pooled connection and then applies mode: a new
 // body when offset < 0, else the rest of the file after its offset bytes.
+// A mode the server will not take is ErrModeNotSet, the bytes in place.
 // An append never creates the file and refuses one of another size (L14,
 // S8): writing past the end of a shorter file leaves a gap of zeros. The
 // source opens once the file is ready. The data is synced when the server
@@ -371,7 +372,11 @@ func (b *SFTPBackend) put(ctx context.Context, relPath string, offset int64, mod
 			err = cerr
 		}
 		if err == nil {
-			err = c.Chmod(fullPath, mode)
+			// The bytes are in place: a mode the server will not take
+			// is no reason to send them again (S20).
+			if cerr := c.Chmod(fullPath, mode); cerr != nil {
+				err = fmt.Errorf("sftp: chmod %04o %s: %w: %w", mode.Perm(), relPath, model.ErrModeNotSet, cerr)
+			}
 		}
 		return err
 	})
@@ -446,11 +451,23 @@ func (b *SFTPBackend) CommitPart(ctx context.Context, relPath string, mode os.Fi
 
 func (b *SFTPBackend) commitPart(c *sftp.Client, partRel, relPath string, mode os.FileMode) error {
 	part, final := b.abs(partRel), b.abs(relPath)
+	// A mode the server will not take does not keep the part from its name
+	// (S20).
+	var modeErr error
 	if model.PartMode(mode) != mode.Perm() {
 		if err := c.Chmod(part, mode); err != nil {
-			return err
+			modeErr = fmt.Errorf("sftp: chmod %04o %s: %w: %w", mode.Perm(), relPath, model.ErrModeNotSet, err)
 		}
 	}
+	if err := renamePart(c, part, final); err != nil {
+		return err
+	}
+	return modeErr
+}
+
+// renamePart renames part over final: a file or a link there is replaced,
+// a folder is not.
+func renamePart(c *sftp.Client, part, final string) error {
 	folder := func() error {
 		if fi, err := c.Lstat(final); err == nil && fi.IsDir() {
 			return fmt.Errorf("sftp: %s is a folder: %w", final, fs.ErrExist)
@@ -517,7 +534,11 @@ func (b *SFTPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMod
 			return err
 		}
 		if mode != 0 {
-			_ = c.Chmod(fullPath, mode.Perm())
+			// The folder is made: a mode the server will not take is
+			// no failure (S20).
+			if err := c.Chmod(fullPath, mode.Perm()); err != nil {
+				Log.Add("sftp", DirWarn, fmt.Sprintf("MKDIR %s: chmod %04o: %v", relPath, mode.Perm(), err))
+			}
 		}
 		return nil
 	})

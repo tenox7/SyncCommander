@@ -182,6 +182,9 @@ func Copy(ctx context.Context, req Request) Result {
 		// WARN: the copies went through; each file's own ERR line says why.
 		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY: %d file(s) copied without their times: they show as different, and the next copy sends them again", n))
 	}
+	if n := p.ModesNotSet.Load(); n > 0 {
+		transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("COPY: %d file(s) copied without their modes: the destination would not take them", n))
+	}
 	// Batch rewrites every file in the subtree, not just the diff set, so the
 	// whole subtree's cached checksums go rather than the diff paths alone.
 	var changedDirs []string
@@ -630,7 +633,10 @@ func (c *copier) copyOne(f item) {
 	fileCtx = transport.ContextWithProgressBudget(fileCtx, srcEntry.Size)
 
 	verify := resumeVerifier(c.req.VerifyResume, c.req.Scanner, c.src, c.dst, f.relPath, srcEntry.Size)
+	// A copy into a part keeps its own note.
+	fileCtx, modes := withModeNote(fileCtx)
 	finish := func(how string) {
+		c.countMode(f.relPath, modes)
 		// A destination that keeps no times (restic) says so for every file.
 		if hasTime(srcEntry) {
 			if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil && !errors.Is(err, transport.ErrUnsupported) {

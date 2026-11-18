@@ -386,11 +386,20 @@ func (b *LocalBackend) CommitPart(_ context.Context, relPath string, mode os.Fil
 	if fi, err := os.Lstat(final); err == nil && fi.IsDir() {
 		return fmt.Errorf("local: %s is a folder: %w", final, fs.ErrExist)
 	}
-	if err := os.Chmod(part, mode.Perm()&^umask); err != nil {
+	// A mode the disk will not take (FAT, some network shares) does not
+	// keep the part from its name (S20).
+	cerr := chmodFile(part, mode.Perm()&^umask)
+	if err := os.Rename(part, final); err != nil {
 		return err
 	}
-	return os.Rename(part, final)
+	if cerr != nil {
+		return fmt.Errorf("local: %s: %w: %w", relPath, model.ErrModeNotSet, cerr)
+	}
+	return nil
 }
+
+// chmodFile is os.Chmod. A test makes it fail, as a disk with no modes.
+var chmodFile = os.Chmod
 
 func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	return b.OpenAt(ctx, relPath, 0)

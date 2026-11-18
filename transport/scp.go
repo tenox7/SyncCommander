@@ -79,7 +79,17 @@ const (
 	exitNotAtOffset = 75 // the file to append to does not hold offset bytes
 	exitFolder      = 76 // a folder is where the part goes
 	exitNoPart      = 77 // the part to commit is gone
+	exitModeNotSet  = 79 // the bytes or the name are in place, but chmod failed
 )
+
+// modeNotSet is err, the end of a write or a commit, as ErrModeNotSet when
+// only its chmod failed (S20).
+func modeNotSet(proto, relPath string, mode os.FileMode, err error) error {
+	if exitCode(err) != exitModeNotSet {
+		return err
+	}
+	return fmt.Errorf("%s: chmod %04o %s: %w: %w", proto, mode.Perm(), relPath, model.ErrModeNotSet, err)
+}
 
 // exitCode is the status cmd ended with, or -1 when it did not end with one.
 func exitCode(err error) int {
@@ -97,9 +107,12 @@ func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader
 	fp := shellQuote(b.abs(relPath))
 	client, release := b.pool.acquire(ctx)
 	defer release()
-	err := b.exec(ctx, client, fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s", shellQuote(path.Dir(b.abs(relPath))), fp, p.Mode.Perm(), fp), src, nil)
+	// The bytes are in place once cat ends: a mode the server will not
+	// take is no reason to send them again (S20).
+	err := b.exec(ctx, client, fmt.Sprintf("{ mkdir -p %s && cat > %s; } || exit; chmod %04o %s || exit %d",
+		shellQuote(path.Dir(b.abs(relPath))), fp, p.Mode.Perm(), fp, exitModeNotSet), src, nil)
 	b.listCache.invalidateAncestors(relPath)
-	return err
+	return modeNotSet("scp", relPath, p.Mode, err)
 }
 
 // AppendFrom writes the source from offset on at the end of relPath. The
@@ -115,14 +128,14 @@ func (b *SCPBackend) AppendFrom(ctx context.Context, relPath string, src model.R
 	defer rd.Close()
 	client, release := b.pool.acquire(ctx)
 	defer release()
-	cmd := fmt.Sprintf("n=$(wc -c 2>/dev/null < %[1]s) && [ ! -L %[1]s ] && [ $n -eq %[2]d ] || exit %[3]d; cat >> %[1]s && chmod %04[4]o %[1]s",
-		fp, offset, exitNotAtOffset, p.Mode.Perm())
+	cmd := fmt.Sprintf("n=$(wc -c 2>/dev/null < %[1]s) && [ ! -L %[1]s ] && [ $n -eq %[2]d ] || exit %[3]d; cat >> %[1]s || exit; chmod %04[4]o %[1]s || exit %[5]d",
+		fp, offset, exitNotAtOffset, p.Mode.Perm(), exitModeNotSet)
 	err = b.exec(ctx, client, cmd, rd, nil)
 	b.listCache.invalidateAncestors(relPath)
 	if exitCode(err) == exitNotAtOffset {
 		err = fmt.Errorf("scp: %s is not a file of %d bytes to append to: %w", relPath, offset, ErrAppendOffset)
 	}
-	return err
+	return modeNotSet("scp", relPath, p.Mode, err)
 }
 
 // PartSize looks at relPath's part on the server (model.PartWriter).
@@ -158,16 +171,18 @@ func (b *SCPBackend) CommitPart(ctx context.Context, relPath string, mode os.Fil
 	case exitNoPart:
 		err = fmt.Errorf("scp: the part of %s is gone", relPath)
 	}
-	return err
+	return modeNotSet("scp", relPath, mode, err)
 }
 
 func commitCmd(part, final string, mode os.FileMode) string {
-	chmod := ""
+	// A mode the server will not take does not keep the part from its
+	// name (S20): the rename goes on, and the exit status says so.
+	chmod := "m=0; "
 	if model.PartMode(mode) != mode.Perm() {
-		chmod = fmt.Sprintf("chmod %04o %s || exit 1; ", mode.Perm(), shellQuote(part))
+		chmod = fmt.Sprintf("m=0; chmod %04o %s || m=%d; ", mode.Perm(), shellQuote(part), exitModeNotSet)
 	}
 	return fmt.Sprintf("[ -f %[1]s ] && [ ! -L %[1]s ] || exit %[3]d; dd if=/dev/null of=%[1]s conv=notrunc,fsync 2>/dev/null; %[5]s"+
-		"if [ -L %[2]s ]; then rm -f %[2]s || exit 1; elif [ -d %[2]s ]; then exit %[4]d; fi; mv -f %[1]s %[2]s",
+		"if [ -L %[2]s ]; then rm -f %[2]s || exit 1; elif [ -d %[2]s ]; then exit %[4]d; fi; mv -f %[1]s %[2]s || exit; exit $m",
 		shellQuote(part), shellQuote(final), exitNoPart, exitFolder, chmod)
 }
 

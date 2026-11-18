@@ -79,6 +79,7 @@ type CopyPopupData struct {
 	DoneFiles          int64
 	FailedFiles        int64
 	TimesNotSet        int64
+	ModesNotSet        int64
 	TotalFiles         int64
 	InFlight           int64
 	Parallel           int64
@@ -144,9 +145,6 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	if d.FailedFiles > 0 {
 		header += fmt.Sprintf("  %d FAILED", d.FailedFiles)
 	}
-	if d.TimesNotSet > 0 {
-		header += fmt.Sprintf("  %d NO TIMES", d.TimesNotSet)
-	}
 	switch {
 	case d.Batched:
 		header += "  [BATCH]"
@@ -159,6 +157,19 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 
 	var rows []string
 	rows = append(rows, header)
+	// The files copied without their times or modes have a row of their
+	// own: on the header, the two counts left no room for the files in
+	// flight (S20).
+	var notSet []string
+	if d.TimesNotSet > 0 {
+		notSet = append(notSet, fmt.Sprintf("%d NO TIMES", d.TimesNotSet))
+	}
+	if d.ModesNotSet > 0 {
+		notSet = append(notSet, fmt.Sprintf("%d NO MODES", d.ModesNotSet))
+	}
+	if len(notSet) > 0 {
+		rows = append(rows, strings.Join(notSet, "  "))
+	}
 
 	if d.Batched {
 		fileBytes := d.BatchFileBytes
