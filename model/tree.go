@@ -501,9 +501,9 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 	}
 	n.Compare.Size = cmpAttr(l.Size == r.Size)
 	n.Compare.ModTime = cmpModTime(l, r, opts)
-	n.Compare.ATime = cmpTime(l.ATime.Time(), r.ATime.Time(), opts)
-	n.Compare.CTime = cmpTime(l.CTime.Time(), r.CTime.Time(), opts)
-	n.Compare.BirthTime = cmpTime(l.BirthTime.Time(), r.BirthTime.Time(), opts)
+	n.Compare.ATime = cmpKnownTime(l.ATime, r.ATime, opts)
+	n.Compare.CTime = cmpKnownTime(l.CTime, r.CTime, opts)
+	n.Compare.BirthTime = cmpKnownTime(l.BirthTime, r.BirthTime, opts)
 	n.Compare.Mode = cmpAttr(l.Mode == r.Mode)
 }
 
@@ -515,6 +515,19 @@ const maxZoneShift = 14 * time.Hour
 
 func cmpTime(a, b time.Time, opts CompareOpts) AttrStatus {
 	return cmpTimeWithin(a, b, 0, opts)
+}
+
+// cmpKnownTime compares an atime, ctime or birth time. A side that does not
+// have that time leaves it out of the compare (AttrNA), as cmpModTime does
+// a side's mtime that is not the file's. An rsync file list has no atime
+// or ctime, which an rsync+ssh live listing has, and no FTP or WebDAV
+// listing has a birth time: with that time on, every file of such a side
+// was different from its copy anywhere else (R22).
+func cmpKnownTime(a, b UnixNano, opts CompareOpts) AttrStatus {
+	if a.IsZero() || b.IsZero() {
+		return AttrNA
+	}
+	return cmpTime(a.Time(), b.Time(), opts)
 }
 
 // cmpModTime compares the mtimes of l and r as exactly as both keep them

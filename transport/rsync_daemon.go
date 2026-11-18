@@ -51,11 +51,12 @@ func (b *RsyncBackend) daemonHandshake(ctx context.Context, conn io.ReadWriter, 
 		}
 		switch {
 		case strings.HasPrefix(line, "@RSYNCD: AUTHREQD "):
-			if b.pass == "" {
-				return false, errors.New("daemon requires a password: use rsync://user:pass@host/module")
+			pass := b.password()
+			if pass == "" {
+				return false, errors.New("daemon requires a password: use rsync://user:pass@host/module, or set RSYNC_PASSWORD")
 			}
 			challenge := strings.TrimPrefix(line, "@RSYNCD: AUTHREQD ")
-			if _, err := fmt.Fprintf(conn, "%s %s\n", b.authUser(), rsyncAuthHash(b.pass, challenge)); err != nil {
+			if _, err := fmt.Fprintf(conn, "%s %s\n", b.authUser(), rsyncAuthHash(pass, challenge)); err != nil {
 				return false, err
 			}
 		case line == "@RSYNCD: OK":
@@ -102,6 +103,16 @@ func daemonProtocol(greeting string) (int, error) {
 		return 0, fmt.Errorf("invalid daemon greeting %q", greeting)
 	}
 	return v, nil
+}
+
+// password is the URL's password, else RSYNC_PASSWORD, as rsync itself
+// takes it. sc took the URL's only, and a password with a slash in it
+// cannot be written in the URL (R22).
+func (b *RsyncBackend) password() string {
+	if b.pass != "" {
+		return b.pass
+	}
+	return os.Getenv("RSYNC_PASSWORD")
 }
 
 // authUser is the name sent to the daemon: the URL user, else what rsync
