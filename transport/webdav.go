@@ -451,6 +451,11 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 		Log.Add("webdav", DirErr, err.Error())
 		return nil, err
 	}
+	for _, e := range entries {
+		if e.IsDir {
+			b.knowDir(e.RelPath)
+		}
+	}
 	Log.Add("webdav", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
@@ -579,6 +584,9 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 			return fmt.Errorf("the server listed %q, which is not in %s", r.Href, b.pathFor(scope))
 		}
 		b.sums.put(e.RelPath, sums)
+		if e.IsDir {
+			b.knowDir(e.RelPath)
+		}
 		g.add(e)
 		n++
 		return nil
@@ -777,7 +785,8 @@ func (b *WebDAVBackend) proppatchMtime(ctx context.Context, relPath string, mtim
 // CopyFrom PUTs the body with its length, so servers that insist on
 // Content-Length are served and nothing is chunked needlessly. The parent
 // walk is skipped for collections already seen; a MKCOL failure is only a
-// warning here because the PUT's own status is the verdict.
+// warning here because the PUT's own status is the verdict. A PUT that
+// finds its folder not there makes it again (remakeParent).
 func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
@@ -799,6 +808,9 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	defer drainClose(resp.Body)
 	if resp.StatusCode/100 != 2 {
 		err := statusErr(resp, "PUT %s", relPath)
+		if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusNotFound {
+			err = b.remakeParent(ctx, relPath, resp.Status, err)
+		}
 		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
@@ -812,6 +824,57 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	b.sums.invalidate(relPath)
 	b.listCache.invalidateAncestors(relPath)
 	return nil
+}
+
+// errFolderRemade is a PUT that found its folder not there, though sc took
+// it for there, and the folder made again: the copy is worth another try,
+// with its source read again (W-M5).
+var errFolderRemade = errors.New("its folder was not there; sc made it again")
+
+// remakeParent answers a PUT of relPath that failed with err, a 409 or a
+// 404 (status): the folder it goes into is not there. sc took it for
+// there: a MKCOL answered 405 or 409, as x/net/webdav answers any Mkdir
+// that failed, or it was there and is gone. The memo kept it for the
+// session, and every file into that folder failed (W-M5). Now the folder
+// and those above it are forgotten and made again, once. There now, the
+// copy is tried again; still not there, the PUT's answer stands.
+func (b *WebDAVBackend) remakeParent(ctx context.Context, relPath, status string, err error) error {
+	dir := parentDir(strings.Trim(relPath, "/"))
+	if dir == "" {
+		return err
+	}
+	for d := dir; d != ""; d = parentDir(d) {
+		b.dirs.Delete(d)
+	}
+	if merr := b.ensureDir(ctx, dir); merr != nil {
+		return &fs.PathError{Op: "PUT", Path: relPath, Err: fmt.Errorf("%s, and its folder could not be made: %w", status, merr)}
+	}
+	if e, serr := b.Stat(ctx, dir); serr != nil || !e.IsDir {
+		return fmt.Errorf("%w: the server took the folder %s for made, and it is not there", err, dir)
+	}
+	return &fs.PathError{Op: "PUT", Path: relPath, Err: fmt.Errorf("%s: %w", status, errFolderRemade)}
+}
+
+// forgetDirs drops rel and the folders under it from the memo of folders
+// that are there: deleted or moved. Any delete or rename emptied the memo,
+// and every folder then cost a MKCOL again (W-M5).
+func (b *WebDAVBackend) forgetDirs(rel string) {
+	rel = strings.Trim(rel, "/")
+	b.dirs.Range(func(k, _ any) bool {
+		if d := k.(string); rel == "" || d == rel || strings.HasPrefix(d, rel+"/") {
+			b.dirs.Delete(k)
+		}
+		return true
+	})
+}
+
+// knowDir puts rel into the memo of folders that are there: a listing
+// showed it. Only the folders sc made were in it, and each folder a
+// listing showed cost a MKCOL (W-M5).
+func (b *WebDAVBackend) knowDir(rel string) {
+	if rel = strings.Trim(rel, "/"); rel != "" {
+		b.dirs.Store(rel, struct{}{})
+	}
 }
 
 func (b *WebDAVBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
@@ -832,7 +895,9 @@ type mkcol struct {
 // Uploads racing into one new directory share a single MKCOL, because the Go
 // webdav server behind rclone answers concurrent MKCOLs of one path with 423
 // Locked. 405 means the collection is already there; 409 is tolerated
-// because some servers answer it for existing collections too.
+// because some servers answer it for existing collections too. Both are
+// also what a server may answer for a folder it could not make: a PUT
+// that then finds the folder not there makes it again (remakeParent).
 func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 	dir = strings.Trim(dir, "/")
 	if dir == "" {
@@ -900,7 +965,8 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 		Log.Add("webdav", DirErr, err.Error())
 		return err
 	}
-	b.dirs.Clear()
+	b.forgetDirs(oldRelPath)
+	b.forgetDirs(newRelPath)
 	b.sums.invalidate(oldRelPath)
 	b.listCache.invalidateTree(oldRelPath)
 	b.listCache.invalidateAncestors(oldRelPath)
@@ -942,7 +1008,7 @@ func (b *WebDAVBackend) delete(ctx context.Context, relPath string, recursive bo
 	case recursive:
 		err = b.gone(ctx, relPath)
 	}
-	b.dirs.Clear()
+	b.forgetDirs(relPath)
 	b.sums.invalidate(relPath)
 	b.listCache.invalidateTree(relPath)
 	b.listCache.invalidateAncestors(relPath)
