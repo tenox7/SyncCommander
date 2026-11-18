@@ -161,13 +161,22 @@ func (h *httpBase) pathFor(relPath string) string {
 	return p
 }
 
-// urlFor addresses relPath, with a trailing slash for collections.
+// urlFor addresses relPath, with a trailing slash for collections. Each
+// name in it is escaped as a name. Go escapes a path as a whole, which
+// leaves ; and , as they are, and a servlet container (Tomcat, Jetty) cuts
+// a name at its ;, where a path parameter starts: a PUT of x;y wrote x,
+// and a DELETE of x;y removed x (W-L3).
 func (h *httpBase) urlFor(relPath string, dir bool) string {
 	u := *h.baseURL
 	u.Path = h.pathFor(relPath)
 	if dir && !strings.HasSuffix(u.Path, "/") {
 		u.Path += "/"
 	}
+	names := strings.Split(u.Path, "/")
+	for i, n := range names {
+		names[i] = url.PathEscape(n)
+	}
+	u.RawPath = strings.Join(names, "/")
 	return u.String()
 }
 
