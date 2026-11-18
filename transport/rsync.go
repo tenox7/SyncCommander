@@ -268,7 +268,7 @@ func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
 // returning the file list. The handshake is sc's own (see daemonHandshake),
 // so the credentials never touch process-wide state.
 func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
-	dst, err := os.MkdirTemp("", "rsync-daemon-*")
+	dst, err := tempDir("rsync-daemon-*")
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +650,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	if _, err := b.checkDirs(ctx, parentRel); err != nil {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "rsync-send-*")
+	tmpDir, err := tempDir("rsync-send-*")
 	if err != nil {
 		return err
 	}
@@ -700,7 +700,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if _, err := b.checkDirs(ctx, parentDir(relPath)); err != nil {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "rsync-upload-*")
+	tmpDir, err := tempDir("rsync-upload-*")
 	if err != nil {
 		return err
 	}
@@ -741,7 +741,7 @@ func (b *RsyncBackend) AppendFrom(ctx context.Context, relPath string, src model
 	name := path.Base(relPath)
 	srcPath := src.LocalPath()
 	if srcPath == "" || filepath.Base(srcPath) != name {
-		tmpDir, err := os.MkdirTemp("", "rsync-append-*")
+		tmpDir, err := tempDir("rsync-append-*")
 		if err != nil {
 			return err
 		}
@@ -778,7 +778,7 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	if there, err := b.checkDirs(ctx, clean); err != nil || there {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "rsync-mkdir-*")
+	tmpDir, err := tempDir("rsync-mkdir-*")
 	if err != nil {
 		return err
 	}
@@ -900,7 +900,7 @@ func (b *RsyncBackend) removeRun(ctx context.Context, label, dir string, items [
 	if err != nil {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "rsync-remove-*")
+	tmpDir, err := tempDir("rsync-remove-*")
 	if err != nil {
 		return err
 	}

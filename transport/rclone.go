@@ -486,7 +486,7 @@ func (b *RcloneBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 // spoolToTemp buffers an unknown-length stream so its size can be declared to
 // a remote that cannot stream. Only reached on remotes without PutStream.
 func spoolToTemp(src io.Reader) (io.Reader, int64, func(), error) {
-	tmp, err := os.CreateTemp("", "sc-rclone-*")
+	tmp, err := tempFile("sc-rclone-*")
 	if err != nil {
 		return nil, 0, nil, err
 	}

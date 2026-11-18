@@ -104,7 +104,7 @@ func (b *RsyncSSHBackend) runRecursiveList(ctx context.Context, scope string, em
 	if err != nil {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "rsync-rlist-*")
+	tmpDir, err := tempDir("rsync-rlist-*")
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope, algo str
 }
 
 func (b *RsyncSSHBackend) fetchMD4(ctx context.Context, scope string, recursive bool) (map[string]string, error) {
-	tmpDir, err := os.MkdirTemp("", "rsync-md4-*")
+	tmpDir, err := tempDir("rsync-md4-*")
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +450,7 @@ func (b *RsyncSSHBackend) SendLocalFile(ctx context.Context, srcPath, relPath st
 func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src model.RangeOpener, p model.PutParams, offset int64) error {
 	srcPath := src.LocalPath()
 	if srcPath == "" {
-		tmpDir, err := os.MkdirTemp("", "rsync-ssh-append-*")
+		tmpDir, err := tempDir("rsync-ssh-append-*")
 		if err != nil {
 			return err
 		}
@@ -471,7 +471,7 @@ func (b *RsyncSSHBackend) AppendFrom(ctx context.Context, relPath string, src mo
 }
 
 func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
-	tmpDir, err := os.MkdirTemp("", "rsync-ssh-ul-*")
+	tmpDir, err := tempDir("rsync-ssh-ul-*")
 	if err != nil {
 		return err
 	}

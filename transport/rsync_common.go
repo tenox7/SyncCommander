@@ -437,7 +437,7 @@ func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int6
 // error, the caller then copies in full. With a progress counter the reader
 // is marked pre-counted since the tail already credited the body.
 func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv func(dstDir string) error) (io.ReadCloser, error) {
-	tmpDir, err := os.MkdirTemp("", "rsync-dl-*")
+	tmpDir, err := tempDir("rsync-dl-*")
 	if err != nil {
 		return nil, err
 	}

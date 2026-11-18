@@ -85,7 +85,7 @@ func TestUploadSpoolNeedsRoom(t *testing.T) {
 			b := open(t, mod)
 			ctx := context.Background()
 			tmp := t.TempDir()
-			t.Setenv("TMPDIR", tmp)
+			setTemp(t, tmp)
 			body := strings.Repeat("b", 3<<20)
 			p := model.PutParams{Size: int64(len(body)), Mode: 0o644}
 			withFree(t, 3<<20+tempMargin-1)
@@ -102,8 +102,8 @@ func TestUploadSpoolNeedsRoom(t *testing.T) {
 			if err := b.(appender).AppendFrom(ctx, "part.bin", spoolSource{body}, p, 10); !errors.Is(err, ErrTempRoom) {
 				t.Errorf("AppendFrom with no room: %v, want ErrTempRoom", err)
 			}
-			if left, _ := os.ReadDir(tmp); len(left) > 0 {
-				t.Errorf("the temp folder holds %s after the refused uploads", left[0].Name())
+			if left := leftInTemp(t, tmp); len(left) > 0 {
+				t.Errorf("the temp folder holds %v after the refused uploads", left)
 			}
 			if _, err := os.Stat(filepath.Join(mod, "big.bin")); err == nil {
 				t.Error("big.bin is on the destination after a refused upload")

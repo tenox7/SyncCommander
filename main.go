@@ -105,6 +105,8 @@ func main() {
 	transport.SetRsyncIdleTimeout(*rsyncTimeout)
 	transport.SetResticDeletes(*resticDelete)
 	transport.SetResticNew(*resticNew)
+	// What an sc that was killed left in the temp folder goes (R16).
+	go transport.SweepTemp()
 
 	var leftPath, rightPath string
 	switch flag.NArg() {
@@ -159,6 +161,7 @@ func main() {
 	_, err = p.Run()
 	transport.OnRcloneFatal(nil)
 	mdl.Close()
+	transport.RemoveTemp()
 	if err != nil {
 		fail(err)
 	}

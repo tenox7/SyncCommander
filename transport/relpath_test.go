@@ -475,7 +475,8 @@ func TestRclonePreloadStaysUnderTheBase(t *testing.T) {
 // L7: the rsync daemon backend stages the folders of an upload and of a
 // new folder under a local temp folder, by the path, and sends them to
 // module/base. TMPDIR, TMP and TEMP point two folders deep in the test's
-// own folder, which is all an old build could write to.
+// own folder, which is all an old build could write to. sc's home there
+// goes, as when sc ends, before the folder is listed.
 func TestRsyncDaemonPathsStayUnderTheBase(t *testing.T) {
 	root := t.TempDir()
 	tmp, mod := filepath.Join(root, "a", "b", "tmp"), filepath.Join(root, "mod")
@@ -483,9 +484,7 @@ func TestRsyncDaemonPathsStayUnderTheBase(t *testing.T) {
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(v, tmp)
-	}
+	setTemp(t, tmp)
 	b, err := NewRsyncBackend(startGorsyncdModule(t, mod, true) + "/base")
 	if err != nil {
 		t.Fatal(err)
@@ -503,6 +502,7 @@ func TestRsyncDaemonPathsStayUnderTheBase(t *testing.T) {
 			t.Errorf("RemoveAll(%q) = %v, want it refused", rel, err)
 		}
 	}
+	RemoveTemp()
 	want := []string{"a/", "a/b/", "a/b/tmp/", "mod/", "mod/base/", "mod/base/d/", "mod/base/evil", "mod/base/keep/", "mod/base/keep/f.txt"}
 	if got := filesUnder(t, root); !slices.Equal(got, want) {
 		t.Errorf("the test folder holds %q, want %q", got, want)
