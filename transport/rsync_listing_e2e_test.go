@@ -137,7 +137,11 @@ func TestRsyncSSHListingUnreadableFolder(t *testing.T) {
 		if !strings.Contains(line, ">>> ") || strings.Contains(line, "RLIST") {
 			continue
 		}
-		livePhotos = livePhotos || strings.Contains(line, "/photos'")
+		// perl lists '/x/photos', find '/x/photos/.' (findStart). On GNU
+		// find this test passed through the perl form alone: the folder
+		// name of the test holds "readable", and sc read find's error
+		// as a find without -readable (S18).
+		livePhotos = livePhotos || strings.Contains(line, "/photos'") || strings.Contains(line, "/photos/.'")
 		if strings.Contains(line, "/docs") || strings.Contains(line, "/deep") {
 			t.Errorf("listed live although the preload read it in full: %s", line)
 		}

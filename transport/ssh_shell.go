@@ -33,8 +33,8 @@ type sshShell struct {
 	// first ask and kept for the connection; nil until then.
 	cksumMu   sync.Mutex
 	cksumCmds map[string]string
-	listCache *listCache // nil when the backend has no recursive preload
-	usePerl   atomic.Bool
+	listCache *listCache   // nil when the backend has no recursive preload
+	form      atomic.Int32 // the lister: formUnknown until a listing or stat finds it
 }
 
 func (s *sshShell) BasePath() string { return s.display }
@@ -201,6 +201,51 @@ const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\
 // exitNotThere is the exit status of a stat that finds nothing at its path.
 const exitNotThere = 78
 
+// The lister of a shell backend: GNU find, or perl where find lacks what
+// the find form uses. It is unknown until the first listing or stat, whose
+// command asks find first (probed).
+const (
+	formUnknown int32 = iota
+	formFind
+	formPerl
+)
+
+// exitNoGNUFind is the exit status of the probe when find lacks -printf,
+// -readable, -executable or -ignore_readdir_race (BSD, macOS, busybox, old
+// GNU find), or there is no find.
+const exitNoGNUFind = 74
+
+// probed puts the probe ahead of cmd while the form is unknown. The probe
+// names no path but /, which -maxdepth 0 does not list, so its answer is
+// about find alone. sc read the error of the listing instead, and a path
+// with "printf", "readable" or "executable" in it, such as a folder named
+// unreadable that was not there, switched it to perl for good (S18).
+func probed(form int32, cmd string) string {
+	if form != formUnknown {
+		return cmd
+	}
+	return fmt.Sprintf(`find / -maxdepth 0 -ignore_readdir_race -readable -executable -printf '' 2>/dev/null || exit %d; `, exitNoGNUFind) + cmd
+}
+
+// learnForm notes what a command sent in form says of find, from how it
+// ended (err): in the unknown form the probe ran first, and exitNoGNUFind
+// is perl from now on, the command to run again in it (true); any other
+// end is a find that has what the find form uses. A command that did not
+// end, as on a lost connection, says nothing.
+func (s *sshShell) learnForm(form int32, err error) bool {
+	if form != formUnknown {
+		return false
+	}
+	switch code := exitCode(err); {
+	case code == exitNoGNUFind:
+		s.form.Store(formPerl)
+		return true
+	case err == nil || code >= 0:
+		s.form.CompareAndSwap(formUnknown, formFind)
+	}
+	return false
+}
+
 // perlStat prints the findRecord of its one argument, lstat'ed, the full
 // path as the name, for hosts whose find has no -printf. It exits
 // exitNotThere when nothing is there.
@@ -209,13 +254,13 @@ const perlStat = `perl -e 'my @s=lstat($ARGV[0]);unless(@s){exit 78 if $!{ENOENT
 // statCmd prints the list record of p itself, a link as a link, or exits
 // exitNotThere when nothing is there. find starts at p and, with
 // -maxdepth 0, prints only p, which it does not follow.
-func (s *sshShell) statCmd(p string) string {
+func (s *sshShell) statCmd(p string, form int32) string {
 	q := shellQuote(p)
-	if s.usePerl.Load() {
+	if form == formPerl {
 		return perlStat + " " + q
 	}
-	return fmt.Sprintf(`[ -e %[1]s ] || [ -L %[1]s ] || exit %[2]d; find %[1]s -maxdepth 0 -printf '%[3]s%[4]s\0'`,
-		q, exitNotThere, findRecord, "%f")
+	return probed(form, fmt.Sprintf(`[ -e %[1]s ] || [ -L %[1]s ] || exit %[2]d; find %[1]s -maxdepth 0 -printf '%[3]s%[4]s\0'`,
+		q, exitNotThere, findRecord, "%f"))
 }
 
 // Stat prints relPath's own list record on the server: one command, no
@@ -224,10 +269,10 @@ func (s *sshShell) statCmd(p string) string {
 // two apart.
 func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
 	p := s.abs(relPath)
-	out, err := s.run(ctx, s.statCmd(p))
-	if err != nil && !s.usePerl.Load() && findLacksPrimary(err) {
-		s.usePerl.Store(true)
-		out, err = s.run(ctx, s.statCmd(p))
+	form := s.form.Load()
+	out, err := s.run(ctx, s.statCmd(p, form))
+	if s.learnForm(form, err) {
+		out, err = s.run(ctx, s.statCmd(p, formPerl))
 	}
 	switch {
 	case exitCode(err) == exitNotThere:
@@ -255,8 +300,13 @@ func statRecord(out string) (listRecord, bool) {
 	return parseListRecord(strings.TrimSuffix(out, "\x00"))
 }
 
-func (s *sshShell) listCmd(dir string, recursive bool) string {
-	if s.usePerl.Load() {
+// listCmd lists dir in form, one level or all under it. find leaves out a
+// file deleted while it lists, as perl does (-ignore_readdir_race): it said
+// "No such file or directory" and exited 1, and one temporary file that
+// went away threw the whole recursive listing away (S18). A start folder
+// that is not there still fails (GNU find 4.5.11 to 4.10.0).
+func (s *sshShell) listCmd(dir string, recursive bool, form int32) string {
+	if form == formPerl {
 		flag := "0"
 		if recursive {
 			flag = "1"
@@ -267,8 +317,8 @@ func (s *sshShell) listCmd(dir string, recursive bool) string {
 	if recursive {
 		depth, name = "", "%p"
 	}
-	return fmt.Sprintf(`find %s%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0' -prune \) -o -printf '%s%s\0'`,
-		shellQuote(findStart(dir)), depth, unreadRecord, name, findRecord, name)
+	return probed(form, fmt.Sprintf(`find %s -ignore_readdir_race%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0' -prune \) -o -printf '%s%s\0'`,
+		shellQuote(findStart(dir)), depth, unreadRecord, name, findRecord, name))
 }
 
 // findStart names dir for find as dir/. : find does not follow a start
@@ -284,21 +334,17 @@ func findStart(dir string) string {
 	return dir + "/."
 }
 
-// list runs the directory lister into stdout, switching to the perl form for
-// good once find rejects -printf, -readable or -executable (BSD, busybox and
-// pre-2007 GNU find).
+// list runs the directory lister into stdout. The first listing or stat
+// finds the lister (learnForm): perl when find lacks what the find form
+// uses, and the probe then printed nothing, so the listing runs again into
+// the same stdout.
 func (s *sshShell) list(ctx context.Context, dir string, recursive bool, stdout io.Writer) error {
-	err := s.exec(ctx, s.client, s.listCmd(dir, recursive), nil, stdout)
-	if err == nil || s.usePerl.Load() || !findLacksPrimary(err) {
+	form := s.form.Load()
+	err := s.exec(ctx, s.client, s.listCmd(dir, recursive, form), nil, stdout)
+	if !s.learnForm(form, err) {
 		return err
 	}
-	s.usePerl.Store(true)
-	return s.exec(ctx, s.client, s.listCmd(dir, recursive), nil, stdout)
-}
-
-func findLacksPrimary(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "printf") || strings.Contains(msg, "readable") || strings.Contains(msg, "executable")
+	return s.exec(ctx, s.client, s.listCmd(dir, recursive, formPerl), nil, stdout)
 }
 
 func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEntry, error) {

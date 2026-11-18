@@ -16,7 +16,19 @@ import (
 // of the shell lister needs. Where it does not (macOS, BSD, busybox) the
 // shell backends use perl, and the find subtests skip.
 func gnuFindHere() bool {
-	return exec.Command("sh", "-c", `find / -maxdepth 0 -readable -executable -printf ''`).Run() == nil
+	return exec.Command("sh", "-c", `find / -maxdepth 0 -ignore_readdir_race -readable -executable -printf ''`).Run() == nil
+}
+
+// listerOf names the lister sh uses: find, perl, or unknown before its
+// first listing or stat.
+func listerOf(sh *sshShell) string {
+	switch sh.form.Load() {
+	case formFind:
+		return "find"
+	case formPerl:
+		return "perl"
+	}
+	return "unknown"
 }
 
 type shellBackend interface {
@@ -45,8 +57,7 @@ func openShellBackend(t *testing.T, scheme, addr, base, lister string) shellBack
 	default:
 		t.Fatalf("%s:// opened %T", scheme, b)
 	}
-	sh.usePerl.Store(lister == "perl")
-	t.Cleanup(func() { sh.usePerl.Store(false) })
+	sh.form.Store(map[string]int32{"find": formFind, "perl": formPerl}[lister])
 	return b.(shellBackend)
 }
 
