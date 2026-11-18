@@ -43,6 +43,10 @@ type sftpConn struct {
 	sftp *sftp.Client
 	ssh  *ssh.Client
 	cut  atomic.Bool // watch closed it, to stop a call the server did not answer
+	// ended is set once the sftp session has ended. A server may end it
+	// and keep the connection: OpenSSH's ChannelTimeout closes a session
+	// that sat idle (S23).
+	ended atomic.Bool
 }
 
 // close ends c. The ssh connection goes first: pkg/sftp's Close waits until
@@ -118,6 +122,12 @@ func newSFTPConn(ctx context.Context, client *ssh.Client) (*sftpConn, error) {
 		return nil, fmt.Errorf("sftp: %w", err)
 	}
 	c.sftp = sc
+	// Wait returns once the session has ended; nothing else in sc calls
+	// it, and a second call would never return.
+	go func() {
+		_ = sc.Wait()
+		c.ended.Store(true)
+	}()
 	return c, nil
 }
 
@@ -173,6 +183,7 @@ func newSFTPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure 
 		return sc, nil
 	}
 	b.pool = newConnPool("sftp", main, parallel-1, dial, func(c *sftpConn) { c.close() })
+	b.pool.alive = func(c *sftpConn) bool { return !c.ended.Load() && sshClientAlive(c.ssh) }
 	return b, nil
 }
 

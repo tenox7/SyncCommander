@@ -164,8 +164,10 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	rawConn.SetDeadline(time.Time{})
 	client := ssh.NewClient(c, chans, reqs)
 	gone := make(chan struct{})
+	sshLive.Store(client, struct{}{})
 	go func() {
 		_ = client.Wait()
+		sshLive.Delete(client)
 		close(gone)
 	}()
 	go sshKeepalive(client, tracked, scheme, gone)
@@ -179,6 +181,17 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 		port:     port,
 		basePath: remotePath,
 	}, nil
+}
+
+// sshLive is the clients dialSSH made whose connection has not ended.
+var sshLive sync.Map
+
+// sshClientAlive reports whether c, a client dialSSH made, still has its
+// connection: a server drops one that sits idle in a pool, and the
+// keepalive closes one that stopped answering (S23).
+func sshClientAlive(c *ssh.Client) bool {
+	_, ok := sshLive.Load(c)
+	return ok
 }
 
 // loginUser is the local account name, the ssh default for a missing user.

@@ -21,7 +21,8 @@ import (
 //
 // A dial that failed is not tried again for a while, a wait that doubles
 // while dials fail (L16): a server that takes fewer connections than the
-// limit turned away one login per file, and ssh servers count those.
+// limit turned away one login per file, and ssh servers count those. An
+// extra whose connection has ended is dropped, not lent out (alive, S23).
 type connPool[T any] struct {
 	name      string // the backend, for the log
 	primary   T
@@ -42,6 +43,13 @@ type connPool[T any] struct {
 	freed    chan struct{}
 	dialWait time.Duration // the wait after the last failed dial; 0 once one works
 	next     time.Time     // no dial before it
+	// alive, when set, tells an extra whose connection works from one
+	// whose connection has ended. Such an extra went back to the pool and
+	// was lent out again, and the call on it failed with a lost
+	// connection, on which the lazy wrapper drops the whole backend, the
+	// primary's running call with it (S23). Now it is dropped at its
+	// release, or when it is next taken, and the pool dials another.
+	alive func(T) bool
 }
 
 // poolRedial is the wait after a failed dial of an extra connection; it
@@ -66,6 +74,17 @@ func (p *connPool[T]) acquire(ctx context.Context) (T, func()) {
 	p.mu.Lock()
 	for !p.closed {
 		if c, ok := p.popIdle(); ok {
+			if p.alive != nil && !p.alive(c) {
+				// It ended while idle: the server dropped it, or the
+				// keepalive found it dead.
+				p.size--
+				p.wakeLocked()
+				p.mu.Unlock()
+				p.closeFn(c)
+				Log.Add(p.name, DirIn, "an extra connection is gone: dropped")
+				p.mu.Lock()
+				continue
+			}
 			p.mu.Unlock()
 			return c, func() { p.release(c) }
 		}
@@ -141,13 +160,14 @@ func (p *connPool[T]) popIdle() (T, bool) {
 	return c, true
 }
 
-// release returns conn c to the pool. If close has already run, or the pool
-// was shrunk below the extras it holds, closes c inline instead: that is how
-// a lowered limit takes effect as transfers finish, and it keeps conns
-// acquired before close out of the abandoned idle list.
+// release returns conn c to the pool. If close has already run, the pool
+// was shrunk below the extras it holds, or c's connection has ended,
+// closes c inline instead: that is how a lowered limit takes effect as
+// transfers finish, and it keeps conns acquired before close out of the
+// abandoned idle list.
 func (p *connPool[T]) release(c T) {
 	p.mu.Lock()
-	if p.closed || p.size > p.maxExtras {
+	if p.closed || p.size > p.maxExtras || p.alive != nil && !p.alive(c) {
 		p.size--
 		p.wakeLocked()
 		p.mu.Unlock()
