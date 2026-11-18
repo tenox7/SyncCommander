@@ -34,6 +34,7 @@ type listCache struct {
 	stopRun    context.CancelFunc // stops the latest run's listing
 	stale      map[string]bool    // folders a write changed while the run was going
 	staleTree  map[string]bool    // folders a write removed or moved then, and all under them
+	scope      string             // the folder the latest run lists, with all under it
 }
 
 func newListCache() *listCache {
@@ -51,6 +52,14 @@ func (c *listCache) reset() {
 
 // running reports whether a run is still sending.
 func (c *listCache) running() bool { return c.active && !c.done }
+
+// coversLocked reports whether the latest run lists relDir: a folder
+// outside its scope is never complete, and a List of one waited for the
+// whole run (W-M2).
+func (c *listCache) coversLocked(relDir string) bool {
+	scope, dir := cleanRel(c.scope), cleanRel(relDir)
+	return scope == "" || dir == scope || strings.HasPrefix(dir, scope+"/")
+}
 
 // staleLocked reports whether a write during the run changed dir, or removed
 // or moved a folder it is in.
@@ -111,6 +120,8 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 	c.reset()
 	c.active, c.done = true, false
 	c.preloadCtx = ctx
+	c.scope = scope
+	c.cond.Broadcast() // a waiter outside the new run's scope lists live
 	c.mu.Unlock()
 
 	emit := func(parent string, entries []model.FileEntry) {
@@ -162,10 +173,24 @@ func (c *listCache) serve(ctx context.Context, relDir string, live func(context.
 	if hit {
 		return entries, nil
 	}
-	if active && !done {
-		if e, ok := c.await(relDir); ok {
-			return e, nil
-		}
+	if !active || done || !c.covers(relDir) {
+		return live(ctx, relDir)
+	}
+	// The wait is not the listing's time: the listing's timeout
+	// (model.WithListTimeout) does not end it, and a live listing after it
+	// gets that whole timeout. A stop of the caller ends it (W-M2).
+	wait, d, stop := model.ListWait(ctx)
+	defer stop()
+	e, ok, err := c.await(wait, relDir)
+	switch {
+	case ok:
+		return e, nil
+	case err != nil:
+		return nil, err
+	case d > 0:
+		lctx, cancel := context.WithTimeout(wait, d)
+		defer cancel()
+		return live(lctx, relDir)
 	}
 	return live(ctx, relDir)
 }
@@ -219,6 +244,12 @@ func (c *listCache) markCompleteLocked(dir string) {
 
 func (c *listCache) ready(relDir string) bool { return c.done || c.complete[relDir] }
 
+func (c *listCache) covers(relDir string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.coversLocked(relDir)
+}
+
 func (c *listCache) lookup(relDir string) (entries []model.FileEntry, hit, active, done bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -227,34 +258,35 @@ func (c *listCache) lookup(relDir string) (entries []model.FileEntry, hit, activ
 }
 
 // await blocks until relDir is complete, the preload finishes or its context
-// ends, or a write makes the run's view of relDir old. It deliberately
-// ignores the caller's per-call context, whose stall timeout is unsuited to
-// one long recursive listing.
-func (c *listCache) await(relDir string) ([]model.FileEntry, bool) {
+// ends, a write makes the run's view of relDir old, a new run does not list
+// relDir, or ctx ends: err is then ctx's cause. It ignored ctx: a copy that
+// was stopped waited for the scan's whole listing (W-M2).
+func (c *listCache) await(ctx context.Context, relDir string) ([]model.FileEntry, bool, error) {
 	c.mu.Lock()
 	pctx := c.preloadCtx
 	c.mu.Unlock()
 
-	notify := make(chan struct{})
-	defer close(notify)
+	wake := func() {
+		c.mu.Lock()
+		c.cond.Broadcast()
+		c.mu.Unlock()
+	}
+	defer context.AfterFunc(ctx, wake)()
 	if pctx != nil {
-		go func() {
-			select {
-			case <-pctx.Done():
-				c.mu.Lock()
-				c.cond.Broadcast()
-				c.mu.Unlock()
-			case <-notify:
-			}
-		}()
+		defer context.AfterFunc(pctx, wake)()
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for !c.ready(relDir) && !c.staleLocked(relDir) && (pctx == nil || pctx.Err() == nil) {
+	for !c.ready(relDir) && !c.staleLocked(relDir) && c.coversLocked(relDir) && (pctx == nil || pctx.Err() == nil) && ctx.Err() == nil {
 		c.cond.Wait()
 	}
-	entries, ok := c.entries[relDir]
-	return entries, ok && c.ready(relDir)
+	if entries, ok := c.entries[relDir]; ok && c.ready(relDir) {
+		return entries, true, nil
+	}
+	if ctx.Err() != nil {
+		return nil, false, context.Cause(ctx)
+	}
+	return nil, false, nil
 }
 
 // The invalidators are nil-safe: backends without a preload leave the cache

@@ -946,7 +946,7 @@ func (s *Scanner) listCtx(parent context.Context, b Backend) (context.Context, c
 	if lm, ok := b.(LivenessManaged); ok && lm.ManagesLiveness() || s.listTimeout <= 0 {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, s.listTimeout)
+	return WithListTimeout(parent, s.listTimeout)
 }
 
 func (s *Scanner) listBoth(ctx context.Context, relDir string) ([]FileEntry, []FileEntry, error) {

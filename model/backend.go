@@ -307,6 +307,50 @@ type LocalReceiver interface {
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
 }
 
+type listTimeoutKey struct{}
+
+// listTimeout is what WithListTimeout put in a ctx.
+type listTimeout struct {
+	parent   context.Context
+	d        time.Duration
+	deadline time.Time
+}
+
+// WithListTimeout is context.WithTimeout(parent, d) for one folder
+// listing. A backend that first waits for a recursive listing of its own
+// to reach the folder does not count the wait as the listing's time: the
+// wait ends when the caller stops (ListWait), and a listing it makes
+// after the wait gets d from then on (W-M2).
+func WithListTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, d)
+	dl, _ := ctx.Deadline()
+	return context.WithValue(ctx, listTimeoutKey{}, listTimeout{parent, d, dl}), cancel
+}
+
+// ListWait is the ctx of a wait before a listing made with ctx. It has
+// ctx's values, and it ends when ctx ends, but not by the timeout
+// WithListTimeout set, which is for the listing. d is that timeout, 0 for
+// none; then the wait is ctx itself. stop releases the wait's ctx.
+func ListWait(ctx context.Context) (wait context.Context, d time.Duration, stop func()) {
+	lt, ok := ctx.Value(listTimeoutKey{}).(listTimeout)
+	if !ok {
+		return ctx, 0, func() {}
+	}
+	wait, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopParent := context.AfterFunc(lt.parent, func() { cancel(context.Cause(lt.parent)) })
+	stopCtx := context.AfterFunc(ctx, func() {
+		if dl, _ := ctx.Deadline(); errors.Is(ctx.Err(), context.DeadlineExceeded) && dl.Equal(lt.deadline) {
+			return // the listing's own timeout
+		}
+		cancel(context.Cause(ctx))
+	})
+	return wait, lt.d, func() {
+		stopParent()
+		stopCtx()
+		cancel(context.Canceled)
+	}
+}
+
 type hashBytesKey struct{}
 
 // WithHashBytes says that the far side hashes about n bytes for the call
