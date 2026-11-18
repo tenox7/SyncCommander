@@ -615,22 +615,82 @@ func removeAll(c *sftp.Client, fullPath string) error {
 // sftpReader reads a file on a pooled connection, which openAt's watch
 // closes when ctx ends during a read the server does not answer. Close
 // gives the connection back.
+//
+// It reads ahead of its caller (S17). pkg/sftp sends a read of more than
+// one packet (32 KiB) as many requests at once, and a read of one packet
+// as one request; callers read 32 KiB at a time, so a download waited a
+// round trip for each 32 KiB: 756 KiB/s over a 40 ms link, against 21
+// MiB/s for an upload. The reads ahead start at one packet, as before,
+// and grow while they come back quickly (nextReadAhead).
 type sftpReader struct {
 	io.ReadCloser
 	ctx  context.Context
 	done func()
 	once sync.Once
+	buf  []byte // read ahead and not yet given: buf[off:]
+	off  int
+	size int   // the next read ahead
+	err  error // what ended the reads ahead, given once buf is empty
 }
 
-// Read gives a read that failed after ctx ended ctx's error: a closed
+// Read gives what was read ahead, and reads ahead again once all of it is
+// given. A read that failed after ctx ended gives ctx's error: a closed
 // connection reads as lost, and the backend the caller writes to would be
 // dropped for it (markBrokenIf).
 func (r *sftpReader) Read(p []byte) (int, error) {
-	n, err := r.ReadCloser.Read(p)
-	if err != nil && err != io.EOF && r.ctx.Err() != nil {
-		err = fmt.Errorf("sftp: read: %w", r.ctx.Err())
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return n, err
+	if r.off == len(r.buf) && r.err == nil {
+		r.fill()
+	}
+	if r.off == len(r.buf) {
+		return 0, r.err
+	}
+	n := copy(p, r.buf[r.off:])
+	r.off += n
+	return n, nil
+}
+
+// fill reads ahead once: size bytes, or fewer where the file ends.
+func (r *sftpReader) fill() {
+	if r.size == 0 {
+		r.size = sftpReadAheadMin
+	}
+	if cap(r.buf) < r.size {
+		r.buf = make([]byte, r.size)
+	}
+	start := time.Now()
+	n, err := r.ReadCloser.Read(r.buf[:r.size])
+	r.buf, r.off = r.buf[:n], 0
+	if err != nil {
+		if err != io.EOF && r.ctx.Err() != nil {
+			err = fmt.Errorf("sftp: read: %w", r.ctx.Err())
+		}
+		r.err = err
+		return
+	}
+	r.size = nextReadAhead(r.size, n, time.Since(start))
+}
+
+const (
+	sftpReadAheadMin = 32 << 10 // one packet: a slow link is no slower than before
+	sftpReadAheadMax = 4 << 20
+)
+
+// nextReadAhead is the read ahead after one of size bytes that gave n in
+// took: twice as much after a full one that came back within a quarter of
+// a second, up to 4 MiB; half as much after one that took more than a
+// second, so a slow link still shows progress well within the stall
+// guard's minute; else the same.
+func nextReadAhead(size, n int, took time.Duration) int {
+	switch {
+	case n == size && took < time.Second/4:
+		return min(2*size, sftpReadAheadMax)
+	case took > time.Second:
+		return max(size/2, sftpReadAheadMin)
+	}
+	return size
 }
 
 func (r *sftpReader) Close() error {
