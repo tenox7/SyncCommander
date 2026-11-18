@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -278,6 +279,25 @@ type ChangedPaths struct {
 	once sync.Once
 	dirs map[string]bool // every directory holding a changed path, built on first use
 	all  bool            // a whole-tree rewrite: everything is touched
+}
+
+// MergeChanged is every path a or b names, for one rescan that takes in
+// both. Either may be nil, which names none; a and b are not changed.
+func MergeChanged(a, b *ChangedPaths) *ChangedPaths {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	m := &ChangedPaths{}
+	for s := range m.Paths {
+		m.Paths[s] = make(map[string]bool, len(a.Paths[s])+len(b.Paths[s]))
+		maps.Copy(m.Paths[s], a.Paths[s])
+		maps.Copy(m.Paths[s], b.Paths[s])
+		m.Dirs[s] = slices.Concat(a.Dirs[s], b.Dirs[s])
+	}
+	return m
 }
 
 func underAny(dirs []string, relPath string) bool {

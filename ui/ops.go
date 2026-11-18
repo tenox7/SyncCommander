@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -143,26 +144,50 @@ func (m *Model) finishOp(msg doneMsg) tea.Cmd {
 			return m.queueRescan(r.rescan, nil)
 		}
 	default:
-		if h.kind == opScan && m.pendingRescan != nil {
-			p := m.pendingRescan
-			m.pendingRescan = nil
+		if h.kind == opScan && len(m.pendingRescans) > 0 {
+			p := m.pendingRescans[0]
+			m.pendingRescans = m.pendingRescans[1:]
 			return m.rescanNode(p.node, p.changed)
 		}
 	}
 	return nil
 }
 
-// queueRescan starts a rescan now, or once the running scan finishes. Two
-// pending rescans collapse into one of the whole tree.
+// queueRescan starts a rescan now, or once the running scan finishes.
+// Each waiting rescan keeps its folder and its changed paths, and they run
+// one after the other. A second one made both one rescan of the whole
+// tree with no changed paths: a re-list of everything after two small
+// copies, and a file rewritten with its size and time kept its old
+// checksum (U23). A rescan that one waiting takes in joins it, and one
+// that takes in others takes their place.
 func (m *Model) queueRescan(node *model.TreeNode, changed *model.ChangedPaths) tea.Cmd {
 	if m.mayStart(opScan) {
 		return m.rescanNode(node, changed)
 	}
-	if m.pendingRescan != nil {
-		node, changed = m.scanner.Tree(), nil
-	}
-	m.pendingRescan = &rescanReq{node: node, changed: changed}
+	m.readTree(func(*model.TreeNode) {
+		for i, r := range m.pendingRescans {
+			if covers(r.node, node) {
+				m.pendingRescans[i].changed = model.MergeChanged(r.changed, changed)
+				return
+			}
+		}
+		kept := m.pendingRescans[:0]
+		for _, r := range m.pendingRescans {
+			if covers(node, r.node) {
+				changed = model.MergeChanged(changed, r.changed)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		m.pendingRescans = append(kept, rescanReq{node: node, changed: changed})
+	})
 	return nil
+}
+
+// covers reports whether a rescan of a takes in b: a is b or a folder
+// above it. Call it under the read lock.
+func covers(a, b *model.TreeNode) bool {
+	return a == b || a.IsDir && (a.RelPath == "" || strings.HasPrefix(b.RelPath, a.RelPath+"/"))
 }
 
 // cancelOps stops every operation and drops what waits for one: on quit and
@@ -176,7 +201,7 @@ func (m *Model) cancelOps() {
 			*slot = nil
 		}
 	}
-	m.pendingRescan = nil
+	m.pendingRescans = nil
 }
 
 // stopScanOps is x while no write runs: it stops the running scan and
@@ -194,15 +219,17 @@ func (m *Model) stopScanOps() {
 	// it: it would wait on the same server. Its folder is marked as a
 	// stopped scan marks the folders it was listing, so its rows do not
 	// pass for what is there, and a copy or a mirror lists it again first.
-	if r := m.pendingRescan; m.scan != nil && r != nil {
-		m.pendingRescan = nil
+	if rs := m.pendingRescans; m.scan != nil && len(rs) > 0 {
+		m.pendingRescans = nil
 		m.mutateTree(func(*model.TreeNode) {
-			n := r.node
-			if n != nil && !n.IsDir {
-				n = n.Parent
-			}
-			if n != nil {
-				n.ListErr = true
+			for _, r := range rs {
+				n := r.node
+				if n != nil && !n.IsDir {
+					n = n.Parent
+				}
+				if n != nil {
+					n.ListErr = true
+				}
 			}
 		})
 	}

@@ -170,7 +170,7 @@ func TestReopenDropsTheRescanQueuedBehindTheScan(t *testing.T) {
 		t.Fatal("> copied nothing")
 	}
 	m.Update(runFirst(cmd))
-	if m.pendingRescan == nil {
+	if len(m.pendingRescans) == 0 {
 		t.Fatal("the copy's rescan did not wait behind the scan")
 	}
 
@@ -180,7 +180,7 @@ func TestReopenDropsTheRescanQueuedBehindTheScan(t *testing.T) {
 	if cmd == nil || m.left.arg != filepath.Join(left, "sub") {
 		t.Fatalf("b did not go into sub: %q", m.left.arg)
 	}
-	if m.pendingRescan != nil {
+	if len(m.pendingRescans) > 0 {
 		t.Error("the reopen kept the rescan queued behind the old scan")
 	}
 	_, next := m.Update(runFirst(cmd))

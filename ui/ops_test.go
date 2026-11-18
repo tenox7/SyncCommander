@@ -63,10 +63,10 @@ func TestRescanQueuedBehindRunningScan(t *testing.T) {
 	src := openBackendOrSkip(t, "fake://tiny")
 	m := newTestModel(t, src, src)
 	_ = m.startOp(opScan, func(context.Context) {})
-	if cmd := m.queueRescan(m.scanner.Tree(), nil); cmd != nil || m.pendingRescan == nil {
+	if cmd := m.queueRescan(m.scanner.Tree(), nil); cmd != nil || len(m.pendingRescans) == 0 {
 		t.Fatal("rescan started while a scan was running")
 	}
-	if cmd := m.finishOp(opDoneMsg{kind: opScan, gen: m.scan.gen}); cmd == nil || m.pendingRescan != nil {
+	if cmd := m.finishOp(opDoneMsg{kind: opScan, gen: m.scan.gen}); cmd == nil || len(m.pendingRescans) > 0 {
 		t.Fatal("pending rescan did not start when the scan finished")
 	}
 	m.cancelOps()

@@ -41,7 +41,7 @@ type Model struct {
 	// waits for the scan.
 	scan, cksum, write *op
 	opGen              uint64
-	pendingRescan      *rescanReq
+	pendingRescans     []rescanReq // rescans waiting for the running scan, in order
 
 	copyProgress   *transfer.Progress
 	deleteProgress *DeleteProgress
