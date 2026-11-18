@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -627,8 +628,8 @@ func (b *WebDAVBackend) probeAlgos(ctx context.Context) (map[string]bool, error)
 			if err != nil || e.RelPath == dir {
 				continue
 			}
+			b.sums.put(e.RelPath, sums)
 			if sums != nil {
-				b.sums.put(e.RelPath, sums)
 				for a := range sums {
 					seen[a] = true
 				}
@@ -928,20 +929,19 @@ func newWDSumCache() *wdSumCache {
 	return &wdSumCache{m: make(map[string]map[string]string)}
 }
 
+// put records the sums a listing gave for relPath. They replace what an
+// older listing said, and a listing with none drops that. They were added
+// to it, and one with none was ignored: after another client rewrote a
+// file of the same size, Checksum gave the old sum, with no request, and
+// the compare said "same" (W-M3).
 func (c *wdSumCache) put(relPath string, sums map[string]string) {
-	if len(sums) == 0 {
-		return
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e := c.m[relPath]
-	if e == nil {
-		e = make(map[string]string, len(sums))
-		c.m[relPath] = e
+	if len(sums) == 0 {
+		delete(c.m, relPath)
+		return
 	}
-	for k, v := range sums {
-		e[k] = v
-	}
+	c.m[relPath] = maps.Clone(sums)
 }
 
 func (c *wdSumCache) get(relPath, algo string) (string, bool) {
