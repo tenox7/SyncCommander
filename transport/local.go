@@ -26,6 +26,12 @@ import (
 	"sc/model"
 )
 
+// LocalBackend is a folder on a local disk. Its reads, writes and sums are
+// never charged to the bandwidth limits: they use no network. They were,
+// so -bwlimit 512k summed a local tree at 512 KB/s (1 TB in about three
+// weeks), -bwlimit-in alone slowed uploads from local disk and
+// -bwlimit-out alone slowed downloads to it (L23). In a copy, the other
+// side pays: at its socket, or on the stream of an rclone remote.
 type LocalBackend struct {
 	base      string
 	namesOnce sync.Once
@@ -207,9 +213,6 @@ func (b *LocalBackend) checksum(ctx context.Context, relPath, algo string, off, 
 		}
 		got, err := f.Read(buf[:want])
 		if got > 0 {
-			if err := TakeIn(ctx, got); err != nil {
-				return "", err
-			}
 			h.Write(buf[:got])
 			if n > 0 {
 				n -= int64(got)
@@ -244,12 +247,12 @@ func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime,
 	return setTimes(p, mtime, atime, btime)
 }
 
-func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
+func (b *LocalBackend) CopyFrom(_ context.Context, relPath string, src io.Reader, p model.PutParams) error {
 	f, err := b.create(relPath, p.Mode)
 	if err != nil {
 		return err
 	}
-	return fill(ctx, f, src)
+	return fill(f, src)
 }
 
 // AppendFrom writes the source from offset on at the end of relPath, which
@@ -265,7 +268,7 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model
 		return err
 	}
 	defer rd.Close()
-	return fill(ctx, f, rd)
+	return fill(f, rd)
 }
 
 // create opens relPath for a new body, making its folder. It never writes
@@ -328,8 +331,8 @@ func (b *LocalBackend) openEnd(relPath string, offset int64) (*os.File, error) {
 // with bytes that never reached the disk, and the next compare would call
 // it equal (L14). Close is checked: network file systems report write
 // errors there.
-func fill(ctx context.Context, f *os.File, src io.Reader) error {
-	_, err := io.Copy(LimitWriter(ctx, f), src)
+func fill(f *os.File, src io.Reader) error {
+	_, err := io.Copy(f, src)
 	if err == nil {
 		err = syncFile(f)
 	}
@@ -405,7 +408,7 @@ func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 	return b.OpenAt(ctx, relPath, 0)
 }
 
-func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
+func (b *LocalBackend) OpenAt(_ context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	p, err := b.path(relPath)
 	if err != nil {
 		return nil, err
@@ -420,7 +423,7 @@ func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64)
 			return nil, err
 		}
 	}
-	return LimitReadCloser(ctx, f), nil
+	return f, nil
 }
 
 func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode) error {

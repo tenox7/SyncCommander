@@ -13,10 +13,13 @@ import (
 )
 
 // Bandwidth limiting is applied at the lowest layer so every protocol inherits
-// it without knowing about it: network backends throttle their net.Conn, local
-// and synthetic backends throttle the file reader/writer. In counts bytes
-// entering sc (downloads, local reads), Out bytes leaving it (uploads, local
-// writes) — a copy therefore passes through both budgets.
+// it without knowing about it: network backends throttle their net.Conn;
+// rclone remotes, which dial inside rclone, and fake:// trees, which stand
+// in for a server, throttle the streams of file contents. In counts bytes
+// sc receives from a server (downloads), Out bytes it sends to one
+// (uploads). A local disk is never charged: it uses no network. It was, so
+// a download to local disk paid Out as well as In, and local sums ran at
+// the In rate (L23).
 var (
 	bwIn  Limiter
 	bwOut Limiter
@@ -237,10 +240,6 @@ func LimitReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
 func LimitWriter(ctx context.Context, w io.Writer) io.Writer {
 	return limitedWriter{ctx: ctx, w: w, l: &bwOut}
 }
-
-// TakeIn charges the inbound budget for bytes a backend read outside of a
-// wrapped stream (e.g. a hash loop reading straight into its own buffer).
-func TakeIn(ctx context.Context, n int) error { return bwIn.take(ctx, n) }
 
 // limitedConn throttles a socket. A net.Conn carries no per-call context, so
 // its sleeps run to the clamp even after the operation using it is cancelled.

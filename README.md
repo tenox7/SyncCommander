@@ -22,8 +22,12 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 
 `-bwlimit 4M` caps both directions (`-bwlimit-in` / `-bwlimit-out` to differ);
 0 is unlimited and it is also adjustable live in the settings dialog (`=`).
-It is applied at the socket for network protocols and at the file for local
-and `fake://` trees, so every protocol shares one budget.
+In is what sc receives from a server, out is what it sends to one, and all
+protocols share the two budgets. They are applied at the socket for network
+protocols, and to the file contents of rclone remotes and `fake://` trees.
+A local disk is never limited: reading, writing and summing local files uses
+no network. For rclone, the requests rclone makes itself, such as listings,
+are not limited.
 
 ## Parallel copies
 
