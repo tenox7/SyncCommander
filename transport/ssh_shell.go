@@ -59,8 +59,8 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 	defer session.Close()
 	defer CancelCloser(ctx, session)()
 	var stderr bytes.Buffer
-	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, &stderr
-	if err := session.Run(cmd); err != nil {
+	session.Stdout, session.Stderr = stdout, &stderr
+	if err := runFed(session, cmd, stdin); err != nil {
 		if client == s.client {
 			err = s.lostIf(ctx, err)
 		}
@@ -71,6 +71,39 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 		return err
 	}
 	return nil
+}
+
+// runFed runs cmd in session and writes stdin to it from this goroutine.
+// x/crypto copies Session.Stdin in a goroutine of its own, which Run does
+// not wait for: a command that failed before it read its input left that
+// goroutine reading the source after exec had returned. The lazy wrapper
+// tries a copy again on the same source while none of it has been read,
+// and the read in flight took up to 32 KiB the second try never sent: the
+// file came out short, with every byte of the source counted (S24).
+// A heldOpen input is written nothing and stays open until the command ends.
+func runFed(session *ssh.Session, cmd string, stdin io.Reader) error {
+	if stdin == nil {
+		return session.Run(cmd)
+	}
+	w, err := session.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := session.Start(cmd); err != nil {
+		return err
+	}
+	if _, ok := stdin.(heldOpen); ok {
+		return session.Wait()
+	}
+	// A command that ended closes the channel, and the copy stops on it.
+	_, copyErr := io.Copy(w, stdin)
+	if cerr := w.Close(); copyErr == nil && cerr != io.EOF {
+		copyErr = cerr
+	}
+	if err := session.Wait(); err != nil {
+		return err
+	}
+	return copyErr
 }
 
 // connGoneWait is how long lostIf waits to see the connection end:
@@ -972,12 +1005,10 @@ const removedWord = "sc-removed"
 // when the session closes. The command says when rm went through, so a
 // server that ran something else is not taken for one that removed.
 func (s *sshShell) rmRF(ctx context.Context, relPath string) error {
-	in := &heldInput{done: make(chan struct{})}
-	defer in.Close()
 	cmd := "exec 3<&0; rm -rf " + shellQuote(s.abs(relPath)) +
 		" & p=$!; { read -r x <&3; kill $p; } >/dev/null 2>&1 & w=$!; exec 3<&-; wait $p; s=$?; kill $w 2>/dev/null; [ $s = 0 ] && echo " + removedWord + "; exit $s"
 	var out bytes.Buffer
-	err := s.exec(ctx, s.client, cmd, in, &out)
+	err := s.exec(ctx, s.client, cmd, heldOpen{}, &out)
 	var exit *ssh.ExitError
 	switch {
 	case errors.As(err, &exit) && exit.ExitStatus() == 127:
@@ -988,21 +1019,16 @@ func (s *sshShell) rmRF(ctx context.Context, relPath string) error {
 	return err
 }
 
-// heldInput is a command's input that gives nothing and stays open until
-// Close: a command that reads it sees its end when the session ends.
-type heldInput struct {
-	done chan struct{}
-	once sync.Once
-}
+// heldOpen is the input of a command that reads it only to see its
+// session end, as rm -rf's: runFed writes nothing to it and keeps it open
+// until the command ends. The input this replaced gave nothing until it
+// was closed, after the call: read by the call itself, it held the call
+// for good (S24).
+type heldOpen struct{}
 
-func (h *heldInput) Read([]byte) (int, error) {
-	<-h.done
-	return 0, io.EOF
-}
-
-func (h *heldInput) Close() error {
-	h.once.Do(func() { close(h.done) })
-	return nil
+// Read is not called: runFed reads no heldOpen.
+func (heldOpen) Read([]byte) (int, error) {
+	return 0, errors.New("a held input has nothing to read")
 }
 
 func (s *sshShell) tailCmd(relPath string, offset int64) string {
