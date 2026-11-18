@@ -962,10 +962,15 @@ func (c *rcObjCache) dropTree(rel string) {
 	}
 }
 
-// rcloneSecretKeys are the rclone option names whose values must never reach
-// the UI or the log. Matched as substrings so provider-specific spellings
-// (secret_access_key, client_secret, sa_credentials) are all covered.
-var rcloneSecretKeys = []string{"pass", "secret", "key", "token", "credential", "auth"}
+// rcloneShownKeys are the rclone options whose values are shown: they say
+// where the remote is, and none is a secret. Every other value is masked.
+// The mask was a list of secret names, and the values it did not name went
+// to the title bar and the log: sas_url, connection_string, access_grant,
+// headers (L24). Of a URL among them, the password is masked.
+var rcloneShownKeys = map[string]bool{
+	"provider": true, "region": true, "endpoint": true, "host": true, "port": true,
+	"user": true, "url": true, "vendor": true, "env_auth": true,
+}
 
 // unquotedIndex returns the offset of the first ch outside ' or " quotes,
 // or -1. rclone allows option values to be quoted precisely so they can
@@ -1003,8 +1008,9 @@ func splitRcloneOpts(spec string) (opts, tail string) {
 	return lead + spec[:i], spec[i:]
 }
 
-// maskRcloneSecrets blanks the values of credential options in an rclone
-// connection string, leaving the backend, path and other options readable.
+// maskRcloneSecrets blanks the option values of an rclone connection
+// string but those of rcloneShownKeys, leaving the backend, the path and
+// where the remote is readable.
 func maskRcloneSecrets(spec string) string {
 	opts, tail := splitRcloneOpts(spec)
 	var out []string
@@ -1015,22 +1021,26 @@ func maskRcloneSecrets(spec string) string {
 		} else {
 			opts = ""
 		}
-		if k, _, ok := strings.Cut(part, "="); ok && isRcloneSecret(k) {
-			part = k + "=xxxxx"
+		if k, v, ok := strings.Cut(part, "="); ok {
+			part = k + "=" + maskRcloneValue(k, v)
 		}
 		out = append(out, part)
 	}
 	return strings.Join(out, ",") + tail
 }
 
-func isRcloneSecret(key string) bool {
-	k := strings.ToLower(key)
-	for _, s := range rcloneSecretKeys {
-		if strings.Contains(k, s) {
-			return true
-		}
+// maskRcloneValue is the value v of the option k as shown: xxxxx, or for
+// an option of rcloneShownKeys v itself, with the password of a URL in it
+// masked. rclone takes Region, region and re-gion for one option.
+func maskRcloneValue(k, v string) string {
+	if !rcloneShownKeys[strings.ReplaceAll(strings.ToLower(k), "-", "_")] {
+		return "xxxxx"
 	}
-	return false
+	q := ""
+	if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
+		q, v = v[:1], v[1:len(v)-1]
+	}
+	return q + maskURLUserinfo(v) + q
 }
 
 // rcloneTimeRes is how exact a remote's listed mtimes are. With

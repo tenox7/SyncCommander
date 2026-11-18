@@ -79,31 +79,56 @@ func lookupScheme(arg string) opener {
 
 func IsRemote(arg string) bool { return lookupScheme(arg) != nil }
 
+// MaskURLPassword hides the secrets of an open argument, for the title bar,
+// the log and the open dialog: the password of a URL, the option values of
+// an rclone spec (maskRcloneSecrets).
 func MaskURLPassword(rawURL string) string {
 	if strings.HasPrefix(rawURL, rcloneScheme) {
 		return rcloneScheme + maskRcloneSecrets(strings.TrimPrefix(rawURL, rcloneScheme))
 	}
+	return maskURLUserinfo(rawURL)
+}
+
+// maskURLUserinfo hides the password of a URL: what follows the user name
+// up to the @ before the host, cut as parseRemoteURL cuts it. A password
+// with a / in it ended the authority early: the mask found no @ there and
+// showed the URL, password and all (F26). An authority user:X, with X no
+// port and an @ further on, is now taken for such a password, up to the
+// last @. A password that starts with a port number and a / still shows:
+// user:22/x@host reads as the host user on port 22.
+func maskURLUserinfo(rawURL string) string {
 	idx := strings.Index(rawURL, "://")
 	if idx < 0 {
 		return rawURL
 	}
-	rest := rawURL[idx+3:]
-	authority := rest
-	tail := ""
-	if si := strings.IndexByte(rest, '/'); si >= 0 {
-		authority = rest[:si]
-		tail = rest[si:]
+	head, rest := rawURL[:idx+3], rawURL[idx+3:]
+	authority, _, _ := strings.Cut(rest, "/")
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		user, _, ok := strings.Cut(authority[:at], ":")
+		if !ok {
+			return rawURL // a user, no password
+		}
+		return head + user + ":xxxxx" + rest[at:]
 	}
-	ai := strings.LastIndexByte(authority, '@')
-	if ai < 0 {
+	user, x, ok := strings.Cut(authority, ":")
+	at := strings.LastIndexByte(rest, '@')
+	if !ok || at < 0 || strings.HasPrefix(authority, "[") || isPortNumber(x) {
 		return rawURL
 	}
-	creds := authority[:ai]
-	ci := strings.IndexByte(creds, ':')
-	if ci < 0 {
-		return rawURL
+	return head + user + ":xxxxx" + rest[at:]
+}
+
+// isPortNumber reports a port: 1 to 5 digits.
+func isPortNumber(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
 	}
-	return rawURL[:idx+3] + creds[:ci] + ":xxxxx@" + authority[ai+1:] + tail
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // OpenBackend connects synchronously; anything without a known scheme is a
