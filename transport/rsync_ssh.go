@@ -298,10 +298,13 @@ func (b *RsyncSSHBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath 
 
 // SendLocalTree uploads the listed paths under srcRoot/relPath, and the
 // folders above them, in one rsync session: nothing else of the folder
-// (F20). -c stands in for --ignore-times: rsync then skips only a listed
-// file whose size, mtime and checksum all match, so a content-different
-// file is never dropped. --progress makes the sender print each filename as
-// it starts, which feeds onFile. Each file goes through a temp file renamed
+// (F20). -I (--ignore-times) sends every listed file, as the caller listed
+// it because it differs. -c stood in for it: both ends read each listed
+// file before a byte moved, and a listed file that matched was neither
+// sent nor counted (R13). The sender names each file it begins
+// (WithSendCallback), which feeds onFile. Its --progress output fed it,
+// and a file sent within a second has a progress line with no \r, which
+// was taken for a name (R13). Each file goes through a temp file renamed
 // into place, as rsyncTransferFlags says.
 func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error {
 	names, err := namesUnder(relPath, files)
@@ -314,8 +317,11 @@ func (b *RsyncSSHBackend) SendLocalTree(ctx context.Context, srcRoot, relPath st
 	if _, err := b.run(ctx, "mkdir -p "+shellQuote(remoteDest)); err != nil {
 		return err
 	}
-	client, err := newRsyncClient([]string{"-t", "-O", "-W", "-r", "-c", "--progress"},
-		rsyncclient.WithSender(), rsyncclient.WithSendOnly(names), rsyncclient.WithStdout(&filenameLineParser{onFile: onFile}))
+	opts := []rsyncclient.Option{rsyncclient.WithSender(), rsyncclient.WithSendOnly(names)}
+	if onFile != nil {
+		opts = append(opts, rsyncclient.WithSendCallback(onFile))
+	}
+	client, err := newRsyncClient([]string{"-t", "-O", "-W", "-r", "-I"}, opts...)
 	if err != nil {
 		return err
 	}
@@ -349,33 +355,6 @@ func namesUnder(relPath string, files []string) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, nil
-}
-
-// filenameLineParser parses gorsync's sender --progress stdout. Per file the
-// sender writes "<name>\n" followed by progress lines built with \r as the
-// in-line separator and a final \n. Lines containing \r are progress; lines
-// without \r are filenames.
-type filenameLineParser struct {
-	buf    []byte
-	onFile func(name string)
-}
-
-func (p *filenameLineParser) Write(b []byte) (int, error) {
-	p.buf = append(p.buf, b...)
-	for {
-		i := bytes.IndexByte(p.buf, '\n')
-		if i < 0 {
-			return len(b), nil
-		}
-		line := p.buf[:i]
-		p.buf = p.buf[i+1:]
-		if bytes.IndexByte(line, '\r') >= 0 {
-			continue
-		}
-		if name := strings.TrimSpace(string(line)); name != "" && p.onFile != nil {
-			p.onFile(name)
-		}
-	}
 }
 
 // sendFile pushes one local file into relPath's directory. prep runs after the
