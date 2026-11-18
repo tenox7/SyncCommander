@@ -399,6 +399,10 @@ func (b *lazyBackend) RemoveAll(ctx context.Context, relPath string) error {
 	return b.do(ctx, "removeall "+relPath, func(in model.Backend) error { return in.RemoveAll(ctx, relPath) })
 }
 
+func (b *lazyBackend) RemoveIn(ctx context.Context, dir string, items []model.RemoveItem) error {
+	return doAs(b, ctx, fmt.Sprintf("remove %d in %s", len(items), dir), func(r model.BatchRemover) error { return r.RemoveIn(ctx, dir, items) })
+}
+
 func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	return doVal(b, ctx, "open "+relPath, func(in model.Backend) (io.ReadCloser, error) { return in.Open(ctx, relPath) })
 }

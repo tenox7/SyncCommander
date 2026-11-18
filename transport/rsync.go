@@ -840,25 +840,63 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 		return errors.New("rsync: refusing to remove module root")
 	}
 	clean := cleanRel(relPath)
-	if strings.ContainsAny(clean, "\r\n") {
-		return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", clean)
-	}
 	op := "REMOVE"
 	if recursive {
 		op = "REMOVEALL"
 	}
-	// The push below goes into the folder of clean, and makes it when it is
-	// not there.
-	there, err := b.checkDirs(ctx, parentDir(clean))
+	return b.removeRun(ctx, op+" "+clean, parentDir(clean), []model.RemoveItem{{Name: path.Base(clean), IsDir: recursive}})
+}
+
+// removeBatch is the most entries one run of RemoveIn deletes, which
+// bounds the rules a run sends. The daemon matches each name in the folder
+// against the rules in turn: a run of many costs what as many runs of one
+// did in matching, and saves their listings of the folder.
+var removeBatch = 1000
+
+// RemoveIn deletes entries of dir in one --delete run per removeBatch of
+// them, with the rules a Remove or a RemoveAll sends, one after the other.
+// A run lists the folder, and a mirror made one per entry it deleted: V
+// deletes in a folder of N entries listed it V times (R16).
+func (b *RsyncBackend) RemoveIn(ctx context.Context, dir string, items []model.RemoveItem) error {
+	dir = cleanRel(dir)
+	where := dir
+	if where == "" {
+		where = "/"
+	}
+	for len(items) > 0 {
+		n := min(len(items), removeBatch)
+		if err := b.removeRun(ctx, fmt.Sprintf("REMOVE %d in %s", n, where), dir, items[:n]); err != nil {
+			return err
+		}
+		items = items[n:]
+	}
+	return nil
+}
+
+// removeRun deletes items, entries of dir, in one run: an empty folder is
+// pushed into dir with -r --delete, and filter rules name what goes. label
+// names the run in the log.
+func (b *RsyncBackend) removeRun(ctx context.Context, label, dir string, items []model.RemoveItem) error {
+	for _, it := range items {
+		full := path.Join(dir, it.Name)
+		switch {
+		case it.Name == "" || it.Name == "." || it.Name == ".." || strings.Contains(it.Name, "/"):
+			return fmt.Errorf("rsync: %s: %q is no name in a folder", label, it.Name)
+		case strings.ContainsAny(full, "\r\n"):
+			return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", full)
+		}
+	}
+	// The push below goes into dir, and makes it when it is not there.
+	there, err := b.checkDirs(ctx, dir)
 	if errors.Is(err, fs.ErrExist) || err == nil && !there {
-		err := fmt.Errorf("rsync: %s %s: the folder it is in is not there: %w", op, clean, fs.ErrNotExist)
+		err := fmt.Errorf("rsync: %s: the folder it is in is not there: %w", label, fs.ErrNotExist)
 		Log.Add("rsync", DirErr, err.Error())
 		return err
 	}
 	if err != nil {
 		return err
 	}
-	dest, err := b.pushTarget(ctx, parentDir(clean))
+	dest, err := b.pushTarget(ctx, dir)
 	if err != nil {
 		return err
 	}
@@ -868,24 +906,29 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	}
 	defer os.RemoveAll(tmpDir)
 
-	name := path.Base(clean)
-	args := []string{"-r", "--delete", "--include=/" + rsyncFilterName(name, false)}
-	if recursive {
-		args = append(args, "--include=/"+rsyncFilterName(name, true)+"/***")
+	args := []string{"-r", "--delete"}
+	for _, it := range items {
+		args = append(args, "--include=/"+rsyncFilterName(it.Name, false))
+		if it.IsDir {
+			args = append(args, "--include=/"+rsyncFilterName(it.Name, true)+"/***")
+		}
 	}
 	args = append(args, "--exclude=*")
-	Log.Add("rsync", DirOut, op+" "+clean)
+	Log.Add("rsync", DirOut, label)
 	err = b.transfer(ctx, args, dest+"/", []string{tmpDir + "/"}, true, nil)
-	b.forgetDirs(clean, recursive)
-	if recursive {
-		b.listCache.invalidateTree(relPath)
+	for _, it := range items {
+		rel := path.Join(dir, it.Name)
+		b.forgetDirs(rel, it.IsDir)
+		if it.IsDir {
+			b.listCache.invalidateTree(rel)
+		}
 	}
-	b.listCache.invalidate(parentDir(relPath))
+	b.listCache.invalidate(dir)
 	if err != nil {
-		Log.Add("rsync", DirErr, op+" "+clean+": "+err.Error())
+		Log.Add("rsync", DirErr, label+": "+err.Error())
 		return err
 	}
-	Log.Add("rsync", DirIn, op+" "+clean+" OK")
+	Log.Add("rsync", DirIn, label+" OK")
 	return nil
 }
 

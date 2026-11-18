@@ -772,6 +772,9 @@ func (c *copier) mirrorDelete() {
 			transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("mirror delete finished with %d failure(s) of %d", delFailed, len(c.req.Plan.Deletes)))
 		}
 	}()
+	// A destination that removes a folder's entries in one round trip gets
+	// each folder's in one call (R16).
+	br, batches := capable[model.BatchRemover](c.ctx, c.dst, func(caps model.Caps) bool { return caps.BatchRemove })
 	for _, dir := range dirs {
 		if c.ctx.Err() != nil {
 			return
@@ -782,16 +785,24 @@ func (c *copier) mirrorDelete() {
 			transport.Log.Add("copy", transport.DirErr, "mirror delete in "+displayPath(dir)+" skipped: "+err.Error())
 			continue
 		}
+		var victims []Delete
 		for _, d := range byDir[dir] {
-			if c.ctx.Err() != nil {
-				return
-			}
 			if why, changed := keep(d); why != "" {
 				transport.Log.Add("copy", transport.DirWarn, "mirror delete "+d.RelPath+" skipped: "+why)
 				if changed {
 					kept++
 				}
 				continue
+			}
+			victims = append(victims, d)
+		}
+		if batches && len(victims) > 1 {
+			delFailed += c.removeIn(br, dir, victims)
+			continue
+		}
+		for _, d := range victims {
+			if c.ctx.Err() != nil {
+				return
 			}
 			c.markChanged(d.RelPath)
 			if err := c.remove(entry{relPath: d.RelPath, isDir: d.IsDir}); err != nil {
@@ -809,6 +820,41 @@ func (c *copier) mirrorDelete() {
 	if kept > 0 {
 		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("mirror delete: kept %d on %s that the dialog did not show as they are now: copy again to be asked", kept, dstSideName(c.req.LeftToRight)))
 	}
+}
+
+// removeIn deletes victims, entries of dir, in one call to a destination
+// that removes a folder's entries in one round trip (R16), and returns how
+// many it could not. When the call fails, a listing of dir tells which are
+// gone: deleting each again on its own would be the round trip per entry
+// that the call saves. When that listing fails too, none counts as gone.
+func (c *copier) removeIn(br model.BatchRemover, dir string, victims []Delete) (failed int) {
+	items := make([]model.RemoveItem, len(victims))
+	for i, d := range victims {
+		c.markChanged(d.RelPath)
+		items[i] = model.RemoveItem{Name: path.Base(d.RelPath), IsDir: d.IsDir}
+	}
+	err := br.RemoveIn(c.ctx, dir, items)
+	gone := map[string]bool{} // after a failed call, what dir no longer lists
+	if err != nil {
+		if list, lerr := c.dst.List(model.WithFreshListing(c.ctx), dir); lerr == nil {
+			listed := make(map[string]bool, len(list))
+			for _, e := range list {
+				listed[e.Name] = true
+			}
+			for _, it := range items {
+				gone[it.Name] = !listed[it.Name]
+			}
+		}
+	}
+	for _, d := range victims {
+		if err != nil && !gone[path.Base(d.RelPath)] {
+			failed++
+			transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.RelPath+": "+err.Error())
+			continue
+		}
+		transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.RelPath)
+	}
+	return failed
 }
 
 // unplannedDeletes are the entries only on the destination that the tree

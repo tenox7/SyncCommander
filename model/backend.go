@@ -158,6 +158,7 @@ type Caps struct {
 	Preload      bool // RecursivePreloader
 	PrefetchSums bool // ChecksumPrefetcher
 	BatchSums    bool // ChecksumBatcher
+	BatchRemove  bool // BatchRemover
 	// OwnsProgress: CopyFrom counts the bytes it sends against the context's
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).
@@ -420,6 +421,24 @@ func HashBytes(ctx context.Context) int64 {
 // mtime+size match: the caller listed it because it differs.
 type BatchSender interface {
 	SendLocalTree(ctx context.Context, srcRoot, relPath string, files []string, onFile func(name string)) error
+}
+
+// BatchRemover is implemented by backends that remove several entries of
+// one folder in one round trip. An rsync daemon has no delete: each is a
+// --delete run, which lists the folder, so a mirror that deleted V of a
+// folder's N entries one by one listed it V times (R16).
+type BatchRemover interface {
+	// RemoveIn removes the entries of dir that items name: a file as
+	// Remove does, a folder with what it holds, as RemoveAll does. An
+	// error says some may still be there: a listing of dir tells which.
+	RemoveIn(ctx context.Context, dir string, items []RemoveItem) error
+}
+
+// RemoveItem is an entry RemoveIn removes: its name in the folder, and
+// whether it is a folder, removed with what it holds.
+type RemoveItem struct {
+	Name  string
+	IsDir bool
 }
 
 // RecursivePreloader is implemented by backends where one recursive listing

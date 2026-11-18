@@ -35,9 +35,10 @@ func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true}, nil
 }
 
+// A daemon deletes a folder's entries in one run (R16).
 func (b *RsyncBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, OpenAt: true, SendLocal: true, RecvLocal: true, Preload: true,
-		PrefetchSums: true, OwnsProgress: true}, nil
+		PrefetchSums: true, BatchRemove: true, OwnsProgress: true}, nil
 }
 
 func (b *FTPBackend) Capabilities(context.Context) (model.Caps, error) {
@@ -108,6 +109,7 @@ var (
 	_ model.LocalSender        = (*RsyncBackend)(nil)
 	_ model.LocalReceiver      = (*RsyncBackend)(nil)
 	_ model.RecursivePreloader = (*RsyncBackend)(nil)
+	_ model.BatchRemover       = (*RsyncBackend)(nil)
 	_ model.Backend            = (*FTPBackend)(nil)
 	_ model.Resumer            = (*FTPBackend)(nil)
 	_ model.SeekableOpener     = (*FTPBackend)(nil)
@@ -131,6 +133,7 @@ var (
 	_ model.LivenessManaged    = (*lazyBackend)(nil)
 	_ model.Resumer            = (*lazyBackend)(nil)
 	_ model.BatchSender        = (*lazyBackend)(nil)
+	_ model.BatchRemover       = (*lazyBackend)(nil)
 	_ ParallelSetter           = (*lazyBackend)(nil)
 	_ model.PartWriter         = (*lazyBackend)(nil)
 	_ model.RegionChecksummer  = (*lazyBackend)(nil)
