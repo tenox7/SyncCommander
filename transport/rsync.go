@@ -35,6 +35,7 @@ type RsyncBackend struct {
 	display   string
 	listCache *listCache
 	sentMtime sync.Map // mtime each upload sent with -t, see SetTimes
+	dirs      sync.Map // folders seen on the daemon, by path: see checkDirs
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -549,6 +550,63 @@ func (b *RsyncBackend) transferArgs(extra ...string) []string {
 	return append(transferFlags(), extra...)
 }
 
+// checkDirs reports whether relDir is a folder on the daemon, before a
+// write that needs it. A staged push (see stageUploadPath) sends every
+// folder above what it writes, and rsync puts a folder where a file is in
+// its way: an upload or a Mkdir under a name that was a file there deleted
+// that file, with no word, and a delete made the folder it deleted in when
+// that was not there (R21). So a part of relDir that is no folder is an
+// error, and one that is not there means relDir is not: a push makes it,
+// and a delete has nothing to do. Folders seen before cost nothing: the
+// first one not seen, from relDir up, costs a Stat, and so does each one
+// above it, up to one that is there.
+func (b *RsyncBackend) checkDirs(ctx context.Context, relDir string) (bool, error) {
+	var unseen []string // relDir and its folders up to the first seen one
+	for p := cleanRel(relDir); p != ""; p = parentDir(p) {
+		if _, ok := b.dirs.Load(p); ok {
+			break
+		}
+		unseen = append(unseen, p)
+	}
+	for i, p := range unseen {
+		e, err := b.Stat(ctx, p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return false, err
+		case !e.IsDir:
+			return false, fmt.Errorf("rsync: %s is there on the daemon and is no folder: %w", p, fs.ErrExist)
+		}
+		b.sawDirs(p)
+		return i == 0, nil
+	}
+	return len(unseen) == 0, nil
+}
+
+// sawDirs notes relDir and the folders above it as folders on the daemon.
+func (b *RsyncBackend) sawDirs(relDir string) {
+	for p := cleanRel(relDir); p != ""; p = parentDir(p) {
+		b.dirs.Store(p, true)
+	}
+}
+
+// forgetDirs drops relPath, and with tree each folder under it, from the
+// folders seen, after a delete there.
+func (b *RsyncBackend) forgetDirs(relPath string, tree bool) {
+	clean := cleanRel(relPath)
+	b.dirs.Delete(clean)
+	if !tree {
+		return
+	}
+	b.dirs.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), clean+"/") {
+			b.dirs.Delete(k)
+		}
+		return true
+	})
+}
+
 // stageUploadPath builds, under tmpDir, the full relPath directory chain with
 // an empty leaf, returning the top-level staging component and the leaf path.
 // The rsync daemon protocol has no mkdir: a recursive (-r) send of the top
@@ -588,12 +646,15 @@ func (b *RsyncBackend) push(ctx context.Context, label, src, dest string, adder 
 // daemon recreates the leading dirs; across filesystems the link fails and a
 // Mkdir plus flat send takes over.
 func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath string, p model.PutParams) error {
+	parentRel := parentDir(relPath)
+	if _, err := b.checkDirs(ctx, parentRel); err != nil {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "rsync-send-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
-	parentRel := parentDir(relPath)
 	src, destRel := srcPath, parentRel
 	if stageTop, link, perr := stageUploadPath(tmpDir, relPath); perr == nil && os.Link(srcPath, link) == nil {
 		src, destRel = stageTop, ""
@@ -612,6 +673,7 @@ func (b *RsyncBackend) SendLocalFile(ctx context.Context, srcPath, relPath strin
 	err = b.push(ctx, "SEND "+srcPath+" -> "+relPath, src, dest+"/", adder, fileSize, 0, "-r")
 	if err == nil {
 		b.noteSent(relPath, srcPath)
+		b.sawDirs(parentRel)
 	}
 	b.listCache.invalidateAncestors(relPath)
 	return err
@@ -635,6 +697,9 @@ func (b *RsyncBackend) RecvToLocalFile(ctx context.Context, relPath, dstPath str
 }
 
 func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
+	if _, err := b.checkDirs(ctx, parentDir(relPath)); err != nil {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "rsync-upload-*")
 	if err != nil {
 		return err
@@ -655,6 +720,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	err = b.push(ctx, "SEND "+relPath, stageTop, dest+"/", pushAdder, pushBudget, 0, "-r")
 	if err == nil {
 		b.noteSent(relPath, tmpFile)
+		b.sawDirs(parentDir(relPath))
 	}
 	b.listCache.invalidateAncestors(relPath)
 	return err
@@ -708,6 +774,10 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	if clean == "" {
 		return nil
 	}
+	// A folder that is there needs no push; a file in the way is an error.
+	if there, err := b.checkDirs(ctx, clean); err != nil || there {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "rsync-mkdir-*")
 	if err != nil {
 		return err
@@ -730,8 +800,10 @@ func (b *RsyncBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMo
 	b.listCache.invalidateAncestors(relPath)
 	if err != nil {
 		Log.Add("rsync", DirErr, err.Error())
+		return err
 	}
-	return err
+	b.sawDirs(clean)
+	return nil
 }
 
 func (b *RsyncBackend) Rename(context.Context, string, string) error {
@@ -771,6 +843,21 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 	if strings.ContainsAny(clean, "\r\n") {
 		return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", clean)
 	}
+	op := "REMOVE"
+	if recursive {
+		op = "REMOVEALL"
+	}
+	// The push below goes into the folder of clean, and makes it when it is
+	// not there.
+	there, err := b.checkDirs(ctx, parentDir(clean))
+	if errors.Is(err, fs.ErrExist) || err == nil && !there {
+		err := fmt.Errorf("rsync: %s %s: the folder it is in is not there: %w", op, clean, fs.ErrNotExist)
+		Log.Add("rsync", DirErr, err.Error())
+		return err
+	}
+	if err != nil {
+		return err
+	}
 	dest, err := b.pushTarget(ctx, parentDir(clean))
 	if err != nil {
 		return err
@@ -783,14 +870,13 @@ func (b *RsyncBackend) remove(ctx context.Context, relPath string, recursive boo
 
 	name := path.Base(clean)
 	args := []string{"-r", "--delete", "--include=/" + rsyncFilterName(name, false)}
-	op := "REMOVE"
 	if recursive {
 		args = append(args, "--include=/"+rsyncFilterName(name, true)+"/***")
-		op = "REMOVEALL"
 	}
 	args = append(args, "--exclude=*")
 	Log.Add("rsync", DirOut, op+" "+clean)
 	err = b.transfer(ctx, args, dest+"/", []string{tmpDir + "/"}, true, nil)
+	b.forgetDirs(clean, recursive)
 	if recursive {
 		b.listCache.invalidateTree(relPath)
 	}
