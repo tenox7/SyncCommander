@@ -19,19 +19,20 @@ func (b *LocalBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Names: b.nameRule()}, nil
 }
 
+// The ssh shell sums many files with one command (S19).
 func (b *SFTPBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true}, nil
 }
 
 func (b *SCPBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true}, nil
 }
 
 // An rsync destination counts its own upload progress (OwnsProgress). The
 // region checksums of rsync+ssh are its shell's.
 func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, RegionSums: true, OpenAt: true, SendLocal: true, RecvLocal: true, Batch: true,
-		Preload: true, PrefetchSums: true, OwnsProgress: true}, nil
+		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true}, nil
 }
 
 func (b *RsyncBackend) Capabilities(context.Context) (model.Caps, error) {
@@ -80,6 +81,7 @@ var (
 	_ ParallelSetter           = (*SFTPBackend)(nil)
 	_ model.PartWriter         = (*SFTPBackend)(nil)
 	_ model.RegionChecksummer  = (*SFTPBackend)(nil)
+	_ model.ChecksumBatcher    = (*SFTPBackend)(nil)
 	_ model.Backend            = (*SCPBackend)(nil)
 	_ model.Resumer            = (*SCPBackend)(nil)
 	_ model.SeekableOpener     = (*SCPBackend)(nil)
@@ -87,8 +89,10 @@ var (
 	_ ParallelSetter           = (*SCPBackend)(nil)
 	_ model.PartWriter         = (*SCPBackend)(nil)
 	_ model.RegionChecksummer  = (*SCPBackend)(nil)
+	_ model.ChecksumBatcher    = (*SCPBackend)(nil)
 	_ model.Backend            = (*RsyncSSHBackend)(nil)
 	_ model.ChecksumPrefetcher = (*RsyncSSHBackend)(nil)
+	_ model.ChecksumBatcher    = (*RsyncSSHBackend)(nil)
 	_ model.Resumer            = (*RsyncSSHBackend)(nil)
 	_ model.RegionChecksummer  = (*RsyncSSHBackend)(nil)
 	_ model.SeekableOpener     = (*RsyncSSHBackend)(nil)
@@ -131,6 +135,7 @@ var (
 	_ model.PartWriter         = (*lazyBackend)(nil)
 	_ model.RegionChecksummer  = (*lazyBackend)(nil)
 	_ model.ChecksumPrefetcher = (*lazyBackend)(nil)
+	_ model.ChecksumBatcher    = (*lazyBackend)(nil)
 	_ model.SeekableOpener     = (*lazyBackend)(nil)
 	_ model.LocalSender        = (*lazyBackend)(nil)
 	_ model.LocalReceiver      = (*lazyBackend)(nil)

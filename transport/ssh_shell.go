@@ -36,6 +36,9 @@ type sshShell struct {
 	cksumCmds map[string]string
 	listCache *listCache   // nil when the backend has no recursive preload
 	form      atomic.Int32 // the lister: formUnknown until a listing or stat finds it
+	// noBatch: an answer to ChecksumFiles was not the one asked for, so
+	// the connection sums file by file.
+	noBatch atomic.Bool
 }
 
 func (s *sshShell) BasePath() string { return s.display }
@@ -763,6 +766,97 @@ func (s *sshShell) Checksum(ctx context.Context, relPath, algo string) (string, 
 		return "", fmt.Errorf("%s: %s of %s: the server answered %s, not a sum", s.proto, algo, relPath, clip(out))
 	}
 	return sum, nil
+}
+
+// ChecksumFiles sums the files rels names with one command
+// (model.ChecksumBatcher): a command for each file was a round trip for
+// each, hours for a million small files at 50 ms (S19). The command is sh
+// and the script comes on its input, so no command line limits the names,
+// and they stay out of the log. For each file the script prints its index
+// in rels, a space, and what the server's command for algo prints with the
+// file as its input, as the probe ran it; or "!" for a file that is not a
+// file now or cannot be read. That file, and one the answer does not
+// reach, gets no sum. An answer that is not the one asked for is not read
+// on, and the connection sums file by file from then on.
+func (s *sshShell) ChecksumFiles(ctx context.Context, rels []string, algo string) (map[string]string, error) {
+	if s.noBatch.Load() {
+		return nil, fmt.Errorf("%s: summing files in one command: %w", s.proto, ErrUnsupported)
+	}
+	cmds, err := s.checksumCmds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// An algorithm the shell has no command for, as rsync's md4, is no
+	// failure to try again.
+	cmd := cmds[algo]
+	if cmd == "" {
+		return nil, fmt.Errorf("%s: no %q checksum command on the remote: %w", s.proto, algo, ErrUnsupported)
+	}
+	var script bytes.Buffer
+	fmt.Fprintf(&script, `sc_sum() { printf '%%s ' "$1"; if [ -f "$2" ] && [ ! -L "$2" ]; then { %s < "$2"; } 2>/dev/null || echo '!'; else echo '!'; fi; }`+"\n", cmd)
+	for i, rel := range rels {
+		fmt.Fprintf(&script, "sc_sum %d %s\n", i, shellQuote(s.abs(rel)))
+	}
+	w := &batchSums{rels: rels, algo: algo, sums: make(map[string]string, len(rels))}
+	err = s.exec(ctx, s.client, "sh", &script, w)
+	// A command that did not run, or did not end by itself, says nothing
+	// of how the server answers: a lost connection is tried again.
+	var exit *ssh.ExitError
+	if err != nil && !errors.As(err, &exit) || ctx.Err() != nil {
+		return w.sums, err
+	}
+	if err == nil && w.bad == "" && len(w.buf) == 0 && w.next == len(rels) {
+		return w.sums, nil
+	}
+	s.noBatch.Store(true)
+	what := fmt.Sprintf("the answer ended after %d of %d files", w.next, len(rels))
+	if w.bad != "" {
+		what = "the server answered " + clip(w.bad)
+	}
+	if err != nil {
+		what += ", " + err.Error()
+	}
+	err = fmt.Errorf("%s: summing files in one command: %s; the files are summed one by one: %w", s.proto, what, ErrUnsupported)
+	Log.Add(s.proto, DirWarn, err.Error())
+	return w.sums, err
+}
+
+// batchSums reads the answer to ChecksumFiles's script, a line for each
+// file: its index, a space, and what its checksum command printed. It
+// reads on only while each line is the next one asked for; it never fails
+// a write, which would hold the command up.
+type batchSums struct {
+	rels []string
+	algo string
+	sums map[string]string
+	buf  []byte
+	next int    // the index the next line has
+	bad  string // the first line that is not the next one asked for
+}
+
+func (w *batchSums) Write(p []byte) (int, error) {
+	if w.bad != "" {
+		return len(p), nil
+	}
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(w.buf[:i])
+		w.buf = w.buf[i+1:]
+		idx, rest, ok := strings.Cut(line, " ")
+		if !ok || w.next >= len(w.rels) || idx != strconv.Itoa(w.next) {
+			w.bad, w.buf = line, nil
+			break
+		}
+		if sum, ok := sumIn(rest, w.algo); ok {
+			w.sums[w.rels[w.next]] = sum
+		}
+		w.next++
+	}
+	return len(p), nil
 }
 
 // ChecksumRange sums n bytes of relPath from off on the server, the

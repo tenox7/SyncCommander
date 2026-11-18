@@ -20,8 +20,9 @@ func methodCaps(b model.Backend) model.Caps {
 	_, batch := b.(model.BatchSender)
 	_, preload := b.(model.RecursivePreloader)
 	_, prefetch := b.(model.ChecksumPrefetcher)
+	_, sums := b.(model.ChecksumBatcher)
 	return model.Caps{Resume: resume, Parts: parts, RegionSums: region, OpenAt: openAt, SendLocal: send,
-		RecvLocal: recv, Batch: batch, Preload: preload, PrefetchSums: prefetch}
+		RecvLocal: recv, Batch: batch, Preload: preload, PrefetchSums: prefetch, BatchSums: sums}
 }
 
 // Each backend's Caps says what its methods do (D2): a flag without the

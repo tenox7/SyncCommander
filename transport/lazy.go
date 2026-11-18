@@ -493,6 +493,16 @@ func (b *lazyBackend) PrefetchChecksums(ctx context.Context, scope, algo string,
 	return sums, err
 }
 
+func (b *lazyBackend) ChecksumFiles(ctx context.Context, rels []string, algo string) (map[string]string, error) {
+	var sums map[string]string
+	err := doAs(b, ctx, fmt.Sprintf("checksum %d files", len(rels)), func(c model.ChecksumBatcher) error {
+		var e error
+		sums, e = c.ChecksumFiles(ctx, rels, algo)
+		return e
+	})
+	return sums, err
+}
+
 func (b *lazyBackend) PreloadRecursive(ctx context.Context, scope string) error {
 	p, err := capability[model.RecursivePreloader](b, ctx)
 	if errors.Is(err, ErrUnsupported) {

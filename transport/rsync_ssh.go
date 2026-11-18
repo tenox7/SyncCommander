@@ -238,7 +238,7 @@ func (b *RsyncSSHBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
 }
 
 // PrefetchChecksums fetches md4 for scope in one rsync run; the shell's
-// algorithms are asked file by file.
+// algorithms are summed in batches (ChecksumFiles, S19).
 func (b *RsyncSSHBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {
 	if algo != "md4" {
 		return nil, nil

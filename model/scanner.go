@@ -705,6 +705,16 @@ func asPrefetcher(ctx context.Context, b Backend) ChecksumPrefetcher {
 	return p
 }
 
+// asBatcher returns b as a ChecksumBatcher when its Caps says it sums many
+// files with one request; nil when not, or when that cannot be told.
+func asBatcher(ctx context.Context, b Backend) ChecksumBatcher {
+	if caps, err := b.Capabilities(ctx); err != nil || !caps.BatchSums {
+		return nil
+	}
+	cb, _ := b.(ChecksumBatcher)
+	return cb
+}
+
 // NegotiateChecksum returns the checksum algorithm both backends offer, the
 // one every Checksum call of this scanner is given, and whether there is
 // one. The first call that can ask both backends picks it.
@@ -1034,8 +1044,8 @@ func (s *Scanner) settleChecksumPhase(groups []checksumGroup) {
 // groups independently. A write may run beside the pass: a relist changes
 // the nodes' entries and a rename their paths, under the lock, so the pass
 // reads both under it too (F27). Each side does its own prefetch (if its backend
-// supports it) and then per-file Checksum calls, up to s.concurrency in
-// parallel. The faster side pipelines ahead, so the spinner on the left panel
+// supports it), then batches (if its backend sums many files with one
+// request) and per-file Checksum calls, up to s.concurrency in parallel. The faster side pipelines ahead, so the spinner on the left panel
 // can be on a different dir than the right panel.
 func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, algo string, onPairDone func()) {
 	var wg sync.WaitGroup
@@ -1048,6 +1058,7 @@ func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, 
 
 func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, algo string, onPairDone func()) {
 	prefetcher := asPrefetcher(ctx, s.backend(side))
+	batcher := asBatcher(ctx, s.backend(side))
 	sem := make(chan struct{}, s.concurrency)
 
 	setDir := func(dir *TreeNode, active, pending bool) {
@@ -1069,7 +1080,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		}
 		setDir(g.dir, true, true)
 		// One bulk fetch sums the group's folder for this pass; a file it
-		// has no sum for is summed by itself.
+		// has no sum for is summed in a batch, or by itself.
 		var prefetched map[string]string
 		if prefetcher != nil && g.dir != nil {
 			s.mu.RLock()
@@ -1082,7 +1093,7 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 			}
 		}
 
-		var wg sync.WaitGroup
+		var left []*TreeNode
 		for _, f := range g.files {
 			if ctx.Err() != nil {
 				break
@@ -1095,6 +1106,19 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 					onPairDone()
 				}
 				continue
+			}
+			left = append(left, f)
+		}
+		// A backend that sums many files with one request is given the
+		// files the fetch left in batches: a request for each file was a
+		// round trip for each (S19).
+		if batcher != nil && len(left) > 1 {
+			left = s.checksumBatches(ctx, batcher, left, side, algo, sem, onPairDone)
+		}
+		var wg sync.WaitGroup
+		for _, f := range left {
+			if ctx.Err() != nil {
+				break
 			}
 			wg.Add(1)
 			sem <- struct{}{}
@@ -1125,6 +1149,109 @@ func sideFileBytes(dir *TreeNode, side Side) int64 {
 		}
 	}
 	return n
+}
+
+// A batch of files a backend sums with one request holds at most
+// checksumBatchFiles files and checksumBatchBytes bytes, or one bigger
+// file: a request the connection cut off is made again whole, and the sums
+// of a batch show when it ends.
+const (
+	checksumBatchFiles = 1024
+	checksumBatchBytes = 1 << 30
+)
+
+// checksumBatches sums files on side with b, a batch at a time, up to
+// s.concurrency batches side by side under sem. It returns the files no
+// batch gave a sum for: the caller sums them one by one, where the error
+// shows.
+func (s *Scanner) checksumBatches(ctx context.Context, b ChecksumBatcher, files []*TreeNode, side Side, algo string, sem chan struct{}, onPairDone func()) []*TreeNode {
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		missed []*TreeNode
+	)
+	for len(files) > 0 && ctx.Err() == nil {
+		n := s.batchLen(files, side)
+		batch := files[:n]
+		files = files[n:]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if m := s.checksumBatch(ctx, b, batch, side, algo, onPairDone); len(m) > 0 {
+				mu.Lock()
+				missed = append(missed, m...)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return missed
+}
+
+// batchLen is how many of files, from the first, make one batch on side.
+func (s *Scanner) batchLen(files []*TreeNode, side Side) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total int64
+	for i, f := range files {
+		if e := f.Sides[side].Entry; e != nil {
+			total += e.Size
+		}
+		if i == checksumBatchFiles || i > 0 && total > checksumBatchBytes {
+			return i
+		}
+	}
+	return len(files)
+}
+
+// checksumBatch sums batch on side with one request and stores the sums it
+// gives. It returns the files it gave none for.
+func (s *Scanner) checksumBatch(ctx context.Context, b ChecksumBatcher, batch []*TreeNode, side Side, algo string, onPairDone func()) []*TreeNode {
+	rels := make([]string, len(batch))
+	entries := make([]*FileEntry, len(batch))
+	var ask []string
+	var n int64
+	s.mu.RLock()
+	for i, f := range batch {
+		rels[i], entries[i] = f.RelPath, f.Sides[side].Entry
+		if entries[i] != nil {
+			ask = append(ask, rels[i])
+			n += entries[i].Size
+		}
+	}
+	s.mu.RUnlock()
+	inFlight := func(delta int32) {
+		for i, f := range batch {
+			if entries[i] != nil {
+				markChecksumInFlight(f, side, delta)
+			}
+		}
+	}
+	var sums map[string]string
+	if len(ask) > 0 {
+		inFlight(1)
+		// What failed shows when the files it gave no sum for are summed
+		// by themselves.
+		sums, _ = b.ChecksumFiles(WithHashBytes(ctx, n), ask, algo)
+		inFlight(-1)
+	}
+	var missed []*TreeNode
+	for i, f := range batch {
+		sum, ok := sums[rels[i]]
+		if !ok || entries[i] == nil {
+			missed = append(missed, f)
+			continue
+		}
+		s.lockTree()
+		done := recordSideSum(f, side, entries[i], sum, nil)
+		s.unlockTree()
+		if done && onPairDone != nil {
+			onPairDone()
+		}
+	}
+	return missed
 }
 
 // relPathOf is n's path, which a rename changes under the lock.

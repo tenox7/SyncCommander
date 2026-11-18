@@ -157,6 +157,7 @@ type Caps struct {
 	Batch        bool // BatchSender
 	Preload      bool // RecursivePreloader
 	PrefetchSums bool // ChecksumPrefetcher
+	BatchSums    bool // ChecksumBatcher
 	// OwnsProgress: CopyFrom counts the bytes it sends against the context's
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).
@@ -219,6 +220,18 @@ func WantsFreshListing(ctx context.Context) bool {
 // then (R11).
 type ChecksumPrefetcher interface {
 	PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error)
+}
+
+// ChecksumBatcher is implemented by backends that sum many files with one
+// request, where Checksum is a round trip for each file: hours for a
+// million small files at 50 ms (S19). It sums the files rels names,
+// relPaths under the backend's base, with algo, and gives the sums by
+// relPath for the caller to use now; as with a prefetch, the backend keeps
+// none. A file it gives no sum for, because it cannot be read, is not a
+// file now or the request ended first, the caller sums by itself, where
+// the error shows. How many files one call takes is the caller's choice.
+type ChecksumBatcher interface {
+	ChecksumFiles(ctx context.Context, rels []string, algo string) (map[string]string, error)
 }
 
 // RangeOpener is a handle to a source file the destination can open from byte
