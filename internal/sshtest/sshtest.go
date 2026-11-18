@@ -32,6 +32,10 @@ type Options struct {
 	// hold it, as a server whose file system hangs: the server process
 	// reads and answers nothing, and the ssh connection stays up.
 	SFTPStream func(io.ReadWriter) io.ReadWriter
+	// Hold has the server run none of the commands it says yes to, as a
+	// shell on a hung mount: such a command prints nothing and does not
+	// end until the client closes its session. Keepalives are answered.
+	Hold func(cmd string) bool
 }
 
 // Start serves until the test ends and returns the address. Without
@@ -104,6 +108,14 @@ func serveSession(c ssh.Channel, reqs <-chan *ssh.Request, o Options) {
 			continue
 		}
 		req.Reply(true, nil)
+		if o.Hold != nil && o.Hold(p.Command) {
+			// Not up to the EOF of its input, which a client with
+			// nothing to send sends at once: up to the session's close.
+			go io.Copy(io.Discard, c)
+			for range reqs {
+			}
+			return
+		}
 		if o.OnlySFTP {
 			serveSFTP(c, o)
 			c.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))

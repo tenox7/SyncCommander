@@ -39,6 +39,7 @@ func main() {
 	listTimeout := flag.Duration("list-timeout", 120*time.Second, "abort one directory listing after this long (0 = never)")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
+	rsyncTimeout := flag.Duration("rsync-timeout", 5*time.Minute, "rsync:// idle timeout: fail a listing, mkdir, delete or checksum run when the daemon sends nothing this long, after the time its hashing takes (0 = never); a transfer has -stall-timeout")
 	ftpTimeout := flag.Duration("ftp-timeout", 5*time.Minute, "ftp timeout: fail a call when one read or write on its connection waits this long (0 = never)")
 	resticDelete := flag.Bool("restic-delete", false, "allow deletes in a restic:// repository, a mirror's included (off: refused)")
 	resticNew := flag.Bool("restic-new", false, "open a restic:// path that holds no repository yet (no config), to copy one into it (off: refused, as a mistyped path looks the same)")
@@ -101,6 +102,7 @@ func main() {
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
 	transport.SetResticIdleTimeout(*resticTimeout)
 	transport.SetFTPIdleTimeout(*ftpTimeout)
+	transport.SetRsyncIdleTimeout(*rsyncTimeout)
 	transport.SetResticDeletes(*resticDelete)
 	transport.SetResticNew(*resticNew)
 

@@ -11,9 +11,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gokrazy/rsync/rsyncclient"
@@ -220,6 +222,33 @@ func (b *RsyncBackend) transfer(ctx context.Context, flags []string, remote stri
 	return err
 }
 
+// rsyncIdle is the longest a daemon run that no stall guard watches may go
+// without a byte from the daemon: a stat, a listing, a mkdir, a delete, a
+// checksum fetch. Only the dial had a deadline, so on a daemon gone silent,
+// as at the end of an ssh -L whose far end is dead, such a run waited for a
+// cancel (R17). A transfer has the copy's stall guard (-stall-timeout).
+var rsyncIdle = idleSetting{def: 5 * time.Minute}
+
+// SetRsyncIdleTimeout sets rsyncIdle; 0 or less waits for ever.
+func SetRsyncIdleTimeout(d time.Duration) { rsyncIdle.set(d) }
+
+// daemonIdle is how long a run with flags may wait for the daemon before it
+// fails, 0 for as long as it takes, and the time the daemon's own hashing
+// gets on top. A run under a stall guard is the guard's. With -c the daemon
+// hashes each file it lists before it sends its entry, as long as the
+// caller says that takes (model.HashBytes); a caller that does not say
+// leaves the run no deadline, as its time cannot be told.
+func daemonIdle(ctx context.Context, flags []string) (idle, hash time.Duration) {
+	if watchFromContext(ctx) != nil {
+		return 0, 0
+	}
+	n := model.HashBytes(ctx)
+	if n <= 0 && slices.Contains(flags, "-c") {
+		return 0, 0
+	}
+	return rsyncIdle.get(), HashTime(n)
+}
+
 // dialLimited is the dialer gorsync uses to reach an rsync:// daemon. gorsync
 // opens that socket itself, so this hook is the only place the daemon's bytes
 // can be metered; every other protocol is wrapped where sc dials.
@@ -268,16 +297,30 @@ func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remot
 	if err != nil {
 		return nil, err
 	}
-	// Bytes on the socket show the stall guard the transfer moves, also
-	// when no progress is credited: a push of a source that counted its
-	// own bytes (D5).
-	conn = activeConn(ctx, conn)
 	defer conn.Close()
-	defer context.AfterFunc(ctx, func() { conn.Close() })()
 	result := &rsyncclient.Result{}
-	done, err := b.daemonHandshake(ctx, conn, client, remotePath)
-	if err == nil && !done {
-		result, err = client.Run(ctx, conn, local)
+	run := func(ctx context.Context) error {
+		// Bytes on the socket show the stall guard the run moves, also
+		// when no progress is credited: a push of a source that counted
+		// its own bytes (D5).
+		c := activeConn(ctx, conn)
+		defer context.AfterFunc(ctx, func() { conn.Close() })()
+		done, err := b.daemonHandshake(ctx, c, client, remotePath)
+		if err == nil && !done {
+			result, err = client.Run(ctx, c, local)
+		}
+		return err
+	}
+	idle, hash := daemonIdle(ctx, flags)
+	if idle <= 0 {
+		return result, run(ctx)
+	}
+	err = WithStallGuard(ctx, new(atomic.Int64), idle, func(ctx context.Context) error {
+		ExpectSilence(ctx, hash)
+		return run(ctx)
+	})
+	if errors.Is(err, ErrStall) {
+		err = fmt.Errorf("rsync: the daemon sent nothing for %v (-rsync-timeout): %w", idle, err)
 	}
 	return result, err
 }

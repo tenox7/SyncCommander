@@ -31,17 +31,17 @@ func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, paral
 		return nil, err
 	}
 	b := &RsyncSSHBackend{sshShell: sshShell{client: conn.client, proto: "rsync+ssh", listCache: newListCache()}}
-	if err := b.checkShell(); err != nil {
+	if err := b.checkShell(ctx); err != nil {
 		conn.client.Close()
 		return nil, fmt.Errorf("rsync+ssh: %w", err)
 	}
-	if b.base, err = expandHome(conn.basePath, b.home); err != nil {
+	if b.base, err = expandHome(conn.basePath, func() (string, error) { return b.home(ctx) }); err != nil {
 		conn.client.Close()
 		return nil, fmt.Errorf("rsync+ssh: %w", err)
 	}
-	if _, err := b.run(context.Background(), "command -v rsync"); err != nil {
+	if err := b.findRsync(ctx); err != nil {
 		conn.client.Close()
-		return nil, errors.New("rsync+ssh: remote rsync not found")
+		return nil, fmt.Errorf("rsync+ssh: %w", err)
 	}
 	b.display = sshDisplayURL(conn, b.base)
 	dial := func(ctx context.Context) (*ssh.Client, error) {
@@ -54,6 +54,22 @@ func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, paral
 	}
 	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	return b, nil
+}
+
+// findRsync asks the login shell for rsync. It had no context and no
+// deadline: a PATH on a hung mount hung the connect, and a cancel did not
+// stop it (R17).
+func (b *RsyncSSHBackend) findRsync(ctx context.Context) error {
+	ctx, cancel := shellCheckCtx(ctx)
+	defer cancel()
+	_, err := b.run(ctx, "command -v rsync")
+	if ctx.Err() != nil {
+		return fmt.Errorf("command -v rsync: %w", shellCheckErr(ctx, err))
+	}
+	if err != nil {
+		return errors.New("remote rsync not found")
+	}
+	return nil
 }
 
 // SetParallel keeps n-1 extra connections, the primary being the n-th.

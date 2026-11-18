@@ -307,6 +307,25 @@ type LocalReceiver interface {
 	RecvToLocalFile(ctx context.Context, relPath, dstPath string) error
 }
 
+type hashBytesKey struct{}
+
+// WithHashBytes says that the far side hashes about n bytes for the call
+// made with ctx before it answers in full: a file's checksum, or those of a
+// folder's files. A backend that fails a connection gone silent allows the
+// time that takes (R17). n <= 0 says nothing.
+func WithHashBytes(ctx context.Context, n int64) context.Context {
+	if n <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, hashBytesKey{}, n)
+}
+
+// HashBytes is what WithHashBytes said for ctx, 0 for nothing.
+func HashBytes(ctx context.Context) int64 {
+	n, _ := ctx.Value(hashBytesKey{}).(int64)
+	return n
+}
+
 // BatchSender is implemented by destination backends that can transfer
 // many local paths in one protocol session (e.g. rsync streaming all files
 // over a single SSH channel) instead of N per-file calls. The receiver

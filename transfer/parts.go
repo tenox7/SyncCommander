@@ -54,7 +54,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 			err = c.fillPart(ctx, f.relPath, part, src, &offset, slotBytes, slotBase)
 		}
 		if err == nil && offset > 0 && offset < src.Size && c.req.VerifyResume {
-			err = c.verifyPart(ctx, f.relPath, part)
+			err = c.verifyPart(model.WithHashBytes(ctx, src.Size), f.relPath, part)
 		}
 		if err == nil {
 			// The times go on the part, so the file has them from the moment
@@ -112,6 +112,7 @@ func (c *copier) partOffset(ctx context.Context, pw model.PartWriter, relPath, p
 // checksum. A whole part is compared with the whole source, so a source that
 // grew since does not match it.
 func (c *copier) partMatches(ctx context.Context, relPath, part string, n int64, whole bool) string {
+	ctx = model.WithHashBytes(ctx, n) // each side hashes n bytes
 	algo, ok := c.req.Scanner.NegotiateChecksum(ctx)
 	if !ok {
 		return "no checksum algorithm works on both sides"

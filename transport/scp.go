@@ -26,12 +26,12 @@ type SCPBackend struct {
 // newSCPBackend builds an SCPBackend over an already-dialed sshConn; on
 // error the caller closes conn.client. rawURL lets the pool dial fresh
 // connections for parallel transfers (parallel-1 of them).
-func newSCPBackend(conn *sshConn, rawURL string, insecure bool, parallel int) (*SCPBackend, error) {
+func newSCPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure bool, parallel int) (*SCPBackend, error) {
 	b := &SCPBackend{sshShell: sshShell{client: conn.client, proto: "scp", listCache: newListCache()}}
-	if err := b.checkShell(); err != nil {
+	if err := b.checkShell(ctx); err != nil {
 		return nil, fmt.Errorf("scp: %w", err)
 	}
-	base, err := expandHome(conn.basePath, b.home)
+	base, err := expandHome(conn.basePath, func() (string, error) { return b.home(ctx) })
 	if err != nil {
 		return nil, fmt.Errorf("scp: %w", err)
 	}

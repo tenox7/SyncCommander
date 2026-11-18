@@ -1074,9 +1074,11 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		if prefetcher != nil && g.dir != nil {
 			s.mu.RLock()
 			e, rel := g.dir.Sides[side].Entry, g.dir.RelPath
+			n := sideFileBytes(g.dir, side)
 			s.mu.RUnlock()
 			if e != nil && e.IsDir {
-				prefetched, _ = prefetcher.PrefetchChecksums(ctx, rel, algo, true)
+				// The far side hashes every file under the folder.
+				prefetched, _ = prefetcher.PrefetchChecksums(WithHashBytes(ctx, n), rel, algo, true)
 			}
 		}
 
@@ -1109,6 +1111,22 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 	}
 }
 
+// sideFileBytes is the size of the files under dir on side: what a fetch
+// of their checksums has that side hash. Tree lock held.
+func sideFileBytes(dir *TreeNode, side Side) int64 {
+	var n int64
+	for _, c := range dir.Children {
+		switch e := c.Sides[side].Entry; {
+		case e == nil || c.IsSpecial:
+		case c.IsDir:
+			n += sideFileBytes(c, side)
+		default:
+			n += e.Size
+		}
+	}
+	return n
+}
+
 // relPathOf is n's path, which a rename changes under the lock.
 func (s *Scanner) relPathOf(n *TreeNode) string {
 	s.mu.RLock()
@@ -1134,7 +1152,7 @@ func (s *Scanner) checksumSideFile(ctx context.Context, node *TreeNode, side Sid
 	var err error
 	if entry != nil {
 		markChecksumInFlight(node, side, 1)
-		sum, err = s.backend(side).Checksum(ctx, rel, algo)
+		sum, err = s.backend(side).Checksum(WithHashBytes(ctx, entry.Size), rel, algo)
 		markChecksumInFlight(node, side, -1)
 		if err != nil && ctx.Err() != nil {
 			// Stopped: this side keeps the sum it had, and the end of the

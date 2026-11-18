@@ -87,13 +87,36 @@ func (s *sshShell) run(ctx context.Context, cmd string) (string, error) {
 	return out.String(), nil
 }
 
-// home asks the login shell for $HOME during setup, where no caller context
-// exists; the deadline keeps a stuck server from hanging the connect.
-func (s *sshShell) home() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), sshKeepaliveTimeout)
+// shellCheckTimeout is how long a check the connect runs on the login
+// shell may take: its echo, its $HOME, rsync+ssh's rsync. A shell whose
+// PATH or home is on a hung mount answers none of them, while the server
+// still answers keepalives (R17).
+var shellCheckTimeout = sshKeepaliveTimeout
+
+// errShellSilent is the error of a check the shell did not answer in time.
+var errShellSilent = errors.New("the login shell did not answer")
+
+// shellCheckCtx is the ctx of such a check: the connect's own, so a cancel
+// stops it, with shellCheckTimeout on top.
+func shellCheckCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, shellCheckTimeout, fmt.Errorf("%w in %v", errShellSilent, shellCheckTimeout))
+}
+
+// shellCheckErr is err of a check run under ctx. When ctx ended the check,
+// it is why: the cancel, or that the shell did not answer.
+func shellCheckErr(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	return err
+}
+
+// home asks the login shell for $HOME during the connect.
+func (s *sshShell) home(ctx context.Context) (string, error) {
+	ctx, cancel := shellCheckCtx(ctx)
 	defer cancel()
 	out, err := s.run(ctx, "echo $HOME")
-	return strings.TrimSpace(out), err
+	return strings.TrimSpace(out), shellCheckErr(ctx, err)
 }
 
 // shellWord is the word checkShell has the login shell echo.
@@ -106,12 +129,12 @@ const shellWord = "sc-shell-ok"
 // and its own first word every file's sum. No answer at all is an account
 // that runs one fixed command, such as ForceCommand internal-sftp: every
 // command prints nothing and exits 0, so every folder listed as empty.
-func (s *sshShell) checkShell() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sshKeepaliveTimeout)
+func (s *sshShell) checkShell(ctx context.Context) error {
+	ctx, cancel := shellCheckCtx(ctx)
 	defer cancel()
 	var out bytes.Buffer
 	if err := s.exec(ctx, s.client, "echo "+shellWord, nil, &out); err != nil {
-		return fmt.Errorf("the login shell cannot run echo: %w", err)
+		return fmt.Errorf("the login shell cannot run echo: %w", shellCheckErr(ctx, err))
 	}
 	switch got := strings.TrimRight(out.String(), "\r\n"); {
 	case got == shellWord:
@@ -150,7 +173,7 @@ func expandHome(remotePath string, home func() (string, error)) (string, error) 
 		err = fmt.Errorf("the server answered %q", h)
 	}
 	if err != nil {
-		return "", fmt.Errorf("cannot find the login home folder (%v); write the full remote path in the URL", err)
+		return "", fmt.Errorf("cannot find the login home folder (%w); write the full remote path in the URL", err)
 	}
 	return path.Join(h, rest), nil
 }
