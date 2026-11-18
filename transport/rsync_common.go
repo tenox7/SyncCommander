@@ -137,7 +137,7 @@ func md4Sums(scope string, recursive bool, list []rsyncpkg.FileInfo) map[string]
 }
 
 func rsyncModeToFileMode(m int32) os.FileMode {
-	mode := os.FileMode(m) & os.ModePerm
+	mode := unixFileMode(uint32(m))
 	switch m & rsyncpkg.S_IFMT {
 	case rsyncpkg.S_IFREG:
 	case rsyncpkg.S_IFDIR:

@@ -592,7 +592,7 @@ func parseListRecord(rec string) (listRecord, bool) {
 		ATime:   model.NanoOf(atime),
 		CTime:   model.NanoOf(ctime),
 		IsDir:   f[5] == "d" || f[5] == "D",
-		Mode:    os.FileMode(modeVal),
+		Mode:    unixFileMode(uint32(modeVal)),
 	}
 	switch f[5] {
 	case "d", "D":
