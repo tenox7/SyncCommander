@@ -1008,10 +1008,11 @@ func splitRcloneOpts(spec string) (opts, tail string) {
 	return lead + spec[:i], spec[i:]
 }
 
-// maskRcloneSecrets blanks the option values of an rclone connection
-// string but those of rcloneShownKeys, leaving the backend, the path and
-// where the remote is readable.
-func maskRcloneSecrets(spec string) string {
+// replaceRcloneSecrets is an rclone connection string with each option
+// value v replaced by repl(v), but those of rcloneShownKeys, of which only
+// the password of a URL in them is: the backend, the path and where the
+// remote is stay as they are.
+func replaceRcloneSecrets(spec string, repl func(string) string) string {
 	opts, tail := splitRcloneOpts(spec)
 	var out []string
 	for len(opts) > 0 {
@@ -1022,25 +1023,26 @@ func maskRcloneSecrets(spec string) string {
 			opts = ""
 		}
 		if k, v, ok := strings.Cut(part, "="); ok {
-			part = k + "=" + maskRcloneValue(k, v)
+			part = k + "=" + replaceRcloneValue(k, v, repl)
 		}
 		out = append(out, part)
 	}
 	return strings.Join(out, ",") + tail
 }
 
-// maskRcloneValue is the value v of the option k as shown: xxxxx, or for
-// an option of rcloneShownKeys v itself, with the password of a URL in it
-// masked. rclone takes Region, region and re-gion for one option.
-func maskRcloneValue(k, v string) string {
+// replaceRcloneValue is the value v of the option k with its secret
+// replaced: repl(v), or for an option of rcloneShownKeys v itself, with the
+// password of a URL in it replaced. rclone takes Region, region and
+// re-gion for one option.
+func replaceRcloneValue(k, v string, repl func(string) string) string {
 	if !rcloneShownKeys[strings.ReplaceAll(strings.ToLower(k), "-", "_")] {
-		return "xxxxx"
+		return repl(v)
 	}
 	q := ""
 	if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') && v[len(v)-1] == v[0] {
 		q, v = v[:1], v[1:len(v)-1]
 	}
-	return q + maskURLUserinfo(v) + q
+	return q + replaceURLPassword(v, repl) + q
 }
 
 // rcloneTimeRes is how exact a remote's listed mtimes are. With

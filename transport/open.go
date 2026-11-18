@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -79,24 +80,36 @@ func lookupScheme(arg string) opener {
 
 func IsRemote(arg string) bool { return lookupScheme(arg) != nil }
 
+// urlMask is what MaskURLPassword shows for a secret.
+const urlMask = "xxxxx"
+
 // MaskURLPassword hides the secrets of an open argument, for the title bar,
 // the log and the open dialog: the password of a URL, the option values of
-// an rclone spec (maskRcloneSecrets).
+// an rclone spec (replaceRcloneSecrets).
 func MaskURLPassword(rawURL string) string {
-	if strings.HasPrefix(rawURL, rcloneScheme) {
-		return rcloneScheme + maskRcloneSecrets(strings.TrimPrefix(rawURL, rcloneScheme))
-	}
-	return maskURLUserinfo(rawURL)
+	return replaceSecrets(rawURL, func(string) string { return urlMask })
 }
 
-// maskURLUserinfo hides the password of a URL: what follows the user name
-// up to the @ before the host, cut as parseRemoteURL cuts it. A password
-// with a / in it ended the authority early: the mask found no @ there and
-// showed the URL, password and all (F26). An authority user:X, with X no
-// port and an @ further on, is now taken for such a password, up to the
-// last @. A password that starts with a port number and a / still shows:
-// user:22/x@host reads as the host user on port 22.
-func maskURLUserinfo(rawURL string) string {
+// replaceSecrets is arg with each secret s in it replaced by repl(s): the
+// password of a URL, the option values of an rclone spec but those that
+// say where the remote is. One reading of where the secrets are, to hide
+// them and to find a mask left in (holdsMask).
+func replaceSecrets(arg string, repl func(string) string) string {
+	if spec, ok := strings.CutPrefix(arg, rcloneScheme); ok {
+		return rcloneScheme + replaceRcloneSecrets(spec, repl)
+	}
+	return replaceURLPassword(arg, repl)
+}
+
+// replaceURLPassword is rawURL with its password p replaced by repl(p):
+// what follows the user name up to the @ before the host, cut as
+// parseRemoteURL cuts it. A password with a / in it ended the authority
+// early: the mask found no @ there and showed the URL, password and all
+// (F26). An authority user:X, with X no port and an @ further on, is now
+// taken for such a password, up to the last @. A password that starts with
+// a port number and a / still shows: user:22/x@host reads as the host user
+// on port 22.
+func replaceURLPassword(rawURL string, repl func(string) string) string {
 	idx := strings.Index(rawURL, "://")
 	if idx < 0 {
 		return rawURL
@@ -104,18 +117,74 @@ func maskURLUserinfo(rawURL string) string {
 	head, rest := rawURL[:idx+3], rawURL[idx+3:]
 	authority, _, _ := strings.Cut(rest, "/")
 	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
-		user, _, ok := strings.Cut(authority[:at], ":")
+		user, pw, ok := strings.Cut(authority[:at], ":")
 		if !ok {
 			return rawURL // a user, no password
 		}
-		return head + user + ":xxxxx" + rest[at:]
+		return head + user + ":" + repl(pw) + rest[at:]
 	}
 	user, x, ok := strings.Cut(authority, ":")
 	at := strings.LastIndexByte(rest, '@')
 	if !ok || at < 0 || strings.HasPrefix(authority, "[") || isPortNumber(x) {
 		return rawURL
 	}
-	return head + user + ":xxxxx" + rest[at:]
+	return head + user + ":" + repl(rest[len(user)+1:at]) + rest[at:]
+}
+
+// errMaskForAnotherPlace refuses a secret left as the mask in an open
+// argument for another place than the one it was given for.
+var errMaskForAnotherPlace = errors.New("a password or secret shown as xxxxx is not sent to another place: type it again")
+
+// Unmask puts the secrets MaskURLPassword hid in original back into edited,
+// the masked text the open dialog showed, as the user left it. The dialog
+// gave the secrets back only for text left as it was: any edit sent the
+// mask as the password, and the login failed (U19). They go back only
+// where edited is for the same place as original, all before the path the
+// same, so a secret never goes where it was not given for. A secret left
+// as the mask in an argument for another place is refused.
+func Unmask(original, edited string) (string, error) {
+	masked := MaskURLPassword(original)
+	if masked == original {
+		return edited, nil // nothing was hidden
+	}
+	mPlace, mPath := splitPlace(masked)
+	ePlace, ePath := splitPlace(edited)
+	if oPlace, ok := strings.CutSuffix(original, mPath); ok && ePlace == mPlace {
+		return oPlace + ePath, nil
+	}
+	if holdsMask(edited) {
+		return "", errMaskForAnotherPlace
+	}
+	return edited, nil
+}
+
+// holdsMask reports a secret of arg that is the mask: left as the dialog
+// showed it. A password with xxxxx in it, or a host, is no mask.
+func holdsMask(arg string) bool {
+	found := false
+	replaceSecrets(arg, func(s string) string {
+		found = found || s == urlMask
+		return s
+	})
+	return found
+}
+
+// splitPlace cuts an open argument into its place and its path: for a URL
+// the scheme, user and host, then the path; for an rclone spec the remote
+// and its options, then the :path.
+func splitPlace(arg string) (place, rest string) {
+	if spec, ok := strings.CutPrefix(arg, rcloneScheme); ok {
+		opts, tail := splitRcloneOpts(spec)
+		return rcloneScheme + opts, tail
+	}
+	idx := strings.Index(arg, "://")
+	if idx < 0 {
+		return "", arg
+	}
+	if si := strings.IndexByte(arg[idx+3:], '/'); si >= 0 {
+		return arg[:idx+3+si], arg[idx+3+si:]
+	}
+	return arg, ""
 }
 
 // isPortNumber reports a port: 1 to 5 digits.
