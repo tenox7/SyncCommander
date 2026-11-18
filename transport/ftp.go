@@ -244,6 +244,16 @@ func (c *ftpConn) close() {
 // answer (D1). The data connections it opens later are dialled under the
 // call that needs them.
 func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *tls.Config, lc *listCapture) (*ftp.ServerConn, *ftpSockets, error) {
+	// A data connection resumes the TLS session of the control connection
+	// it carries data for: vsftpd (require_ssl_reuse), ProFTPD and
+	// FileZilla Server refuse one that does not, by default. With no
+	// session cache Go resumes none, and against such a server the first
+	// listing failed (L18). Each control connection has a cache of its
+	// own, so its data connections take its session, not another's.
+	if tlsCfg != nil && (scheme == "ftps" || scheme == "ftpes") {
+		tlsCfg = tlsCfg.Clone()
+		tlsCfg.ClientSessionCache = tls.NewLRUClientSessionCache(1)
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	socks := newFTPSockets()
 	idle := ftpIdle.get()

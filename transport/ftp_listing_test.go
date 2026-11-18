@@ -3,7 +3,9 @@ package transport
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -66,16 +68,24 @@ type fakeFTPD struct {
 	// it name MFMT, which sets it too. setTimes hears each command that
 	// set a time.
 	mdtm, mfmt bool
-	mtimes     map[string]time.Time
-	setTimes   []string
-	dataConns  []net.Conn
-	mu         sync.Mutex
-	lists      []string // LIST arguments, in order
-	listConns  []int    // the connection each LIST came on
-	logins     int      // PASS commands answered
-	quits      []int    // the connections that said QUIT
-	conns      []net.Conn
-	listener   net.Listener
+	// tlsCfg makes it an FTPS server: TLS from the first byte with
+	// implicitTLS (ftps://), else after AUTH TLS (ftpes://). Every data
+	// connection is TLS then, and dataTLS names each, in order, by its
+	// command and whether it resumed a session: "LIST resumed", "STOR
+	// new" (L18).
+	tlsCfg      *tls.Config
+	implicitTLS bool
+	dataTLS     []string
+	mtimes      map[string]time.Time
+	setTimes    []string
+	dataConns   []net.Conn
+	mu          sync.Mutex
+	lists       []string // LIST arguments, in order
+	listConns   []int    // the connection each LIST came on
+	logins      int      // PASS commands answered
+	quits       []int    // the connections that said QUIT
+	conns       []net.Conn
+	listener    net.Listener
 }
 
 // fakeFTPFile is what RETR of a path sends: the body, then the final reply.
@@ -115,10 +125,29 @@ func (f *fakeFTPD) start(t *testing.T) string {
 				c.Close()
 				continue
 			}
-			go f.serve(c, n)
+			cfg := f.connTLS()
+			if cfg != nil && f.implicitTLS {
+				c = tls.Server(c, cfg)
+			}
+			go f.serve(c, n, cfg)
 		}
 	}()
 	return l.Addr().String()
+}
+
+// connTLS is the TLS config of one control connection and of its data
+// connections; nil for plain FTP. Its session ticket keys are its own, so
+// a data connection resumes the session of its own control connection or
+// none: ProFTPD asks that of a data connection (L18).
+func (f *fakeFTPD) connTLS() *tls.Config {
+	if f.tlsCfg == nil {
+		return nil
+	}
+	cfg := f.tlsCfg.Clone()
+	var key [32]byte
+	rand.Read(key[:])
+	cfg.SetSessionTicketKeys([][32]byte{key})
+	return cfg
 }
 
 // closeAll ends the server: its listener, every connection, every stall.
@@ -133,12 +162,28 @@ func (f *fakeFTPD) closeAll() {
 	}
 }
 
-// takeData accepts the data connection of cmd and keeps it for closeAll.
-func (f *fakeFTPD) takeData(pasv net.Listener, cmd string) (net.Conn, error) {
+// takeData accepts the data connection of cmd and keeps it for closeAll;
+// with tlsCfg, the control connection's, it is TLS.
+func (f *fakeFTPD) takeData(pasv net.Listener, cmd string, tlsCfg *tls.Config) (net.Conn, error) {
 	dc, err := pasv.Accept()
 	pasv.Close()
 	if err != nil {
 		return nil, err
+	}
+	if tlsCfg != nil {
+		tc := tls.Server(dc, tlsCfg)
+		if err := tc.Handshake(); err != nil {
+			dc.Close()
+			return nil, err
+		}
+		how := " new"
+		if tc.ConnectionState().DidResume {
+			how = " resumed"
+		}
+		f.mu.Lock()
+		f.dataTLS = append(f.dataTLS, cmd+how)
+		f.mu.Unlock()
+		dc = tc
 	}
 	f.mu.Lock()
 	f.dataConns = append(f.dataConns, dc)
@@ -187,7 +232,7 @@ func (f *fakeFTPD) listed() []string {
 	return slices.Clone(f.lists)
 }
 
-func (f *fakeFTPD) serve(c net.Conn, n int) {
+func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 	defer c.Close()
 	r := bufio.NewReader(c)
 	reply := func(s string) { io.WriteString(c, s+"\r\n") }
@@ -304,7 +349,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			f.listConns = append(f.listConns, n)
 			f.mu.Unlock()
 			reply("150 Here comes the directory listing.")
-			dc, err := f.takeData(pasv, "LIST")
+			dc, err := f.takeData(pasv, "LIST", tlsCfg)
 			pasv = nil
 			if err != nil {
 				continue
@@ -335,7 +380,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Here comes the listing.")
-			dc, err := f.takeData(pasv, "MLSD")
+			dc, err := f.takeData(pasv, "MLSD", tlsCfg)
 			pasv = nil
 			if err != nil {
 				continue
@@ -352,7 +397,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Opening BINARY mode data connection.")
-			dc, err := f.takeData(pasv, "RETR")
+			dc, err := f.takeData(pasv, "RETR", tlsCfg)
 			pasv = nil
 			if err != nil {
 				continue
@@ -397,7 +442,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 				continue
 			}
 			reply("150 Ok to send data.")
-			dc, err := f.takeData(pasv, "STOR")
+			dc, err := f.takeData(pasv, "STOR", tlsCfg)
 			pasv = nil
 			if err != nil {
 				continue
@@ -469,6 +514,18 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			return
 		case "NOOP":
 			reply("200 NOOP ok.")
+		case "AUTH":
+			if tlsCfg == nil || f.implicitTLS {
+				reply("502 Command not implemented.")
+				continue
+			}
+			reply("234 Proceeding with negotiation.")
+			c = tls.Server(c, tlsCfg)
+			r = bufio.NewReader(c)
+		case "PBSZ":
+			reply("200 PBSZ set to 0.")
+		case "PROT":
+			reply("200 PROT now Private.")
 		case "MDTM", "MFMT":
 			verb := strings.ToUpper(cmd)
 			if verb == "MDTM" && !f.mdtm || verb == "MFMT" && !f.mfmt {
