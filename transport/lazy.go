@@ -19,11 +19,18 @@ import (
 var ErrUnsupported = errors.New("operation not supported by this backend")
 
 // protoManagesLiveness names the protocols whose transport enforces its own
-// idle deadline, so the scanner must not add a per-call stall timeout.
+// idle deadline, so the scanner must not add a per-call stall timeout. FTP
+// gives each read and write on its sockets a deadline of its own (L8)
+// while -ftp-timeout is on: the scanner's 120 s cut a listing that was
+// still coming, one round trip per entry on a server without MLSD, so a
+// folder of 3,000 files at 50 ms could never be listed (L15). With
+// -ftp-timeout 0 nothing else ends a listing that stops, and the cap stays.
 func protoManagesLiveness(proto string) bool {
 	switch proto {
 	case "webdav", "webdavs", "restic", "restics", "rclone":
 		return true
+	case "ftp", "ftps", "ftpes":
+		return ftpIdle.get() > 0
 	}
 	return false
 }

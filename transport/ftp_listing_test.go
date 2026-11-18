@@ -69,7 +69,8 @@ type fakeFTPD struct {
 	// file whose reply is "stall" is sent with its data connection left
 	// open and no reply; "none" closes the data connection and sends no
 	// reply. retrPace sends a file 1 KiB at a time, this long apart.
-	// dataOpen hears the command of each data connection taken. dropOnce
+	// dataOpen hears the command of each data connection taken. listPace
+	// sends a listing a line at a time, this long apart. dropOnce
 	// names a command at which the server closes the connection, the first
 	// time it comes, as a link that went down.
 	dropOnce  string
@@ -79,6 +80,7 @@ type fakeFTPD struct {
 	listStall bool
 	hang      string
 	retrPace  time.Duration
+	listPace  time.Duration
 	dataOpen  chan string
 	stop      chan struct{} // closed by closeAll; a stall waits on it
 	stopOnce  sync.Once
@@ -475,7 +477,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 				dc.Close()
 				return
 			}
-			for _, l := range f.list(arg) {
+			for i, l := range f.list(arg) {
+				if i > 0 && f.listPace > 0 {
+					time.Sleep(f.listPace)
+				}
 				io.WriteString(dc, l+"\r\n")
 			}
 			dc.Close()
