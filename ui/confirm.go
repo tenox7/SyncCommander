@@ -4,6 +4,9 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"sc/model"
 )
 
 type ConfirmDialog struct {
@@ -60,11 +63,21 @@ func (d *ConfirmDialog) View(width, height int) string {
 		titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	}
 
+	// Lines wrap inside the box, after a / or a - where they can, and
+	// keep their indent: a long path went past the edge of the screen
+	// and was cut there (U20). The box takes 2 cells of border, 4 of
+	// padding and a margin of 2.
+	fit := func(s string) string {
+		s = shown(s)
+		body := strings.TrimLeft(s, " ")
+		indent := s[:len(s)-len(body)]
+		return indent + strings.ReplaceAll(ansi.Wrap(body, max(width-8-len(indent), 16), "/-"), "\n", "\n"+indent)
+	}
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render(shown(d.title)))
+	sb.WriteString(titleStyle.Render(fit(d.title)))
 	for _, line := range d.lines {
 		sb.WriteString("\n")
-		sb.WriteString(shown(line))
+		sb.WriteString(fit(line))
 	}
 	sb.WriteString("\n\n")
 	if d.keys != "" {
@@ -94,4 +107,28 @@ func (d *ConfirmDialog) View(width, height int) string {
 
 	dialog := style.Render(sb.String())
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, dialog)
+}
+
+// whereLines names node for a dialog by its whole path, and the folder it
+// is in on each side named, as the panel titles show them. The dialogs
+// named the node alone, over a screen that hides the tree: which of two
+// folders of one name, or of two long names alike up to the end, was not
+// shown, and the top folder showed as "//" (U20). Call it under the read
+// lock.
+func (m *Model) whereLines(node *model.TreeNode, left, right bool) []string {
+	what := "the top folder"
+	if !node.IsRoot() {
+		what = node.RelPath
+		if node.IsDir {
+			what += "/"
+		}
+	}
+	lines := []string{what}
+	if left {
+		lines = append(lines, "  in L: "+m.left.backend.BasePath())
+	}
+	if right {
+		lines = append(lines, "  in R: "+m.right.backend.BasePath())
+	}
+	return lines
 }

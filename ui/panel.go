@@ -182,27 +182,26 @@ func (p *Panel) renderRow(r model.Row) string {
 	entry := node.Sides[p.side].Entry
 	sideIsDir := entry != nil && entry.IsDir
 
-	name := shown(node.Name)
+	text, suffix, style := shown(node.Name), "", p.nodeStyle(node)
 	switch {
 	case sideIsDir:
-		name = p.dirStyle(node).Render(name + "/")
+		suffix, style = "/", p.dirStyle(node)
 	case entry != nil && entry.IsSpecial():
-		name = p.nodeStyle(node).Render(name + specialMark(entry))
-	default:
-		name = p.nodeStyle(node).Render(name)
+		suffix = specialMark(entry)
 	}
 	arrow := "▶"
 	if node.Expanded {
 		arrow = "▼"
 	}
 
-	var left string
+	var lead string
 	if node.Depth == 0 {
 		spin := ""
 		if p.spinner != "" {
 			spin = " " + p.spinner
 		}
-		left = p.eqPrefix(node) + styleChrome.Render(arrow) + spin + " " + p.dirStyle(node).Render(shown(p.title))
+		lead = p.eqPrefix(node) + styleChrome.Render(arrow) + spin + " "
+		text, suffix, style = shown(p.title), "", p.dirStyle(node)
 	} else {
 		var pendingCksum, activeCksum bool
 		if sideIsDir {
@@ -222,10 +221,21 @@ func (p *Panel) renderRow(r model.Row) string {
 		case sideIsDir && node.SubtreePending && p.spinner != "":
 			arrow += p.spinner
 		}
-		left = p.eqPrefix(node) + renderGuides(node.Guides, node.Depth, node.IsLast) + styleChrome.Render(arrow) + " " + name
+		lead = p.eqPrefix(node) + renderGuides(node.Guides, node.Depth, node.IsLast) + styleChrome.Render(arrow) + " "
 	}
 
 	info := p.inlineInfo(node)
+	if !p.wrap {
+		// A long name is cut in the middle: names mostly differ at the
+		// end, as part0001.tar and part0002.tar do, and cut on the
+		// right they showed alike (U20).
+		room := p.width - lipgloss.Width(lead) - ansi.StringWidth(suffix)
+		if info != "" {
+			room -= lipgloss.Width(info) + 1
+		}
+		text = cutMiddle(text, max(room, 1))
+	}
+	left := lead + style.Render(text+suffix)
 	if info == "" {
 		return left
 	}
@@ -235,6 +245,27 @@ func (p *Panel) renderRow(r model.Row) string {
 	}
 	gap := max(p.width-lipgloss.Width(left)-infoLen, 1)
 	return left + strings.Repeat(" ", gap) + info
+}
+
+// cutMiddle fits s in w cells with "…" in place of its middle; the end
+// keeps the larger half.
+func cutMiddle(s string, w int) string {
+	n := ansi.StringWidth(s)
+	if n <= w {
+		return s
+	}
+	if w < 1 {
+		return ""
+	}
+	head := (w - 1) / 2
+	tail := w - 1 - head
+	// TruncateLeft keeps a wide character it would cut in two, which
+	// leaves the end a cell too wide: one more cell then goes.
+	end := ansi.TruncateLeft(s, n-tail, "")
+	for k := n - tail + 1; ansi.StringWidth(end) > tail && k <= n; k++ {
+		end = ansi.TruncateLeft(s, k, "")
+	}
+	return ansi.Truncate(s, head, "") + "…" + end
 }
 
 // eqPrefix is the right panel's leading glyph summarising how the row

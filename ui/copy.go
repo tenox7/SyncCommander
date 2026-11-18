@@ -132,7 +132,7 @@ func (m *Model) answerCopy(k string) tea.Cmd {
 // copyLabel is the copied node's name, and a warning when its subtree is
 // not fully listed, for a question that follows another.
 func (m *Model) copyLabel(node *model.TreeNode, unlisted bool) []string {
-	lines := []string{"", m.nodeLabel(node)}
+	lines := append([]string{""}, m.nodeLines(node)...)
 	if unlisted {
 		lines = append(lines, unlistedWarning...)
 	}
@@ -309,16 +309,12 @@ func (m *Model) isTopRow(node *model.TreeNode) bool {
 	return top
 }
 
-// nodeLabel is node's name as the dialogs show it, under the read lock.
-func (m *Model) nodeLabel(node *model.TreeNode) string {
-	var name string
-	m.readTree(func(*model.TreeNode) {
-		name = node.Name
-		if node.IsDir {
-			name += "/"
-		}
-	})
-	return name
+// nodeLines names node and both its folders for a copy's dialog, under
+// the read lock.
+func (m *Model) nodeLines(node *model.TreeNode) []string {
+	var lines []string
+	m.readTree(func(*model.TreeNode) { lines = m.whereLines(node, true, true) })
+	return lines
 }
 
 // maxConfirmPaths caps how many paths a confirm dialog lists by name.
@@ -342,7 +338,7 @@ func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool, plan tr
 	if !leftToRight {
 		side = "left"
 	}
-	lines := []string{"", m.nodeLabel(node)}
+	lines := append([]string{""}, m.nodeLines(node)...)
 	if len(plan.Conflicts) > 0 {
 		lines = append(lines, fmt.Sprintf("Will delete on %s, to put the other type there:", side))
 		lines = appendNamed(lines, len(plan.Conflicts), func(i int) string { return describeConflict(plan.Conflicts[i]) })

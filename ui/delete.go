@@ -58,23 +58,26 @@ func (m *Model) openDelete(node *model.TreeNode) {
 
 func (m *Model) buildDeleteConfirm(node *model.TreeNode) {
 	if node.Compare.Presence != model.PresenceBoth {
+		onLeft := node.Compare.Presence != model.PresenceRightOnly
 		sides := "← left side only"
-		if node.Compare.Presence == model.PresenceRightOnly {
+		if !onLeft {
 			sides = "right side only →"
 		}
+		lines := append([]string{""}, m.whereLines(node, onLeft, !onLeft)...)
 		if !node.IsDir {
-			m.confirm.Open("Delete "+node.Name+"?", []string{"", sides}, false)
+			m.confirm.Open("Delete "+node.Name+"?", append(lines, sides), false)
 			return
 		}
-		m.confirm.Open("⚠ RECURSIVE DELETE", []string{"", node.Name + "/", describeSubtree(node), sides}, true)
+		m.confirm.Open("⚠ RECURSIVE DELETE", append(lines, describeSubtree(node), sides), true)
 		return
 	}
 
+	lines := append([]string{""}, m.whereLines(node, true, true)...)
 	if !node.IsDir {
-		m.confirm.OpenChoice("Delete "+node.Name+"?", []string{""}, false)
+		m.confirm.OpenChoice("Delete "+node.Name+"?", lines, false)
 		return
 	}
-	m.confirm.OpenChoice("⚠ RECURSIVE DELETE", []string{"", node.Name + "/", describeSubtree(node)}, true)
+	m.confirm.OpenChoice("⚠ RECURSIVE DELETE", append(lines, describeSubtree(node)), true)
 }
 
 // describeSubtree summarises what a recursive delete would remove.
