@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -107,13 +108,16 @@ func newHTTPBase(proto string, secure bool, host, port, base, user, pass string,
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	tr := &http.Transport{
-		TLSClientConfig:       &tls.Config{ServerName: host, InsecureSkipVerify: insecure},
-		DisableCompression:    true,
-		MaxIdleConns:          maxIdle,
-		MaxIdleConnsPerHost:   maxIdle,
-		IdleConnTimeout:       connIdle,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
+		// HTTP_PROXY, HTTPS_PROXY and NO_PROXY are kept to, as curl and
+		// rclone keep to them; sc went to the server direct (W-L3). A
+		// server on the loopback, as through ssh -L, is never proxied.
+		Proxy:               http.ProxyFromEnvironment,
+		TLSClientConfig:     &tls.Config{ServerName: host, InsecureSkipVerify: insecure},
+		DisableCompression:  true,
+		MaxIdleConns:        maxIdle,
+		MaxIdleConnsPerHost: maxIdle,
+		IdleConnTimeout:     connIdle,
+		TLSHandshakeTimeout: 10 * time.Second,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			c, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
@@ -268,11 +272,76 @@ func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusProxyAuthRequired, http.StatusInsufficientStorage:
 		drainClose(resp.Body)
-		err := statusErr(resp, "%s %s", req.Method, req.URL.Redacted())
+		err := statusErr(resp, "%s %s%s", req.Method, req.URL.Redacted(), otherLogin(resp))
 		Log.Add(h.proto, DirErr, err.Error())
 		return nil, err
 	}
 	return resp, nil
+}
+
+// otherLogin says which login a 401 or 407 asks for when it offers no
+// Basic one, the only one sc does: Digest, NTLM, Negotiate. A refused
+// password and a login sc cannot do both said "401 Unauthorized" (W-L3).
+func otherLogin(resp *http.Response) string {
+	header, who := "WWW-Authenticate", "server"
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+	case http.StatusProxyAuthRequired:
+		header, who = "Proxy-Authenticate", "proxy"
+	default:
+		return ""
+	}
+	var asked []string
+	for _, v := range resp.Header.Values(header) {
+		for _, scheme := range authSchemes(v) {
+			if strings.EqualFold(scheme, "Basic") {
+				return ""
+			}
+			if !slices.Contains(asked, scheme) {
+				asked = append(asked, scheme)
+			}
+		}
+	}
+	if len(asked) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (the %s asks for a %s login; sc logs in with Basic only)", who, strings.Join(asked, " or "))
+}
+
+// authSchemes is the schemes of the challenges in v, a WWW-Authenticate
+// value (RFC 9110 11.6.1): each challenge is a scheme and then its
+// parameters, and commas outside quotes part challenges and parameters
+// alike. A part that starts with a name and an = is a parameter.
+func authSchemes(v string) []string {
+	var schemes []string
+	for _, part := range splitUnquoted(v, ',') {
+		name, rest, _ := strings.Cut(strings.TrimSpace(part), " ")
+		if name == "" || strings.Contains(name, "=") || strings.HasPrefix(strings.TrimSpace(rest), "=") {
+			continue
+		}
+		schemes = append(schemes, name)
+	}
+	return schemes
+}
+
+// splitUnquoted cuts s at each sep outside a quoted string.
+func splitUnquoted(s string, sep byte) []string {
+	var parts []string
+	quoted, escaped, start := false, false, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case escaped:
+			escaped = false
+		case quoted && c == '\\':
+			escaped = true
+		case c == '"':
+			quoted = !quoted
+		case c == sep && !quoted:
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // statusError is an HTTP answer that failed a request. What it means is
