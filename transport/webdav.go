@@ -654,40 +654,28 @@ func (b *WebDAVBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
 	return algos, nil
 }
 
-// probeAlgos descends the first subdirectory chain until a listing carries
-// checksums, so a tree whose top level is all directories still probes.
+// probeAlgos is the checksums the server gives: those the listings so far
+// carried, with no request. It listed up to four folders again, live, for
+// them, after a scan that had listed them all (W-L3). Before a listing
+// that carries any, it lists the first folder of each level, through the
+// listing cache, down to one that does, so a tree whose top level is all
+// folders still probes.
 func (b *WebDAVBackend) probeAlgos(ctx context.Context) (map[string]bool, error) {
-	seen := map[string]bool{}
 	dir := ""
-	for depth := 0; depth < 4; depth++ {
-		ms, err := b.propfind(ctx, dir, "1")
+	for depth := 0; ; depth++ {
+		if seen := b.sums.algos(); len(seen) > 0 || depth == 4 {
+			return seen, nil
+		}
+		entries, err := b.List(ctx, dir)
 		if err != nil {
 			return nil, err
 		}
-		firstSub := ""
-		found := false
-		for _, r := range ms.Response {
-			e, sums, err := b.entryFromResponse(r)
-			if err != nil || e.RelPath == dir {
-				continue
-			}
-			b.sums.put(e.RelPath, sums)
-			if sums != nil {
-				for a := range sums {
-					seen[a] = true
-				}
-				found = true
-			}
-			if e.IsDir && firstSub == "" {
-				firstSub = e.RelPath
-			}
+		i := slices.IndexFunc(entries, func(e model.FileEntry) bool { return e.IsDir })
+		if i < 0 {
+			return b.sums.algos(), nil
 		}
-		if found || firstSub == "" {
-			return seen, nil
-		}
-		dir = firstSub
+		dir = entries[i].RelPath
 	}
-	return seen, nil
 }
 
 // SetTimes sets relPath's mtime with PROPPATCH, unless the PUT that wrote
@@ -1144,6 +1132,22 @@ func (c *wdSumCache) get(relPath, algo string) (string, bool) {
 		return h, ok
 	}
 	return "", false
+}
+
+// algos is the checksums the listings so far carried, for any file.
+func (c *wdSumCache) algos() map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := map[string]bool{}
+	for _, sums := range c.m {
+		for a := range sums {
+			seen[a] = true
+		}
+		if seen["sha256"] && seen["sha1"] && seen["md5"] {
+			break // all sc reads
+		}
+	}
+	return seen
 }
 
 func (c *wdSumCache) invalidate(relPath string) {
