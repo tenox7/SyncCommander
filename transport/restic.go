@@ -334,8 +334,17 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), resticAPIV2) {
 		return b.decodeListV1(resp, typeName)
 	}
+	// The list is whole only from its [ to its ]. The ] was never read: a
+	// list cut between two objects read as whole with one JSON decoder and
+	// not with another, and an {} (an error, say) read as no objects
+	// (W-L2). A null is no objects, as restic itself reads it.
 	dec := json.NewDecoder(resp.Body)
-	if _, err := dec.Token(); err != nil { // consume the opening '['
+	t, err := dec.Token()
+	if err == nil && t == nil {
+		Log.Add("restic", DirIn, fmt.Sprintf("%s/: 0 objects (null)", typeName))
+		return nil, nil
+	}
+	if err := wantDelim(t, err, '['); err != nil {
 		return nil, fmt.Errorf("restic: list %s: %w", typeName, err)
 	}
 	var entries []model.FileEntry
@@ -351,8 +360,26 @@ func (b *ResticBackend) decodeList(resp *http.Response, typeName string) ([]mode
 			entries = append(entries, objectEntry(typeName, it.Name, it.Size))
 		}
 	}
+	t, err = dec.Token()
+	if err := wantDelim(t, err, ']'); err != nil {
+		return nil, fmt.Errorf("restic: list %s: %w", typeName, err)
+	}
 	Log.Add("restic", DirIn, fmt.Sprintf("%s/: %d objects", typeName, len(entries)))
 	return entries, nil
+}
+
+// wantDelim checks t and err, from reading the next token of a list, for
+// d: its [ or its ]. An answer that ends there is a list cut short.
+func wantDelim(t json.Token, err error, d json.Delim) error {
+	switch {
+	case err == io.EOF:
+		return fmt.Errorf("the answer ends where a %v was due: %w", d, io.ErrUnexpectedEOF)
+	case err != nil:
+		return err
+	case t != d:
+		return fmt.Errorf("the answer has %v where a %v was due", t, d)
+	}
+	return nil
 }
 
 // decodeListV1 handles the legacy v1 format (names only). Sizes require a HEAD
