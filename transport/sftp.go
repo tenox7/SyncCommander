@@ -257,6 +257,20 @@ func (b *SFTPBackend) PreloadRecursive(ctx context.Context, scope string) error 
 	return nil
 }
 
+// findRecursive is the shell's find listing, its times kept to the second
+// as READDIR's are. sc sets an SFTP file's times with SETSTAT, which has
+// whole seconds in protocol v3, and find gave the times to the nanosecond:
+// with sub-second compare on, a copy whose time sc had set differed from
+// its source for good when find listed it, and not when READDIR did (S25).
+func (b *SFTPBackend) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+	return b.sshShell.findRecursive(ctx, scope, func(dir string, entries []model.FileEntry) {
+		for i := range entries {
+			entries[i].TimeRes = model.TimeSecond
+		}
+		emit(dir, entries)
+	}, complete)
+}
+
 // takeListCache has b go on with c, the list cache of the backend of the
 // connection before b's, and with the recursive listing it cut off (S18).
 func (b *SFTPBackend) takeListCache(c *listCache) {
