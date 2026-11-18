@@ -43,16 +43,18 @@ func (b *FTPBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, Parts: true, OpenAt: true}, nil
 }
 
+// An HTTP backend, and rclone's, make their own connections again: a lost
+// one fails a call, never the backend (RedialsItself).
 func (b *WebDAVBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true, Preload: true}, nil
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
 }
 
 func (b *ResticBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true, Preload: true}, nil
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
 }
 
 func (b *RcloneBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true, Preload: true}, nil
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
 }
 
 // The fake takes copies as a local disk does (L22).

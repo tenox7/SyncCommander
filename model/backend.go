@@ -161,6 +161,11 @@ type Caps struct {
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).
 	OwnsProgress bool
+	// RedialsItself: the backend makes its own connections again, so a
+	// lost one fails the call it met, never the backend. An HTTP client's
+	// every call is a request, and rclone's backends redial for themselves;
+	// the reconnecting wrapper keeps such a backend, and its caches (L19).
+	RedialsItself bool
 	// Names is how the file system under the root matches names. A local
 	// root finds it out; a remote does not know it yet.
 	Names NameRule

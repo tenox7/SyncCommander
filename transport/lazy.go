@@ -150,9 +150,10 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 // markBrokenIf drops inner, the connection a call failed on, when err says
 // it died, so the next call redials. Only while inner is still the current
 // one: a call that ran on a connection another call has already replaced
-// fails late, and the new connection is healthy (F8). Returns err unchanged.
+// fails late, and the new connection is healthy (F8). Never a backend that
+// makes its own connections again (redialsItself). Returns err unchanged.
 func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
-	if !isConnLost(err) {
+	if !isConnLost(err) || redialsItself(inner) {
 		return err
 	}
 	b.mu.Lock()
@@ -166,6 +167,20 @@ func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 		inner.Close()
 	}
 	return err
+}
+
+// redialsItself reports whether inner makes its own connections again
+// (Caps.RedialsItself): a lost one fails the call it met, and the retry
+// goes to inner. Dropped and made again, an rclone, WebDAV or restic
+// backend lost its caches, and its running recursive listing went on
+// filling a cache no call read any more: a scan of a large bucket went on
+// folder by folder (L19, W-X3). Capabilities ask nothing of the server.
+func redialsItself(inner model.Backend) bool {
+	if inner == nil {
+		return false
+	}
+	caps, err := inner.Capabilities(context.Background())
+	return err == nil && caps.RedialsItself
 }
 
 // connectGateLocked returns why no call may reach the server now, or nil: a
