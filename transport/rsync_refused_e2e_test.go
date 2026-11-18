@@ -126,10 +126,14 @@ func checkRefusedTransfers(t *testing.T, b refusable, mod string) {
 	writeTestFile(t, local, "unreadable.bin", "LOCAL OLD VERSION")
 	err = b.RecvToLocalFile(ctx, "unreadable.bin", dst)
 	check("RecvToLocalFile of a file the server cannot read", err, content(local, "unreadable.bin") == "REMOTE NEW VERSION", "local file holds "+content(local, "unreadable.bin"))
+	// A stream fails when it is read, not when it is opened: rsync+ssh
+	// reads with cat, as scp:// does (R16).
 	if r, err := b.Open(ctx, "unreadable.bin"); err == nil {
-		got, _ := io.ReadAll(r)
-		r.Close()
-		check("Open of a file the server cannot read", nil, string(got) == "REMOTE NEW VERSION", fmt.Sprintf("read %q", got))
+		got, err := io.ReadAll(r)
+		if cerr := r.Close(); err == nil {
+			err = cerr
+		}
+		check("Open of a file the server cannot read", err, string(got) == "REMOTE NEW VERSION", fmt.Sprintf("read %q", got))
 	}
 
 	writeTestFile(t, local, "secret.txt", "client cannot read this")

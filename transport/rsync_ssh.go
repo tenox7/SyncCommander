@@ -275,15 +275,15 @@ func (b *RsyncSSHBackend) invalidateAfterTreeSend(relPath string) {
 	b.listCache.invalidateAncestors(relPath)
 }
 
+// Open streams the file through the shell, as scp:// does. rsync received
+// it whole into a temp folder first, and the copy read it from there: a
+// second copy of each file on the local disk, and room for the largest in
+// $TMPDIR (R16). With no file there to start from, rsync sent all of it
+// anyway. A file the shell cannot read is an error (stream), not an
+// empty file.
 func (b *RsyncSSHBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
-	return rsyncOpenViaTemp(ctx, relPath, 0, func(dstDir string) error {
-		client, err := newRsyncClient(transferFlags())
-		if err != nil {
-			return err
-		}
-		_, err = b.runPooled(ctx, "RECV", client, b.abs(relPath), []string{dstDir}, nil)
-		return err
-	})
+	conn, release := b.pool.acquire(ctx)
+	return b.stream(ctx, conn, "cat "+shellQuote(b.abs(relPath)), release)
 }
 
 func (b *RsyncSSHBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
