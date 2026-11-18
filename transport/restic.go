@@ -149,7 +149,7 @@ func NewResticBackend(ctx context.Context, rawURL string, insecure bool, paralle
 		return nil, err
 	}
 	hb.accept = resticAPIV2
-	b := &ResticBackend{httpBase: hb, display: hb.displayURL(scheme), listCache: newListCache()}
+	b := &ResticBackend{httpBase: hb, display: hb.displayURL(scheme), listCache: newListCache().retryingRuns("restic")}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := b.validate(ctx); err != nil {

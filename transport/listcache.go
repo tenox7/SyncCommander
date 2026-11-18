@@ -3,6 +3,9 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -35,6 +38,8 @@ type listCache struct {
 	stale      map[string]bool    // folders a write changed while the run was going
 	staleTree  map[string]bool    // folders a write removed or moved then, and all under them
 	scope      string             // the folder the latest run lists, with all under it
+	retryProto string             // set: a failed run is tried again (retryingRuns)
+	kept       map[string]bool    // folders an earlier try of the run listed in full
 }
 
 func newListCache() *listCache {
@@ -48,6 +53,50 @@ func (c *listCache) reset() {
 	c.entries = make(map[string][]model.FileEntry)
 	c.complete = make(map[string]bool)
 	c.stale, c.staleTree = nil, nil
+	c.kept = nil
+}
+
+// retryingRuns has the cache try a failed run again, with backoff, for a
+// backend whose every run opens a connection of its own, so another try
+// can work. A run that failed was over: one reset during a long listing,
+// and the rest of the scan listed each folder by itself (W-M7). proto
+// names the backend in the log.
+func (c *listCache) retryingRuns(proto string) *listCache {
+	c.retryProto = proto
+	return c
+}
+
+// cutOff reports a run that ended because its connection did, or went
+// silent: what it sent until then is what it would have sent. A run that
+// failed on what the server sent is not trusted for any of it.
+func cutOff(err error) bool {
+	return isConnLost(err) || errors.Is(err, ErrStall) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// runRetryable reports whether another try of a failed run can do better:
+// one its connection cut off. One the server answered with an error, or
+// that could not connect, gets the same at once; the connect has its own
+// backoff (lazyBackend).
+func runRetryable(err error) bool {
+	return cutOff(err) && !isPermanentError(err)
+}
+
+// keepAfterLocked keeps what a run that failed with err sent for the
+// folders it completed, when err cut it off, and drops all else: a
+// completed folder is whole, as it was when the run released it to a
+// waiter, and the next try sends it again for nothing (W-M7). It returns
+// how many folders it kept.
+func (c *listCache) keepAfterLocked(err error) int {
+	if !cutOff(err) {
+		clear(c.complete)
+	}
+	for dir := range c.entries {
+		if !c.complete[dir] {
+			delete(c.entries, dir)
+		}
+	}
+	c.kept = maps.Clone(c.complete)
+	return len(c.kept)
 }
 
 // running reports whether a run is still sending.
@@ -102,8 +151,10 @@ func (e *unreadDirs) Error() string { return e.why }
 // cache starts empty, the old run is stopped, and what it still sends is
 // dropped, since it may have listed a folder before the change the rescan
 // is to show. When run fails the partial contents are dropped, so List
-// falls back to live per-dir calls instead of trusting a truncated tree; an
-// *unreadDirs failure drops only the folders it names.
+// falls back to live per-dir calls instead of trusting a truncated tree. A
+// run its connection cut off keeps the folders it completed (keepAfterLocked)
+// and, with retryingRuns, is tried again. An *unreadDirs failure drops only
+// the folders it names.
 func (c *listCache) start(ctx context.Context, scope string, run recursiveLister) {
 	c.mu.Lock()
 	if c.active && !c.done && !model.WantsFreshListing(ctx) {
@@ -141,6 +192,21 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 	go func() {
 		defer stop()
 		err := run(runCtx, scope, emit, complete)
+		for try := 1; c.retryProto != "" && try <= MaxRetries() && runRetryable(err) && runCtx.Err() == nil; try++ {
+			c.mu.Lock()
+			if c.runs != id {
+				c.mu.Unlock()
+				return
+			}
+			kept := c.keepAfterLocked(err)
+			c.mu.Unlock()
+			d := backoffDelay(try - 1)
+			Log.Add(c.retryProto, DirRetry, fmt.Sprintf("the recursive listing of %s: %v (attempt %d/%d in %v, keeping %d folders it listed in full)", path.Join("/", scope), err, try+1, MaxRetries()+1, d, kept))
+			if sleepCtx(runCtx, d) != nil {
+				break
+			}
+			err = run(runCtx, scope, emit, complete)
+		}
 		c.mu.Lock()
 		if c.runs != id {
 			// A fresh run replaced this one: the cache is that run's.
@@ -154,7 +220,7 @@ func (c *listCache) start(ctx context.Context, scope string, run recursiveLister
 				c.drop(d)
 			}
 		case err != nil:
-			c.reset()
+			c.keepAfterLocked(err)
 		}
 		c.done = true
 		c.cond.Broadcast()
@@ -204,8 +270,8 @@ func (c *listCache) emit(parent string, entries []model.FileEntry) {
 }
 
 func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
-	if c.staleLocked(parent) {
-		return
+	if c.staleLocked(parent) || c.kept[parent] {
+		return // a folder an earlier try listed in full: no second copy
 	}
 	c.entries[parent] = append(c.entries[parent], entries...)
 }

@@ -83,7 +83,7 @@ func NewWebDAVBackend(ctx context.Context, rawURL string, insecure bool, paralle
 		httpBase:  hb,
 		display:   hb.displayURL(scheme),
 		sums:      newWDSumCache(),
-		listCache: newListCache(),
+		listCache: newListCache().retryingRuns("webdav"), // each run is a request of its own
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -471,9 +471,9 @@ func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 
 // PreloadRecursive fires a single PROPFIND Depth:infinity in the background,
 // streaming entries into the cache grouped by parent dir. Servers may refuse
-// Depth:infinity (RFC 4918 §9.1, 403 + propfind-finite-depth); on that
-// rejection noInfinity latches so every later scan goes straight to per-dir
-// Depth:1 without retrying.
+// Depth:infinity (RFC 4918 §9.1, 403 + propfind-finite-depth; refusesInfinity);
+// on that rejection noInfinity latches so every later scan goes straight to
+// per-dir Depth:1 without retrying.
 func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) error {
 	if b.noInfinity.Load() {
 		return nil
@@ -482,20 +482,38 @@ func (b *WebDAVBackend) PreloadRecursive(ctx context.Context, scope string) erro
 	return nil
 }
 
+// refusesInfinity reports an answer to PROPFIND Depth: infinity that the
+// same request gets again: 403 with propfind-finite-depth (RFC 4918 §9.1),
+// 400 or 501 from a server that has no such depth. A 507, from one that
+// cannot build so big an answer, comes as model.ErrNoSpace. Only 403
+// latched noInfinity, so every scan sent the request first again (W-M7).
+func refusesInfinity(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotImplemented:
+		return true
+	}
+	return false
+}
+
 func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	Log.Add("webdav", DirOut, "RPROPFIND "+b.pathFor(scope))
 	resp, err := b.do(ctx, "PROPFIND", b.urlFor(scope, true), strings.NewReader(wdPropfindBody), map[string]string{
 		"Depth":        "infinity",
 		"Content-Type": "application/xml",
 	})
+	if errors.Is(err, model.ErrNoSpace) {
+		b.noInfinity.Store(true)
+		Log.Add("webdav", DirErr, "RPROPFIND rejected (507: no room for so big an answer); falling back to per-dir Depth:1")
+		return fmt.Errorf("PROPFIND infinity %s: %w: %w", scope, err, ErrUnsupported)
+	}
 	if err != nil {
 		return err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusForbidden {
+	if refusesInfinity(resp.StatusCode) {
 		b.noInfinity.Store(true)
 		Log.Add("webdav", DirErr, "RPROPFIND rejected ("+resp.Status+"); falling back to per-dir Depth:1")
-		return fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
+		return fmt.Errorf("PROPFIND infinity %s: %s: %w", scope, resp.Status, ErrUnsupported)
 	}
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("PROPFIND infinity %s: %s", scope, resp.Status)
@@ -509,7 +527,8 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	// level by default and Tomcat stops at depth 3. So a folder with no
 	// children in the answer is listed again on its own (childlessUnknown).
 	// A failed answer returns before finish: the folders still open then
-	// were never completed, and the cache drops the whole run.
+	// were never completed, and the cache drops them. A cut-off answer
+	// keeps the folders completed before the cut (listCache.keepAfterLocked).
 	self := strings.Trim(scope, "/")
 	g := &emitGrouper{emit: emit, complete: complete, childlessUnknown: true}
 	n := 0

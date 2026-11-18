@@ -359,8 +359,9 @@ func (s *sshShell) findRecursive(ctx context.Context, scope string, emit func(st
 // record is a folder find cannot list, a ! record a path perl could not
 // read. So the folder a report makes short is still open when it arrives;
 // it is never released, and at the end the cache drops it, to be listed
-// live where the error shows. Everything else is served. A failed run, or a
-// report that cannot be pinned to a folder of the listing, drops all.
+// live where the error shows. Everything else is served. A report that
+// cannot be pinned to a folder of the listing drops all, and so does a
+// failed run, but for the folders released before its connection was cut.
 type shellListing struct {
 	scope, absPrefix string
 	g                *emitGrouper

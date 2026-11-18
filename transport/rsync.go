@@ -66,7 +66,7 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 		module:    module,
 		base:      base,
 		display:   display,
-		listCache: newListCache(),
+		listCache: newListCache().retryingRuns("rsync"), // each run dials the daemon
 	}, nil
 }
 
