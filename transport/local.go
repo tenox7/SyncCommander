@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,22 +41,55 @@ func (b *LocalBackend) BasePath() string { return b.base }
 // nameRule is how the file system under base matches names, found by one
 // probe that writes nothing; the rule of a file system does not change.
 func (b *LocalBackend) nameRule() model.NameRule {
-	b.namesOnce.Do(func() { b.names = probeNames(b.base) })
+	b.namesOnce.Do(func() {
+		b.names = probeNames(b.base)
+		b.names.Windows = windowsNames
+	})
 	return b.names
 }
 
+// windowsNames is whether local names follow the rules of Windows
+// (model.WindowsName): a variable, so their tests run on every system.
+var windowsNames = runtime.GOOS == "windows"
+
 // LocalPath maps a slash-separated relPath onto the host filesystem. The path
 // is cleaned by cleanRel first, so ".." segments can never climb above base,
-// and isBaseRel knows the paths that land on base itself.
+// and isBaseRel knows the paths that land on base itself. It is "" for a
+// relPath this system cannot hold (path): no file is that path.
 func (b *LocalBackend) LocalPath(relPath string) string {
+	p, err := b.path(relPath)
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// path is LocalPath, with ErrBadName for a relPath this system cannot hold
+// as it is: on Windows one with a name model.WindowsName refuses. Mapped,
+// such a name landed on another file or on none, and a copy into it said
+// OK (L25): a\b, a name from another system, was the file b in a folder a.
+// Windows takes \ for a separator, and it is refused there with the rest;
+// the replace below keeps a ..\ inside base all the same.
+func (b *LocalBackend) path(relPath string) (string, error) {
+	if windowsNames {
+		for _, name := range strings.Split(cleanRel(relPath), "/") {
+			if why := model.WindowsName(name); why != "" {
+				return "", fmt.Errorf("local: %#q in %#q: %w: %s", name, relPath, ErrBadName, why)
+			}
+		}
+	}
 	if filepath.Separator != '/' {
 		relPath = strings.ReplaceAll(relPath, string(filepath.Separator), "/")
 	}
-	return filepath.Join(b.base, filepath.FromSlash(cleanRel(relPath)))
+	return filepath.Join(b.base, filepath.FromSlash(cleanRel(relPath))), nil
 }
 
 func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	entries, err := os.ReadDir(b.LocalPath(relDir))
+	dir, err := b.path(relDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +117,11 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 
 // Stat reports relPath as the disk holds it now, a link as a link.
 func (b *LocalBackend) Stat(_ context.Context, relPath string) (model.FileEntry, error) {
-	info, err := os.Lstat(b.LocalPath(relPath))
+	p, err := b.path(relPath)
+	if err != nil {
+		return model.FileEntry{}, err
+	}
+	info, err := os.Lstat(p)
 	if err != nil {
 		return model.FileEntry{}, err
 	}
@@ -143,7 +181,11 @@ func (b *LocalBackend) checksum(ctx context.Context, relPath, algo string, off, 
 	if err != nil {
 		return "", err
 	}
-	f, err := openRegular(b.LocalPath(relPath))
+	p, err := b.path(relPath)
+	if err != nil {
+		return "", err
+	}
+	f, err := openRegular(p)
 	if err != nil {
 		return "", err
 	}
@@ -195,7 +237,11 @@ func (b *LocalBackend) SetTimes(_ context.Context, relPath string, mtime, atime,
 	if atime.IsZero() {
 		atime = mtime
 	}
-	return setTimes(b.LocalPath(relPath), mtime, atime, btime)
+	p, err := b.path(relPath)
+	if err != nil {
+		return err
+	}
+	return setTimes(p, mtime, atime, btime)
 }
 
 func (b *LocalBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
@@ -225,7 +271,10 @@ func (b *LocalBackend) AppendFrom(ctx context.Context, relPath string, src model
 // create opens relPath for a new body, making its folder. It never writes
 // through a link, a pipe or a device (L2, L9).
 func (b *LocalBackend) create(relPath string, mode os.FileMode) (*os.File, error) {
-	p := b.LocalPath(relPath)
+	p, err := b.path(relPath)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return nil, err
 	}
@@ -242,7 +291,10 @@ func (b *LocalBackend) create(relPath string, mode os.FileMode) (*os.File, error
 // of a shorter file leaves a gap of zeros, and a longer one holds something
 // else.
 func (b *LocalBackend) openEnd(relPath string, offset int64) (*os.File, error) {
-	p := b.LocalPath(relPath)
+	p, err := b.path(relPath)
+	if err != nil {
+		return nil, err
+	}
 	fi, err := os.Lstat(p)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -299,7 +351,13 @@ func syncFile(f *os.File) error {
 
 // PartSize stats relPath's part (model.PartWriter).
 func (b *LocalBackend) PartSize(_ context.Context, relPath string) (int64, error) {
-	p := b.LocalPath(model.PartPath(relPath))
+	if _, err := b.path(relPath); err != nil {
+		return 0, err // a part of a name the copy can never commit
+	}
+	p, err := b.path(model.PartPath(relPath))
+	if err != nil {
+		return 0, err
+	}
 	fi, err := os.Lstat(p)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -317,7 +375,14 @@ func (b *LocalBackend) PartSize(_ context.Context, relPath string) (int64, error
 // a link in one step, and the mode is what creating the file with it would
 // give, as before parts. A folder at relPath is never replaced.
 func (b *LocalBackend) CommitPart(_ context.Context, relPath string, mode os.FileMode) error {
-	part, final := b.LocalPath(model.PartPath(relPath)), b.LocalPath(relPath)
+	final, err := b.path(relPath)
+	if err != nil {
+		return err
+	}
+	part, err := b.path(model.PartPath(relPath))
+	if err != nil {
+		return err
+	}
 	if fi, err := os.Lstat(final); err == nil && fi.IsDir() {
 		return fmt.Errorf("local: %s is a folder: %w", final, fs.ErrExist)
 	}
@@ -332,7 +397,11 @@ func (b *LocalBackend) Open(ctx context.Context, relPath string) (io.ReadCloser,
 }
 
 func (b *LocalBackend) OpenAt(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
-	f, err := openRegular(b.LocalPath(relPath))
+	p, err := b.path(relPath)
+	if err != nil {
+		return nil, err
+	}
+	f, err := openRegular(p)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +418,10 @@ func (b *LocalBackend) Mkdir(_ context.Context, relPath string, mode os.FileMode
 	if mode == 0 {
 		mode = 0755
 	}
-	p := b.LocalPath(relPath)
+	p, err := b.path(relPath)
+	if err != nil {
+		return err
+	}
 	if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return specialFileErr(p, fi.Mode()) // files written in it would land in the link's target
 	}
@@ -381,7 +453,14 @@ func (b *LocalBackend) Rename(_ context.Context, oldRelPath, newRelPath string) 
 	if err := renameBase("local", oldRelPath, newRelPath); err != nil {
 		return err
 	}
-	oldPath, newPath := b.LocalPath(oldRelPath), b.LocalPath(newRelPath)
+	oldPath, err := b.path(oldRelPath)
+	if err != nil {
+		return err
+	}
+	newPath, err := b.path(newRelPath)
+	if err != nil {
+		return err
+	}
 	if ni, err := os.Lstat(newPath); err == nil {
 		if oi, err := os.Lstat(oldPath); err != nil || !os.SameFile(oi, ni) {
 			return renameTargetTaken("local", newRelPath)
@@ -394,14 +473,21 @@ func (b *LocalBackend) Remove(_ context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return errors.New("local: refusing to remove the base directory")
 	}
-	return os.Remove(b.LocalPath(relPath))
+	p, err := b.path(relPath)
+	if err != nil {
+		return err
+	}
+	return os.Remove(p)
 }
 
 func (b *LocalBackend) RemoveAll(_ context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return errors.New("local: refusing to remove the base directory")
 	}
-	full := b.LocalPath(relPath)
+	full, err := b.path(relPath)
+	if err != nil {
+		return err
+	}
 	if err := os.RemoveAll(full); err != nil {
 		return err
 	}

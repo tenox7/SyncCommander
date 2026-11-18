@@ -266,18 +266,28 @@ func dstSideName(leftToRight bool) string {
 // the destination is known to keep them apart: two names that differ only
 // in form are one word typed on two systems, almost never two files kept
 // on purpose, and Macs and many servers store them as one.
+//
+// A name the destination cannot hold as it is (NameRule.Refuses) is
+// refused too: on Windows, a\b landed on the file b in a folder a, and
+// NUL on the device, and the copy said OK (L25).
 func nameClashes(src model.Side, rule model.NameRule) func(*model.TreeNode) string {
 	guard := rule
 	if guard.Forms == model.FoldUnknown {
 		guard.Forms = model.Folded
 	}
-	if !guard.Folds() {
+	if !guard.Folds() && !rule.Windows {
 		return func(*model.TreeNode) string { return "" }
 	}
 	byDir := map[*model.TreeNode]map[string][]string{} // a folder's source names by guard.Key
 	clashOf := func(n *model.TreeNode) string {
 		dir := n.Parent
 		if dir == nil {
+			return ""
+		}
+		if why := rule.Refuses(n.Name); why != "" {
+			return fmt.Sprintf("the destination cannot hold the name %#q: %s", n.Name, why)
+		}
+		if !guard.Folds() {
 			return ""
 		}
 		keys, ok := byDir[dir]
@@ -441,6 +451,11 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 		switch {
 		case f.src == nil:
 			return false // file by file, it counts as failed
+		case lp.LocalPath(f.relPath) == "":
+			// No local path: a name this system cannot hold, which rsync
+			// would read as another file or a device (L25). File by file,
+			// it fails with the reason.
+			return false
 		case f.src.IsSpecial():
 			skipped = append(skipped, f)
 			continue

@@ -24,17 +24,20 @@ import (
 // The local side must then hold as many bytes as the listing gave: the file
 // sent, or the file received (F14). The transfer itself is checked by rsync.
 // When it does not, the plain copy that follows fails on it too.
+//
+// A name this system cannot hold has no local path (""), and is never sent
+// or received this way: rsync took "" for the folder sc runs in (L25).
 func tryDirectTransfer(ctx context.Context, src, dst model.Backend, relPath string, srcEntry *model.FileEntry) bool {
 	if lp, ok := src.(model.LocalFS); ok {
 		if r, ok := capable[model.LocalSender](ctx, dst, func(caps model.Caps) bool { return caps.SendLocal }); ok {
 			local := lp.LocalPath(relPath)
-			return r.SendLocalFile(ctx, local, relPath, putParams(srcEntry, srcEntry.Mode)) == nil && localSizeIs(relPath, local, srcEntry.Size)
+			return local != "" && r.SendLocalFile(ctx, local, relPath, putParams(srcEntry, srcEntry.Mode)) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	if lp, ok := dst.(model.LocalFS); ok {
 		if r, ok := capable[model.LocalReceiver](ctx, src, func(caps model.Caps) bool { return caps.RecvLocal }); ok {
 			local := lp.LocalPath(relPath)
-			return r.RecvToLocalFile(ctx, relPath, local) == nil && localSizeIs(relPath, local, srcEntry.Size)
+			return local != "" && r.RecvToLocalFile(ctx, relPath, local) == nil && localSizeIs(relPath, local, srcEntry.Size)
 		}
 	}
 	return false

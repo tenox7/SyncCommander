@@ -154,6 +154,11 @@ var ErrSizeMismatch = errors.New("size does not match the listing")
 // opening a pipe waits for a writer that may never come (L2, L9).
 var ErrSpecialFile = errors.New("sc does not read or write through links, pipes or devices")
 
+// ErrBadName refuses a name the file system cannot hold as it is: on
+// Windows one that lands on another file or on none (model.WindowsName,
+// L25). Another try has the same name, so it is final.
+var ErrBadName = errors.New("a name this file system cannot hold")
+
 // ErrAppendOffset is an AppendFrom refusing a file that does not end where
 // the append starts: missing or shorter (writing on would leave a gap of
 // zeros), or longer (L14, S8). The caller looks at the file again.
@@ -181,7 +186,7 @@ func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) {
 		return true
 	}
 	if GivesUp(err) {
