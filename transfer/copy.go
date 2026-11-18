@@ -617,9 +617,11 @@ func (c *copier) copyOne(f item) {
 	verify := resumeVerifier(c.req.VerifyResume, c.req.Scanner, c.src, c.dst, f.relPath, srcEntry.Size)
 	finish := func(how string) {
 		// A destination that keeps no times (restic) says so for every file.
-		if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil && !errors.Is(err, transport.ErrUnsupported) {
-			p.TimesNotSet.Add(1)
-			transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
+		if hasTime(srcEntry) {
+			if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil && !errors.Is(err, transport.ErrUnsupported) {
+				p.TimesNotSet.Add(1)
+				transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
+			}
 		}
 		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
 	}
@@ -689,6 +691,12 @@ func (c *copier) copyOne(f item) {
 	}
 	finish("")
 }
+
+// hasTime reports whether e has a time to give its copy. A listing may give
+// a file none (an FTP or HTTP server), and its ModTime is zero then: set
+// as it was, it made the copy's time year 1, as FTP's MFMT 00010101000000
+// (L25). The copy keeps the time it was written instead.
+func hasTime(e *model.FileEntry) bool { return !e.ModTime.IsZero() }
 
 // logSkipped says why f, a link, device or part, is not copied.
 func logSkipped(f item) {

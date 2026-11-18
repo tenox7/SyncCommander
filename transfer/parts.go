@@ -56,7 +56,7 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 		if err == nil && offset > 0 && offset < src.Size && c.req.VerifyResume {
 			err = c.verifyPart(model.WithHashBytes(ctx, src.Size), f.relPath, part)
 		}
-		if err == nil {
+		if err == nil && hasTime(src) {
 			// The times go on the part, so the file has them from the moment
 			// it has its name.
 			terr := c.dst.SetTimes(ctx, part, src.ModTime, src.ATime.Time(), src.BirthTime.Time())
@@ -64,6 +64,8 @@ func (c *copier) copyIntoPart(ctx context.Context, f item, pw model.PartWriter, 
 			if !timesSet {
 				transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+terr.Error())
 			}
+		}
+		if err == nil {
 			err = pw.CommitPart(ctx, f.relPath, src.Mode)
 		}
 		if err != nil {

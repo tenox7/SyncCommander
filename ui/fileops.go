@@ -160,6 +160,12 @@ func (m *Model) touchNode(node *model.TreeNode) tea.Cmd {
 			newer, older = r, l
 			olderBackend, touched, side = left, model.SideLeft, "left"
 		}
+		if newer.ModTime.IsZero() {
+			// Neither side has a time to give: a zero one was set, which FTP
+			// wrote as year 1 (L25).
+			transport.Log.Add("touch", transport.DirWarn, older.RelPath+": neither side has a time to give the other")
+			return done
+		}
 		if err := olderBackend.SetTimes(ctx, older.RelPath, newer.ModTime, newer.ATime.Time(), newer.BirthTime.Time()); err != nil {
 			// A failed touch logged nothing (U9).
 			if ctx.Err() == nil {
