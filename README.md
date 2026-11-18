@@ -81,6 +81,20 @@ for name.
 | rclone:// any rclone remote (S3, B2, Swift, SMB, Dropbox, ...) | whatever the remote offers: MD5, SHA1, SHA256, XXH3 |
 | fake:// synthetic tree (testing) | XXH3, SHA256, SHA1, MD5, MD4 |
 
+### Paths over ssh
+
+For sftp://, scp://, ssh:// and rsync+ssh://, a URL with no path, or the
+path `/` or `/~`, is the login's home folder, and `/~/x` is `x` in it.
+Any other path is absolute: `sftp://host/srv/data` is `/srv/data`, and
+`sftp://host//` is the root folder.
+
+Over sftp, sc also lists folders, sums files and removes folders with
+commands in the login shell, which is faster. It does that only where the
+shell sees the same folder as sftp, with the same mode, size and time.
+A NAS may give sftp a root of its own: sftp's `/photo` is the shell's
+`/volume1/photo`. There sc uses sftp requests alone, and the server sums
+no files. The log says why. The shell needs GNU find or perl for this.
+
 ## Server examples
 
 - `rclone serve webdav --etag-hash md5`

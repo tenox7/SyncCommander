@@ -135,7 +135,7 @@ type SFTPBackend struct {
 	sshShell
 	main  *sftpConn // calls on files and folders; transfers too without extras
 	pool  *connPool[*sftpConn]
-	shell atomic.Int32 // whether the login shell runs commands: shellUnknown until asked
+	shell atomic.Int32 // whether sc uses the login shell (useShell): shellUnknown until asked
 }
 
 // NewSFTPBackend connects to rawURL; a cancel of ctx stops the connect.
@@ -263,6 +263,12 @@ func (b *SFTPBackend) PreloadRecursive(ctx context.Context, scope string) error 
 // with sub-second compare on, a copy whose time sc had set differed from
 // its source for good when find listed it, and not when READDIR did (S25).
 func (b *SFTPBackend) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
+	switch ok, err := b.useShell(ctx); {
+	case err != nil:
+		return err
+	case !ok:
+		return errNoShell
+	}
 	return b.sshShell.findRecursive(ctx, scope, func(dir string, entries []model.FileEntry) {
 		for i := range entries {
 			entries[i].TimeRes = model.TimeSecond
@@ -669,7 +675,7 @@ func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	// the requests go one for each entry (S19). A server whose shell does
 	// not run it gets the requests.
 	err := errNoShell
-	if b.shellRuns(ctx) {
+	if ok, _ := b.useShell(ctx); ok {
 		err = b.rmRF(ctx, relPath)
 	}
 	if errors.Is(err, errNoShell) {
@@ -682,31 +688,141 @@ func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	return err
 }
 
-// shellRuns says whether the login shell runs the commands it is sent,
-// asking it once for the connection: an SFTP-only server runs the sftp
-// server for every command, and that waits on an input held open for
-// requests that never come. A check that was stopped is asked again.
-func (b *SFTPBackend) shellRuns(ctx context.Context) bool {
+// useShell says whether sc uses the login shell: whether it runs the
+// commands it is sent and sees the files sftp does. The find listing, the
+// sums and folder removes ask it. It is asked once for the connection: an
+// SFTP-only server runs the sftp server for every command, and that waits
+// on an input held open for requests that never come. err is why it could
+// not be told, a check that was stopped or that lost its connection: that
+// is asked again.
+func (b *SFTPBackend) useShell(ctx context.Context) (bool, error) {
 	switch b.shell.Load() {
 	case shellYes:
-		return true
+		return true, nil
 	case shellNo:
-		return false
+		return false, nil
 	}
 	err := b.checkShell(ctx)
+	if err == nil {
+		err = b.sameFolder(ctx)
+	}
+	const without = "folders are listed one at a time and removed by SFTP requests, and the server sums no files"
 	switch {
 	case ctx.Err() != nil:
-		return false
+		return false, ctx.Err()
+	case isConnLost(err):
+		return false, err
+	case errors.Is(err, errRunsNoCommand):
+		b.shell.Store(shellNo)
+		Log.Add("sftp", DirIn, "the login runs no commands, sftp only: "+without)
+		return false, nil
 	case err != nil:
 		b.shell.Store(shellNo)
-		Log.Add("sftp", DirWarn, "folders are removed by SFTP requests: "+err.Error())
-		return false
+		Log.Add("sftp", DirWarn, "the login shell is not used: "+err.Error()+". So "+without)
+		return false, nil
 	}
 	b.shell.Store(shellYes)
-	return true
+	return true, nil
 }
 
-// What SFTPBackend.shellRuns found.
+// sameFolder has sftp and the shell look at the folder sc works in, which
+// must be one folder for both. A NAS may give sftp a root of its own, so
+// that sftp's /photo is the shell's /volume1/photo. The shell then listed
+// another folder or none, summed another file or none, and its rm -rf of a
+// path that is not there exited 0: a folder reported removed was still
+// there (S25). A folder that is not there yet is told by the nearest one
+// above it that is. One that changed between the two looks reads as
+// another, so it is looked at again, a few times.
+func (b *SFTPBackend) sameFolder(ctx context.Context) error {
+	var err error
+	for try := 0; try < 3 && ctx.Err() == nil; try++ {
+		var p string
+		var viaSFTP, viaShell model.FileEntry
+		if p, viaSFTP, err = b.nearestFolder(ctx); err != nil {
+			return err
+		}
+		viaShell, err = b.sshShell.statAt(ctx, p, p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			err = fmt.Errorf("the shell finds no %s, which sftp has: the two see other files", p)
+		case err != nil:
+			return fmt.Errorf("the shell cannot look at %s: %w", p, err)
+		case viaShell.Mode == viaSFTP.Mode && viaShell.Size == viaSFTP.Size && viaShell.ModTime.Unix() == viaSFTP.ModTime.Unix():
+			return nil
+		default:
+			err = fmt.Errorf("the shell's %s is not sftp's (%s; sftp: %s): the two see other files", p, statText(viaShell), statText(viaSFTP))
+		}
+	}
+	return err
+}
+
+// nearestFolder is the base, or the nearest folder above it that sftp has,
+// with sftp's lstat of it.
+func (b *SFTPBackend) nearestFolder(ctx context.Context) (string, model.FileEntry, error) {
+	for p := path.Clean(b.base); ; p = path.Dir(p) {
+		var info os.FileInfo
+		err := b.onMain(ctx, func(c *sftp.Client) (err error) {
+			info, err = c.Lstat(p)
+			return err
+		})
+		if errors.Is(err, fs.ErrNotExist) && path.Dir(p) != p {
+			continue
+		}
+		if err != nil {
+			return "", model.FileEntry{}, fmt.Errorf("sftp: stat %s: %w", p, err)
+		}
+		return p, sftpEntry(p, info), nil
+	}
+}
+
+// statText is what a look at a folder gave, for a log line.
+func statText(e model.FileEntry) string {
+	return fmt.Sprintf("%v, %d bytes, %s", e.Mode, e.Size, e.ModTime.UTC().Format(time.RFC3339))
+}
+
+// The sums are the shell's, which must see the files sftp does (useShell):
+// without it there are none.
+
+func (b *SFTPBackend) ChecksumAlgos(ctx context.Context) ([]string, error) {
+	if ok, err := b.useShell(ctx); !ok {
+		return nil, err
+	}
+	return b.sshShell.ChecksumAlgos(ctx)
+}
+
+func (b *SFTPBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
+	if err := b.shellSums(ctx, relPath); err != nil {
+		return "", err
+	}
+	return b.sshShell.Checksum(ctx, relPath, algo)
+}
+
+func (b *SFTPBackend) ChecksumFiles(ctx context.Context, rels []string, algo string) (map[string]string, error) {
+	if err := b.shellSums(ctx, "the files"); err != nil {
+		return nil, err
+	}
+	return b.sshShell.ChecksumFiles(ctx, rels, algo)
+}
+
+func (b *SFTPBackend) ChecksumRange(ctx context.Context, relPath, algo string, off, n int64) (string, error) {
+	if err := b.shellSums(ctx, relPath); err != nil {
+		return "", err
+	}
+	return b.sshShell.ChecksumRange(ctx, relPath, algo, off, n)
+}
+
+// shellSums is nil when the shell may sum relPath, and why not when not.
+func (b *SFTPBackend) shellSums(ctx context.Context, relPath string) error {
+	switch ok, err := b.useShell(ctx); {
+	case err != nil:
+		return err
+	case !ok:
+		return fmt.Errorf("sftp: sum of %s: the login shell is not used: %w", relPath, ErrUnsupported)
+	}
+	return nil
+}
+
+// What SFTPBackend.useShell found.
 const (
 	shellUnknown int32 = iota
 	shellYes

@@ -32,6 +32,10 @@ type Options struct {
 	// hold it, as a server whose file system hangs: the server process
 	// reads and answers nothing, and the ssh connection stays up.
 	SFTPStream func(io.ReadWriter) io.ReadWriter
+	// SFTPHandlers, when set, serve the sftp subsystem in place of the
+	// file system the commands see, as a NAS that gives sftp a root of
+	// its own: the two see other files at one path.
+	SFTPHandlers *sftp.Handlers
 	// Hold has the server run none of the commands it says yes to, as a
 	// shell on a hung mount: such a command prints nothing and does not
 	// end until the client closes its session. Keepalives are answered.
@@ -150,6 +154,10 @@ func serveSFTP(c ssh.Channel, o Options) {
 			io.ReadWriter
 			io.Closer
 		}{o.SFTPStream(c), c}
+	}
+	if o.SFTPHandlers != nil {
+		sftp.NewRequestServer(rw, *o.SFTPHandlers).Serve()
+		return
 	}
 	if srv, err := sftp.NewServer(rw); err == nil {
 		srv.Serve()

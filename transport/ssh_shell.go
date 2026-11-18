@@ -186,6 +186,10 @@ func (s *sshShell) home(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), shellCheckErr(ctx, err)
 }
 
+// errRunsNoCommand is a login that runs no command, as ForceCommand
+// internal-sftp makes it.
+var errRunsNoCommand = errors.New("the server ran no command for this login (echo printed nothing): it may allow sftp only; use sftp://")
+
 // shellWord is the word checkShell has the login shell echo.
 const shellWord = "sc-shell-ok"
 
@@ -207,7 +211,7 @@ func (s *sshShell) checkShell(ctx context.Context) error {
 	case got == shellWord:
 		return nil
 	case strings.TrimSpace(got) == "":
-		return errors.New("the server ran no command for this login (echo printed nothing): it may allow sftp only; use sftp://")
+		return errRunsNoCommand
 	default:
 		return fmt.Errorf("the login shell printed %s for echo %s: a login script prints text, which would be read as file data; make it print only in interactive shells", clip(out.String()), shellWord)
 	}
@@ -330,12 +334,8 @@ func (s *sshShell) statCmd(p string, form int32) string {
 		q, exitNotThere, findRecord, "%f"))
 }
 
-// Stat prints relPath's own list record on the server: one command, no
-// listing of its folder. A folder above relPath that the login cannot
-// search makes relPath "not there" too: the shell's test cannot tell the
-// two apart.
-func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
-	p := s.abs(relPath)
+// statAt is Stat of the full path p, which errors call name.
+func (s *sshShell) statAt(ctx context.Context, p, name string) (model.FileEntry, error) {
 	form := s.form.Load()
 	out, err := s.run(ctx, s.statCmd(p, form))
 	if s.learnForm(form, err) {
@@ -343,18 +343,29 @@ func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, e
 	}
 	switch {
 	case exitCode(err) == exitNotThere:
-		return model.FileEntry{}, fmt.Errorf("%s: %s: %w", s.proto, relPath, os.ErrNotExist)
+		return model.FileEntry{}, fmt.Errorf("%s: %s: %w", s.proto, name, os.ErrNotExist)
 	case err != nil:
 		return model.FileEntry{}, err
 	}
 	r, ok := statRecord(out)
 	switch {
 	case !ok:
-		return model.FileEntry{}, fmt.Errorf("%s: stat %s: the server answered %q", s.proto, relPath, out)
+		return model.FileEntry{}, fmt.Errorf("%s: stat %s: the server answered %q", s.proto, name, out)
 	case r.err != "":
-		return model.FileEntry{}, fmt.Errorf("%s: stat %s: %s", s.proto, relPath, r.err)
+		return model.FileEntry{}, fmt.Errorf("%s: stat %s: %s", s.proto, name, r.err)
 	}
-	e := r.entry
+	return r.entry, nil
+}
+
+// Stat prints relPath's own list record on the server: one command, no
+// listing of its folder. A folder above relPath that the login cannot
+// search makes relPath "not there" too: the shell's test cannot tell the
+// two apart.
+func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
+	e, err := s.statAt(ctx, s.abs(relPath), relPath)
+	if err != nil {
+		return model.FileEntry{}, err
+	}
 	e.RelPath, e.Name = relPath, path.Base(relPath)
 	if relPath == "" {
 		e.Name = ""

@@ -141,36 +141,52 @@ func TestRemoveAllStopsOnTheServerWhenCancelled(t *testing.T) {
 }
 
 // A shell with no rm, as a restricted one: SFTP removes the folder by its
-// requests.
+// requests. A shell with nothing but sh cannot even look at the folder, so
+// it is not used, and it is sent no rm (S25).
 func TestSFTPRemoveAllWithNoRm(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("no sh")
-	}
-	bin := t.TempDir()
-	if err := os.Symlink(sh, filepath.Join(bin, "sh")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	if out, _ := exec.Command("sh", "-c", "command -v rm").Output(); len(out) > 0 {
-		t.Skipf("this sh finds rm with no rm on its PATH: %s", out)
-	}
-	root := t.TempDir()
-	makeTree(t, root)
-	b, err := OpenBackend("sftp://x:pw@"+startExecSFTPServer(t)+root, true, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	mark := len(Log.Lines())
-	if err := b.RemoveAll(context.Background(), "d"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(filepath.Join(root, "d")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("d is still there: %v", err)
-	}
-	if n := countSent(mark, "sftp", "rm -rf "); n != 1 {
-		t.Errorf("%d rm -rf sent, want 1, which found no rm", n)
+	for _, tc := range []struct {
+		name  string
+		rms   int
+		shell func(t *testing.T)
+	}{
+		{"no rm", 1, func(t *testing.T) {
+			fakeCommand(t, "rm", `echo "sh: rm: not found" >&2; exit 127`)
+		}},
+		{"nothing but sh", 0, func(t *testing.T) {
+			sh, err := exec.LookPath("sh")
+			if err != nil {
+				t.Skip("no sh")
+			}
+			bin := t.TempDir()
+			if err := os.Symlink(sh, filepath.Join(bin, "sh")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			if out, _ := exec.Command("sh", "-c", "command -v rm").Output(); len(out) > 0 {
+				t.Skipf("this sh finds rm with no rm on its PATH: %s", out)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.shell(t)
+			root := t.TempDir()
+			makeTree(t, root)
+			b, err := OpenBackend("sftp://x:pw@"+startExecSFTPServer(t)+root, true, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer b.Close()
+			mark := len(Log.Lines())
+			if err := b.RemoveAll(context.Background(), "d"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(root, "d")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("d is still there: %v", err)
+			}
+			if n := countSent(mark, "sftp", "rm -rf "); n != tc.rms {
+				t.Errorf("%d rm -rf sent, want %d", n, tc.rms)
+			}
+		})
 	}
 }
 
