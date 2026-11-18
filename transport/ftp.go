@@ -388,10 +388,13 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 	}
 	b.socks.Store(socks)
 
-	// Extra connections for parallel transfers. Primary is nil: when the pool
-	// is at capacity acquireExtra returns false and the caller serializes on
-	// the primary conn under prim. maxExtras=0 (parallel<=1) means every
-	// transfer takes the primary path.
+	// A connection of its own for each of the parallel transfers. A control
+	// connection runs one command at a time: the n-th transfer ran on the
+	// primary and held up every listing, Mkdir and SetTimes behind it for
+	// as long as its file took (L16). A transfer now waits for an extra in
+	// use, and takes the primary (nil from the pool) only when there is
+	// none: the server takes no connection beyond the primary and the
+	// checksum one.
 	dial := func(ctx context.Context) (*ftpConn, error) {
 		c, socks, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, nil)
 		if derr != nil {
@@ -400,7 +403,8 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 		Log.Add("ftp", DirIn, "extra connection dialed")
 		return &ftpConn{conn: c, socks: socks, lastUsed: time.Now()}, nil
 	}
-	b.pool = newConnPool[*ftpConn](nil, parallel-1, dial, func(c *ftpConn) { c.close() })
+	b.pool = newConnPool[*ftpConn]("ftp", nil, parallel, dial, func(c *ftpConn) { c.close() })
+	b.pool.waits = true
 	return b, nil
 }
 
@@ -438,9 +442,9 @@ func (b *FTPBackend) BasePath() string { return b.display }
 // abs is relPath's path on the server, under the base (cleanRel).
 func (b *FTPBackend) abs(relPath string) string { return path.Join(b.base, cleanRel(relPath)) }
 
-// SetParallel keeps n-1 extra connections; the n-th transfer shares the
-// primary under prim.
-func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+// SetParallel keeps n extra connections, one for each of n transfers: the
+// primary is for the calls in between (L16).
+func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n) }
 
 // Close says QUIT on the primary connection: now when it is free, or else
 // once the call that holds it lets it go. Close waited for that call, so
@@ -465,40 +469,39 @@ func (b *FTPBackend) Close() error {
 	return nil
 }
 
-// acquireExtra returns a dedicated transfer connection and its release func,
-// or ok=false when the pool is at capacity (caller must serialize on the
-// primary conn under b.mu). Extras sit idle while the UI scans (which only
-// uses the primary), so a long-idle extra may have been dropped by the
-// server; probe with NoOp and redial before handing it out.
-func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(), bool) {
-	c, poolRelease := b.pool.acquire(ctx)
-	if c == nil {
-		poolRelease()
-		return nil, nil, false
-	}
-	// On cancel, CancelCloser force-closes this conn's sockets, so it goes
-	// back dead. Zero lastUsed to force a liveness probe on next acquire
-	// rather than handing out a corpse within the 60s trust window.
-	release := func() {
-		c.lastUsed = time.Now()
-		if ctx.Err() != nil {
-			c.lastUsed = time.Time{}
-		}
-		poolRelease()
-	}
-	if time.Since(c.lastUsed) > 60*time.Second && c.probe(ctx) != nil {
-		conn, socks, err := dialFTPConn(ctx, b.addr, b.scheme, b.user, b.pass, b.tlsCfg, nil)
-		if err != nil {
-			Log.Add("ftp", DirErr, "extra reconnect failed: "+err.Error())
-			c.lastUsed = time.Time{} // still dead: keep the probe armed
+// acquireExtra returns a transfer connection and its release, which takes
+// the transfer's error, or ok=false when there is none to have: the server
+// takes no extra connection, the pool is closed or ctx ended. The caller
+// then runs the transfer on the primary, under prim. Extras sit idle while
+// the UI scans (which uses the primary only), so one idle for a minute may
+// have been dropped by the server, and one a transfer failed on may be
+// dead: such an extra is asked (NOOP) before it is lent out. One found dead
+// is dropped, and the pool dials the next, its wait and all: it was dialed
+// again here, outside that wait, once per transfer (L16).
+func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(error), bool) {
+	for {
+		c, poolRelease := b.pool.acquire(ctx)
+		if c == nil {
 			poolRelease()
 			return nil, nil, false
 		}
-		c.conn.Quit()
-		c.conn, c.socks, c.lastUsed = conn, socks, time.Now()
-		Log.Add("ftp", DirIn, "extra reconnected")
+		if time.Since(c.lastUsed) <= 60*time.Second || c.probe(ctx) == nil {
+			return c, func(err error) {
+				c.lastUsed = time.Now()
+				if err != nil || ctx.Err() != nil {
+					// A cancel closed its sockets, or the transfer failed on
+					// it: it is asked before its next use.
+					c.lastUsed = time.Time{}
+				}
+				poolRelease()
+			}, true
+		}
+		Log.Add("ftp", DirIn, "an extra connection is gone: dropped")
+		b.pool.discard(c)
+		if ctx.Err() != nil {
+			return nil, nil, false
+		}
 	}
-	return c, release, true
 }
 
 // probe asks c whether it still answers; a cancel of ctx ends the wait.
@@ -972,12 +975,12 @@ func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ t
 }
 
 // store uploads src to relPath, appending at offset when it is positive, on
-// an extra connection when one is free and on the locked primary otherwise.
-// No retry: src is consumed.
-func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, offset int64) error {
+// an extra connection, and on the locked primary when there is none to
+// have (acquireExtra). No retry: src is consumed.
+func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, offset int64) (err error) {
 	fullPath := b.abs(relPath)
 	if ex, release, ok := b.acquireExtra(ctx); ok {
-		defer release()
+		defer func() { release(err) }()
 		return b.storeOn(ctx, ex.conn, ex.socks, fullPath, src, offset)
 	}
 	if err := b.lockPrimary(ctx); err != nil {
@@ -1213,8 +1216,8 @@ func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (
 	return b.retr(ctx, relPath, offset)
 }
 
-// retr opens a download on an extra connection when one is free; otherwise
-// it holds the primary's lock until the reader is closed.
+// retr opens a download on an extra connection; with none to have
+// (acquireExtra), it holds the primary's lock until the reader is closed.
 func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	Log.Add("ftp", DirOut, fmt.Sprintf("RETR %s @%d", relPath, offset))
 	fullPath := b.abs(relPath)
@@ -1223,7 +1226,7 @@ func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io
 		resp, err := retrFrom(ex.conn, fullPath, offset)
 		if err != nil {
 			stop()
-			release()
+			release(err)
 			Log.Add("ftp", DirErr, err.Error())
 			return nil, err
 		}
@@ -1240,7 +1243,7 @@ func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io
 		Log.Add("ftp", DirErr, err.Error())
 		return nil, err
 	}
-	return &ftpReader{rc: resp, stop: stop, done: b.unlockPrimary}, nil
+	return &ftpReader{rc: resp, stop: stop, done: func(error) { b.unlockPrimary() }}, nil
 }
 
 func retrFrom(conn *ftp.ServerConn, fullPath string, offset int64) (*ftp.Response, error) {
@@ -1252,12 +1255,12 @@ func retrFrom(conn *ftp.ServerConn, fullPath string, offset int64) (*ftp.Respons
 
 // ftpReader wraps a RETR body. Close closes the data stream, reads the
 // server's reply, stops the cancel watcher and runs done (a pool release or
-// the primary unlock) exactly once, since the copy layer may Close more than
-// once.
+// the primary unlock) with that reply's error exactly once, since the copy
+// layer may Close more than once.
 type ftpReader struct {
 	rc   io.ReadCloser
 	stop func()
-	done func()
+	done func(error)
 	once sync.Once
 	err  error
 
@@ -1302,7 +1305,7 @@ func (r *ftpReader) Close() error {
 	r.once.Do(func() {
 		r.err = r.shutdown()
 		r.stop()
-		r.done()
+		r.done(r.err)
 	})
 	return r.err
 }

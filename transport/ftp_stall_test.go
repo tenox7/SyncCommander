@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -95,6 +94,23 @@ func openStallFTP(t *testing.T, f *fakeFTPD, parallel int) *stallFTP {
 	return s
 }
 
+// noExtraConn is a refuse for a server that takes the primary and the
+// checksum connection only: a transfer there runs on the primary (L16).
+func noExtraConn(n int) bool { return n > 2 }
+
+// ftpTransferConns are the two connections a transfer runs on: the
+// primary, with no extra to have, and an extra.
+var ftpTransferConns = []struct {
+	name string
+	open func(t *testing.T, f *fakeFTPD) *stallFTP
+}{
+	{"the primary", func(t *testing.T, f *fakeFTPD) *stallFTP {
+		f.refuse = noExtraConn
+		return openStallFTP(t, f, 1)
+	}},
+	{"an extra", func(t *testing.T, f *fakeFTPD) *stallFTP { return openStallFTP(t, f, 2) }},
+}
+
 func (s *stallFTP) open(t *testing.T, ctx context.Context, name string) io.ReadCloser {
 	t.Helper()
 	r, err := s.Open(ctx, name)
@@ -110,10 +126,10 @@ func (s *stallFTP) open(t *testing.T, ctx context.Context, name string) io.ReadC
 // up. A cancel now closes the data socket too, on the primary connection
 // and on an extra one.
 func TestFTPCancelEndsAStalledUpload(t *testing.T) {
-	for _, parallel := range []int{1, 2} {
-		t.Run(fmt.Sprintf("parallel=%d", parallel), func(t *testing.T) {
+	for _, on := range ftpTransferConns {
+		t.Run(on.name, func(t *testing.T) {
 			f := &fakeFTPD{store: map[string][]byte{}, storStall: true}
-			s := openStallFTP(t, f, parallel)
+			s := on.open(t, f)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := goErr(func() error { return s.CopyFrom(ctx, "big.bin", zeros{}, model.PutParams{}) })
@@ -129,10 +145,10 @@ func TestFTPCancelEndsAStalledUpload(t *testing.T) {
 
 // L8: the same for a download the server stopped sending.
 func TestFTPCancelEndsAStalledDownload(t *testing.T) {
-	for _, parallel := range []int{1, 2} {
-		t.Run(fmt.Sprintf("parallel=%d", parallel), func(t *testing.T) {
+	for _, on := range ftpTransferConns {
+		t.Run(on.name, func(t *testing.T) {
 			f := &fakeFTPD{files: map[string]fakeFTPFile{"/slow.bin": {strings.Repeat("x", 100), "stall"}}}
-			s := openStallFTP(t, f, parallel)
+			s := on.open(t, f)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			r := s.open(t, ctx, "slow.bin")
@@ -153,10 +169,10 @@ func TestFTPCancelEndsAStalledDownload(t *testing.T) {
 // L8: a RETR the server did not answer was not watched at all: the cancel
 // watcher started once the reply had come.
 func TestFTPCancelEndsADownloadTheServerDoesNotAnswer(t *testing.T) {
-	for _, parallel := range []int{1, 2} {
-		t.Run(fmt.Sprintf("parallel=%d", parallel), func(t *testing.T) {
+	for _, on := range ftpTransferConns {
+		t.Run(on.name, func(t *testing.T) {
 			f := &fakeFTPD{hang: "RETR", files: map[string]fakeFTPFile{"/a.bin": {"x", "226 Transfer complete."}}}
-			s := openStallFTP(t, f, parallel)
+			s := on.open(t, f)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := goErr(func() error {
@@ -199,10 +215,10 @@ func TestFTPCancelEndsACallRunAgainAfterAReconnect(t *testing.T) {
 // An Open that fails stops its cancel watcher: a cancel of its ctx later
 // would close the connection, back in use by then, under the next call.
 func TestFTPFailedOpenLeavesTheConnectionAlone(t *testing.T) {
-	for _, parallel := range []int{1, 2} {
-		t.Run(fmt.Sprintf("parallel=%d", parallel), func(t *testing.T) {
+	for _, on := range ftpTransferConns {
+		t.Run(on.name, func(t *testing.T) {
 			f := &fakeFTPD{files: map[string]fakeFTPFile{"/a.bin": {"x", "226 Transfer complete."}}}
-			s := openStallFTP(t, f, parallel)
+			s := on.open(t, f)
 			ctx, cancel := context.WithCancel(context.Background())
 			if _, err := s.Open(ctx, "missing.bin"); err == nil {
 				t.Fatal("Open of a missing file: no error")
@@ -269,9 +285,9 @@ func TestFTPCloseOfADownloadWithNoReply(t *testing.T) {
 // L8: a call that waited for the primary connection waited on a mutex as
 // long as the call that held it, whatever its own ctx said.
 func TestFTPCallWaitingForTheConnectionEndsOnCancel(t *testing.T) {
-	f := &fakeFTPD{store: map[string][]byte{}, files: map[string]fakeFTPFile{"/a.bin": {strings.Repeat("x", 4000), "226 Transfer complete."}}}
+	f := &fakeFTPD{store: map[string][]byte{}, files: map[string]fakeFTPFile{"/a.bin": {strings.Repeat("x", 4000), "226 Transfer complete."}}, refuse: noExtraConn}
 	s := openStallFTP(t, f, 1)
-	r := s.open(t, context.Background(), "a.bin") // holds the primary until Close
+	r := s.open(t, context.Background(), "a.bin") // holds the primary until Close: no extra to have
 	for _, c := range []struct {
 		name string
 		call func(context.Context) error
@@ -349,9 +365,9 @@ func TestFTPCancelEndsAProbeTheServerDoesNotAnswer(t *testing.T) {
 func TestFTPCloseWaitsForNoCall(t *testing.T) {
 	t.Run("a download in progress", func(t *testing.T) {
 		body := strings.Repeat("x", 4000)
-		f := &fakeFTPD{files: map[string]fakeFTPFile{"/a.bin": {body, "226 Transfer complete."}}}
+		f := &fakeFTPD{files: map[string]fakeFTPFile{"/a.bin": {body, "226 Transfer complete."}}, refuse: noExtraConn}
 		s := openStallFTP(t, f, 1)
-		r := s.open(t, context.Background(), "a.bin") // holds the primary
+		r := s.open(t, context.Background(), "a.bin") // holds the primary: no extra to have
 		waitErr(t, goErr(s.Close), time.Second, "Close under a download")
 		if f.quitFrom(1) {
 			t.Error("QUIT under a download in progress")

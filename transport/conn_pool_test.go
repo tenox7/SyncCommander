@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// The FTP backend builds its pool with a nil primary and treats a nil acquire
-// result as "at capacity → fall back to the serialized primary conn". These
-// tests pin that contract, which sftp/scp (non-nil primary) never exercise.
+// A pool with a nil primary gives nil for "no extra to have": the caller
+// falls back to a primary of its own. These tests pin that contract for a
+// pool that does not wait; FTP's pool waits (L16): conn_pool_wait_test.go.
 
 func TestConnPoolNilPrimaryFallback(t *testing.T) {
 	var dialed int64
@@ -18,7 +18,7 @@ func TestConnPoolNilPrimaryFallback(t *testing.T) {
 		return &fakeConn{id: atomic.AddInt64(&dialed, 1)}, nil
 	}
 	var closed int64
-	p := newConnPool[*fakeConn](nil, 2, dial, func(*fakeConn) { atomic.AddInt64(&closed, 1) })
+	p := newConnPool[*fakeConn]("test", nil, 2, dial, func(*fakeConn) { atomic.AddInt64(&closed, 1) })
 
 	c1, r1 := p.acquire(context.Background())
 	c2, _ := p.acquire(context.Background())
@@ -43,7 +43,7 @@ func TestConnPoolNilPrimaryFallback(t *testing.T) {
 
 func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
 	dial := func(context.Context) (*int, error) { v := 0; return &v, nil }
-	p := newConnPool[*int](nil, 0, dial, func(*int) {})
+	p := newConnPool[*int]("test", nil, 0, dial, func(*int) {})
 	for i := 0; i < 3; i++ {
 		c, r := p.acquire(context.Background())
 		if c != nil {
@@ -58,7 +58,7 @@ func TestConnPoolZeroExtrasAlwaysNil(t *testing.T) {
 func TestConnPoolResizeWhileInUse(t *testing.T) {
 	var dialed, closed atomic.Int64
 	dial := func(context.Context) (*int64, error) { n := dialed.Add(1); return &n, nil }
-	p := newConnPool[*int64](nil, 1, dial, func(*int64) { closed.Add(1) })
+	p := newConnPool[*int64]("test", nil, 1, dial, func(*int64) { closed.Add(1) })
 
 	c1, r1 := p.acquire(context.Background())
 	if c, _ := p.acquire(context.Background()); c1 == nil || c != nil {
@@ -97,7 +97,7 @@ func TestConnPoolResizeWhileInUse(t *testing.T) {
 func TestConnPoolShrinkClosesIdleExtras(t *testing.T) {
 	var closed atomic.Int64
 	dial := func(context.Context) (*int, error) { v := 0; return &v, nil }
-	p := newConnPool[*int](nil, 3, dial, func(*int) { closed.Add(1) })
+	p := newConnPool[*int]("test", nil, 3, dial, func(*int) { closed.Add(1) })
 	var releases []func()
 	for range 3 {
 		_, r := p.acquire(context.Background())

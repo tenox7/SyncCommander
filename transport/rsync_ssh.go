@@ -52,7 +52,7 @@ func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, paral
 		Log.Add(b.proto, DirIn, "extra connection dialed")
 		return c.client, nil
 	}
-	b.pool = newConnPool(conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
+	b.pool = newConnPool(b.proto, conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	return b, nil
 }
 

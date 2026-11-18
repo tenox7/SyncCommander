@@ -170,7 +170,7 @@ func newSFTPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure 
 		Log.Add("sftp", DirIn, "extra connection dialed")
 		return sc, nil
 	}
-	b.pool = newConnPool(main, parallel-1, dial, func(c *sftpConn) { c.close() })
+	b.pool = newConnPool("sftp", main, parallel-1, dial, func(c *sftpConn) { c.close() })
 	return b, nil
 }
 

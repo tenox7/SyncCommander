@@ -467,6 +467,8 @@ func (f *fakeFTPD) serve(c net.Conn, n int) {
 			f.mu.Unlock()
 			reply("221 Goodbye.")
 			return
+		case "NOOP":
+			reply("200 NOOP ok.")
 		case "MDTM", "MFMT":
 			verb := strings.ToUpper(cmd)
 			if verb == "MDTM" && !f.mdtm || verb == "MFMT" && !f.mfmt {
