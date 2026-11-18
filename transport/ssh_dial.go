@@ -89,24 +89,9 @@ var sshHandshakeTimeout = 30 * time.Second
 // only; the connection outlives it.
 func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error) {
 	scheme, user, pass, alias, port, remotePath := parseRemoteURL(rawURL)
-	host := alias
-
-	cfgHost, cfgUser, cfgPort, cfgKeys, cfgKeyAlias := lookupSSHConfig(alias)
-	if cfgHost != "" {
-		host = cfgHost
-	}
-	if port == "" {
-		port = cfgPort
-	}
-	if port == "" {
-		port = "22"
-	}
-	if user == "" {
-		user = cfgUser
-	}
-	if user == "" {
-		user = loginUser()
-	}
+	opts := resolveSSHConfig(ctx, alias, user, port)
+	host := opts.hostName
+	user, port = opts.user, opts.port
 	hostKeys, err := hostKeyCallback(insecure)
 	if err != nil {
 		return nil, model.WithKind(model.ErrAuth, err)
@@ -117,42 +102,18 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 		auths = append(auths, ssh.Password(pass))
 	}
 
-	var signers []ssh.Signer
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if agentConn, err := net.Dial("unix", sock); err == nil {
+	var agentKeys []ssh.Signer
+	if opts.agent != "" {
+		if agentConn, err := net.Dial("unix", opts.agent); err == nil {
 			// The agent signs during the handshake, so its socket stays open
 			// until this function returns.
 			defer agentConn.Close()
-			if agentSigners, err := agent.NewClient(agentConn).Signers(); err == nil {
-				signers = append(signers, agentSigners...)
+			if keys, err := agent.NewClient(agentConn).Signers(); err == nil {
+				agentKeys = keys
 			}
 		}
 	}
-
-	home, _ := os.UserHomeDir()
-	keyFiles := cfgKeys
-	if len(keyFiles) == 0 && home != "" {
-		keyFiles = []string{
-			home + "/.ssh/id_ed25519",
-			home + "/.ssh/id_rsa",
-			home + "/.ssh/id_ecdsa",
-		}
-	}
-	for _, kf := range keyFiles {
-		if strings.HasPrefix(kf, "~/") && home != "" {
-			kf = home + kf[1:]
-		}
-		data, err := os.ReadFile(kf)
-		if err != nil {
-			continue
-		}
-		signer, err := ssh.ParsePrivateKey(data)
-		if err != nil {
-			continue
-		}
-		signers = append(signers, signer)
-	}
-	if len(signers) > 0 {
+	if signers := sshSigners(agentKeys, opts.identityFiles, opts.identitiesOnly); len(signers) > 0 {
 		auths = append(auths, ssh.PublicKeys(signers...))
 	}
 
@@ -161,11 +122,14 @@ func dialSSH(ctx context.Context, rawURL string, insecure bool) (*sshConn, error
 	// its HostKeyAlias alone, with no port, as ssh does: through ssh -L the
 	// server answers at a localhost port that changes (S15).
 	filed := addr
-	if cfgKeyAlias != "" {
-		filed = net.JoinHostPort(cfgKeyAlias, "22")
+	if opts.hostKeyAlias != "" {
+		filed = net.JoinHostPort(opts.hostKeyAlias, "22")
 	}
 	if insecure {
 		warnInsecure(scheme, addr, pass != "")
+	}
+	if opts.proxy != "" {
+		warnProxy(scheme, alias, opts.proxy, addr)
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -445,99 +409,4 @@ func sshDisplayURL(conn *sshConn, remotePath string) string {
 		displayHost = net.JoinHostPort(conn.alias, conn.port)
 	}
 	return fmt.Sprintf("%s://%s@%s%s", conn.scheme, conn.user, displayHost, remotePath)
-}
-
-func lookupSSHConfig(alias string) (hostname, user, port string, identityFiles []string, hostKeyAlias string) {
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		return
-	}
-	data, err := os.ReadFile(home + "/.ssh/config")
-	if err != nil {
-		return
-	}
-
-	var wHost, wUser, wPort, wKeyAlias string
-	var wKeys []string
-	matched, wild := false, false
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		key := strings.ToLower(fields[0])
-		val := strings.Join(fields[1:], " ")
-
-		if key == "host" {
-			matched, wild = false, false
-			for _, h := range fields[1:] {
-				if h == alias {
-					matched = true
-				}
-				if h == "*" {
-					wild = true
-				}
-			}
-			continue
-		}
-
-		if !matched && !wild {
-			continue
-		}
-
-		set := func(dst *string, v string) {
-			if *dst == "" {
-				*dst = v
-			}
-		}
-		if matched {
-			switch key {
-			case "hostname":
-				set(&hostname, val)
-			case "user":
-				set(&user, val)
-			case "port":
-				set(&port, val)
-			case "identityfile":
-				identityFiles = append(identityFiles, val)
-			case "hostkeyalias":
-				set(&hostKeyAlias, val)
-			}
-		} else {
-			switch key {
-			case "hostname":
-				set(&wHost, val)
-			case "user":
-				set(&wUser, val)
-			case "port":
-				set(&wPort, val)
-			case "identityfile":
-				wKeys = append(wKeys, val)
-			case "hostkeyalias":
-				set(&wKeyAlias, val)
-			}
-		}
-	}
-
-	if hostname == "" {
-		hostname = wHost
-	}
-	if user == "" {
-		user = wUser
-	}
-	if port == "" {
-		port = wPort
-	}
-	if len(identityFiles) == 0 {
-		identityFiles = wKeys
-	}
-	if hostKeyAlias == "" {
-		hostKeyAlias = wKeyAlias
-	}
-	return
 }
