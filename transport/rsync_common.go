@@ -456,7 +456,9 @@ func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv fu
 		// the rest (an --append is verified there): nothing moves meanwhile.
 		ExpectSilence(ctx, HashTime(offset))
 		stop := tailProgress(ctx, tmpDir, filepath.Base(relPath), offset > 0, offset)
-		err = recv(tmpDir + "/")
+		// What a full disk fills here is the temp folder, not the
+		// destination: that file fails, and is tried again (R16).
+		err = tempFull(recv(tmpDir + "/"))
 		stop(err == nil)
 	}
 	var f *os.File
