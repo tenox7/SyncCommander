@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +71,17 @@ type WebDAVBackend struct {
 	dirs       sync.Map // collections known to exist, so uploads skip the MKCOL walk
 	mkcols     sync.Map // in-flight MKCOLs by dir, so racing uploads send only one
 	noInfinity atomic.Bool
+	// The mtime a copy sets (W-M4). putMtime holds, by path, the time a
+	// PUT sent in X-OC-Mtime, until SetTimes. headerSets says the server
+	// takes that header: it answered "accepted" (ownCloud, Nextcloud), or
+	// one Stat saw the time (rclone serve webdav takes it with no word).
+	// noMtime says the server keeps no time it is sent, header or
+	// PROPPATCH: one Stat after the first SetTimes found the upload's
+	// time. mtimeProbe claims that Stat: 0 not yet, 1 under way, 2 done.
+	putMtime   sync.Map
+	headerSets atomic.Bool
+	noMtime    atomic.Bool
+	mtimeProbe atomic.Int32
 }
 
 // NewWebDAVBackend connects to rawURL and checks its base is a folder; a
@@ -286,8 +298,12 @@ func (b *WebDAVBackend) entryFromResponse(r wdResponse) (model.FileEntry, map[st
 		Name:    path.Base(rel),
 		Size:    size,
 		ModTime: parseWDTime(prop.LastModified),
+		TimeRes: model.TimeSecond, // an HTTP date
 		IsDir:   isDir,
 		Mode:    mode,
+	}
+	if b.noMtime.Load() {
+		e.TimeRes = model.TimeNone // the upload's time, not the file's
 	}
 	return e, parseChecksums(prop.Checksums), nil
 }
@@ -378,7 +394,26 @@ func parseWDTime(s string) time.Time {
 }
 
 func (b *WebDAVBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	return b.listCache.serve(ctx, relDir, b.liveList)
+	entries, err := b.listCache.serve(ctx, relDir, b.liveList)
+	if b.noMtime.Load() {
+		entries = withoutMtime(entries) // also those the cache holds from before
+	}
+	return entries, err
+}
+
+// withoutMtime is entries with their mtime left out of the compare. It
+// copies them when one is not so already: the cache's slices are shared.
+func withoutMtime(entries []model.FileEntry) []model.FileEntry {
+	for i := range entries {
+		if entries[i].TimeRes != model.TimeNone {
+			out := slices.Clone(entries)
+			for j := range out {
+				out[j].TimeRes = model.TimeNone
+			}
+			return out
+		}
+	}
+	return entries
 }
 
 func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
@@ -647,7 +682,69 @@ func (b *WebDAVBackend) probeAlgos(ctx context.Context) (map[string]bool, error)
 	return seen, nil
 }
 
+// SetTimes sets relPath's mtime with PROPPATCH, unless the PUT that wrote
+// it sent the time in X-OC-Mtime and the server takes that header. Both
+// went out for every file, and neither was checked: on a server that
+// keeps neither, every file copied there was "different" after the copy
+// (W-M4). The first call checks with one Stat that the time holds. A
+// server that keeps none says so from then on (noMtime): its listings
+// leave the mtime out of the compare, and SetTimes is ErrUnsupported, as
+// for a restic repository.
 func (b *WebDAVBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ time.Time) error {
+	if b.noMtime.Load() {
+		return errNoMtime(relPath)
+	}
+	v, ok := b.putMtime.LoadAndDelete(relPath)
+	headerSent := ok && v.(int64) == mtime.Unix()
+	if headerSent && b.headerSets.Load() {
+		return nil
+	}
+	probe := b.mtimeProbe.CompareAndSwap(0, 1)
+	if probe && headerSent {
+		if kept, err := b.keepsMtime(ctx, relPath, mtime); err == nil && kept {
+			b.headerSets.Store(true)
+			b.mtimeProbe.Store(2)
+			Log.Add("webdav", DirIn, "the server takes the mtime with the upload (X-OC-Mtime): no PROPPATCH")
+			return nil
+		}
+	}
+	err := b.proppatchMtime(ctx, relPath, mtime)
+	if !probe {
+		return err
+	}
+	kept, serr := b.keepsMtime(ctx, relPath, mtime)
+	switch {
+	case serr != nil:
+		b.mtimeProbe.Store(0) // the next call checks
+		return err
+	case kept:
+		b.mtimeProbe.Store(2)
+		return nil
+	}
+	b.noMtime.Store(true)
+	b.mtimeProbe.Store(2)
+	Log.Add("webdav", DirWarn, "the server keeps no mtime it is sent (X-OC-Mtime, PROPPATCH): "+
+		relPath+" lists the upload's time; comparing without mtimes")
+	return errNoMtime(relPath)
+}
+
+func errNoMtime(relPath string) error {
+	return fmt.Errorf("webdav: %s: the server keeps no mtime it is sent: %w", relPath, ErrUnsupported)
+}
+
+// keepsMtime reports whether relPath lists mtime, to the second of an HTTP
+// date.
+func (b *WebDAVBackend) keepsMtime(ctx context.Context, relPath string, mtime time.Time) (bool, error) {
+	e, err := b.Stat(ctx, relPath)
+	if err != nil {
+		return false, err
+	}
+	d := e.ModTime.Sub(mtime)
+	return d < time.Second && d > -time.Second, nil
+}
+
+// proppatchMtime sends relPath's mtime as DAV:lastmodified, in seconds.
+func (b *WebDAVBackend) proppatchMtime(ctx context.Context, relPath string, mtime time.Time) error {
 	body := fmt.Sprintf(`<?xml version="1.0"?>`+
 		`<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop>`+
 		`<d:lastmodified>%d</d:lastmodified>`+
@@ -704,6 +801,12 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 		err := fmt.Errorf("PUT %s: %s", relPath, resp.Status)
 		Log.Add("webdav", DirErr, err.Error())
 		return err
+	}
+	if !p.ModTime.IsZero() {
+		b.putMtime.Store(relPath, p.ModTime.Unix())
+		if resp.Header.Get("X-OC-Mtime") == "accepted" {
+			b.headerSets.Store(true)
+		}
 	}
 	b.dirs.Store(parentDir(relPath), struct{}{})
 	b.sums.invalidate(relPath)

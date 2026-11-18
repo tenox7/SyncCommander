@@ -299,6 +299,7 @@ func (b *ResticBackend) statConfig(ctx context.Context) (model.FileEntry, bool, 
 		Name:    "config",
 		Size:    max(resp.ContentLength, 0),
 		ModTime: parseWDTime(resp.Header.Get("Last-Modified")),
+		TimeRes: model.TimeNone, // the upload's: an object keeps no time (W-M4)
 		Mode:    0644,
 	}, true, nil
 }
@@ -375,7 +376,9 @@ func (b *ResticBackend) decodeListV1(resp *http.Response, typeName string) ([]mo
 }
 
 func objectEntry(typeName, name string, size int64) model.FileEntry {
-	return model.FileEntry{RelPath: resticPath(typeName, name), Name: name, Size: size, Mode: 0644}
+	// An object keeps no time: its mtime is left out of the compare. It was
+	// zero, so every object was "different" from a copy anywhere else (W-M4).
+	return model.FileEntry{RelPath: resticPath(typeName, name), Name: name, Size: size, TimeRes: model.TimeNone, Mode: 0644}
 }
 
 // Stat answers relPath alone: the fixed top level for what it is, config or
@@ -405,7 +408,7 @@ func (b *ResticBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 		return model.FileEntry{}, fmt.Errorf("restic: HEAD %s: %s", rel, resp.Status)
 	}
 	if rel == "config" {
-		return model.FileEntry{RelPath: rel, Name: rel, Size: max(resp.ContentLength, 0), ModTime: parseWDTime(resp.Header.Get("Last-Modified")), Mode: 0644}, nil
+		return model.FileEntry{RelPath: rel, Name: rel, Size: max(resp.ContentLength, 0), ModTime: parseWDTime(resp.Header.Get("Last-Modified")), TimeRes: model.TimeNone, Mode: 0644}, nil
 	}
 	typ, name, _ := strings.Cut(obj, "/")
 	return objectEntry(typ, name, max(resp.ContentLength, 0)), nil
