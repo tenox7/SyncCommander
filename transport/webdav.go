@@ -791,13 +791,15 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	if err := b.ensureDir(ctx, parentDir(relPath)); err != nil {
 		Log.Add("webdav", DirWarn, "mkcol parents: "+err.Error())
 	}
-	req, err := b.newReq(ctx, "PUT", b.urlFor(relPath, false), src)
+	body, size, err := putBody(src, p.Size)
 	if err != nil {
 		return err
 	}
-	if p.SizeKnown() {
-		req.ContentLength = p.Size
+	req, err := b.newReq(ctx, "PUT", b.urlFor(relPath, false), body)
+	if err != nil {
+		return err
 	}
+	req.ContentLength = size
 	if !p.ModTime.IsZero() {
 		req.Header.Set("X-OC-Mtime", strconv.FormatInt(p.ModTime.Unix(), 10))
 	}

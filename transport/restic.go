@@ -553,14 +553,16 @@ func (b *ResticBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 	if !ok {
 		return fmt.Errorf("restic: %s: not where a repository keeps an object (config, data/<aa>/<name>, index/<name>, keys/<name>, locks/<name>, snapshots/<name>): %w", strings.Trim(relPath, "/"), ErrUnsupported)
 	}
-	req, err := b.newReq(ctx, "POST", b.objectURL(obj), src)
+	body, size, err := putBody(src, p.Size)
+	if err != nil {
+		return err
+	}
+	req, err := b.newReq(ctx, "POST", b.objectURL(obj), body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if p.SizeKnown() {
-		req.ContentLength = p.Size
-	}
+	req.ContentLength = size
 	resp, err := b.doReq(req)
 	if err != nil {
 		return err

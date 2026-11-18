@@ -313,6 +313,25 @@ func statusErr(resp *http.Response, what string, args ...any) error {
 	return &statusError{code: resp.StatusCode, msg: fmt.Sprintf(what, args...) + ": " + resp.Status}
 }
 
+// putBody is src as the body of a PUT or POST of size bytes, 0 or less
+// for a size not known, with the length to send: size, or -1 for one not
+// known. Go sends a body of length 0 that is not http.NoBody chunked, as
+// one of a length not known, and a server that wants a length answered an
+// empty file with 411 (W-M6). So a body of a size not known is looked at
+// first: one that ends at once goes as http.NoBody, of length 0.
+func putBody(src io.Reader, size int64) (io.Reader, int64, error) {
+	if size > 0 {
+		return src, size, nil
+	}
+	var one [1]byte
+	if _, err := io.ReadFull(src, one[:]); err == io.EOF {
+		return http.NoBody, 0, nil
+	} else if err != nil {
+		return nil, 0, err
+	}
+	return io.MultiReader(strings.NewReader(string(one[:])), src), -1, nil
+}
+
 func (h *httpBase) do(ctx context.Context, method, rawurl string, body io.Reader, hdrs map[string]string) (*http.Response, error) {
 	req, err := h.newReq(ctx, method, rawurl, body)
 	if err != nil {
