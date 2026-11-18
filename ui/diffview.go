@@ -107,17 +107,30 @@ func isTextContent(left, right []byte) bool {
 	if len(right) > len(check) {
 		check = right
 	}
-	if len(check) == 0 {
-		return true
+	if len(check) > 512 {
+		// The check runs on to the end of the character at byte 512: cut
+		// through one, valid UTF-8 text opened as hex (U22).
+		n := 512
+		for n < len(check) && n < 512+utf8.UTFMax-1 && !utf8.RuneStart(check[n]) {
+			n++
+		}
+		check = check[:n]
 	}
-	return utf8.Valid(check[:min(len(check), 512)])
+	return utf8.Valid(check)
 }
 
 // --- text diff ---
 
 func buildTextDiff(leftData, rightData []byte) (lines []diffLine, diffIdxs []int) {
-	leftLines := splitLines(expandTabs(string(leftData)))
-	rightLines := splitLines(expandTabs(string(rightData)))
+	left, right := string(leftData), string(rightData)
+	// Lines that end in \r\n on both sides are shown without the \r:
+	// each row of such text ended in ^M (U22). Sides that end their
+	// lines in two ways keep it, so the rows show the difference.
+	if crlfLines(left, right) {
+		left, right = strings.ReplaceAll(left, "\r\n", "\n"), strings.ReplaceAll(right, "\r\n", "\n")
+	}
+	leftLines := splitLines(expandTabs(left))
+	rightLines := splitLines(expandTabs(right))
 
 	dmp := difflib.New()
 	a, b, chars := dmp.DiffLinesToChars(strings.Join(leftLines, "\n"), strings.Join(rightLines, "\n"))
@@ -222,6 +235,20 @@ func expandTabs(s string) string {
 		}
 	}
 	return sb.String()
+}
+
+// crlfLines reports whether every line end on every side is \r\n, with
+// one at least: a side with no line end goes with either.
+func crlfLines(sides ...string) bool {
+	ends := false
+	for _, s := range sides {
+		n := strings.Count(s, "\n")
+		if strings.Count(s, "\r\n") != n {
+			return false
+		}
+		ends = ends || n > 0
+	}
+	return ends
 }
 
 func splitLines(s string) []string {
@@ -370,10 +397,13 @@ func (d *DiffView) frame(mode string, rows []string, width int) string {
 		navInfo = fmt.Sprintf("  [%d/%d]", d.navPos+1, len(idxs))
 	}
 	title := fmt.Sprintf(" %s  %s  %d diffs%s", mode, shown(d.title), len(d.diffIdxs()), navInfo)
+	// A screen 1 cell wide made the left count -1, and Repeat panicked
+	// (U22).
+	leftW, rightW := max(panelWidth-1, 0), max(width-panelWidth, 0)
 	rule := func(junction string) string {
-		return styleDiffDim.Render(strings.Repeat("─", panelWidth-1) + junction + strings.Repeat("─", width-panelWidth))
+		return styleDiffDim.Render(strings.Repeat("─", leftW) + junction + strings.Repeat("─", rightW))
 	}
-	empty := strings.Repeat(" ", panelWidth-1) + styleDiffDim.Render("│") + strings.Repeat(" ", width-panelWidth)
+	empty := strings.Repeat(" ", leftW) + styleDiffDim.Render("│") + strings.Repeat(" ", rightW)
 
 	var sb strings.Builder
 	sb.WriteString(styleDiffTitle.Render(ansi.Truncate(title, width-2, "")))

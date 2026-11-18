@@ -45,6 +45,17 @@ func (m *Model) loadDiffContent(node *model.TreeNode) tea.Cmd {
 	left, right, relPath := m.left.backend, m.right.backend, node.RelPath
 	leftEntry, rightEntry := node.Entries()
 	hasLeft, hasRight := leftEntry != nil, rightEntry != nil
+	// A side the tree knows is too big is not read: up to diffMaxBytes of
+	// it came down before the view said so (U22).
+	for _, s := range [...]struct {
+		e    *model.FileEntry
+		side string
+	}{{leftEntry, "left"}, {rightEntry, "right"}} {
+		if s.e != nil && s.e.Size > diffMaxBytes {
+			err := tooBigForDiff(s.side)
+			return func() tea.Msg { return diffLoadDoneMsg{gen: gen, err: err} }
+		}
+	}
 	return func() tea.Msg {
 		var leftData, rightData []byte
 		var err error
@@ -99,7 +110,11 @@ func readCapped(ctx context.Context, backend model.Backend, side, relPath string
 		return nil, fmt.Errorf("%s: %w", side, err)
 	}
 	if len(data) > diffMaxBytes {
-		return nil, fmt.Errorf("%s: larger than %s, too big for the diff view", side, model.FormatSize(diffMaxBytes))
+		return nil, tooBigForDiff(side)
 	}
 	return data, nil
+}
+
+func tooBigForDiff(side string) error {
+	return fmt.Errorf("%s: larger than %s, too big for the diff view", side, model.FormatSize(diffMaxBytes))
 }
