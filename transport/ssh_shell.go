@@ -936,9 +936,58 @@ func (s *sshShell) RemoveAll(ctx context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return fmt.Errorf("%s: refusing to remove the base directory", s.proto)
 	}
-	_, err := s.run(ctx, "rm -rf "+shellQuote(s.abs(relPath)))
+	err := s.rmRF(ctx, relPath)
 	s.listCache.forgetRemoved(relPath)
 	return err
+}
+
+// errNoShell is a command the server did not run as it was sent: it runs
+// something else for every command, as ForceCommand internal-sftp does, or
+// it has no such program.
+var errNoShell = errors.New("the server did not run the command")
+
+// removedWord is the last line rmRF's command prints when rm went through.
+const removedWord = "sc-removed"
+
+// rmRF runs rm -rf on relPath, made to stop on the server when ctx stops
+// it. sshd leaves a command that reads and writes nothing running when its
+// client goes: a cancelled delete went on removing (S19). rm runs in the
+// background, and a read of the session's input, which the client holds
+// open until the command ends, stops it when that input ends, as it does
+// when the session closes. The command says when rm went through, so a
+// server that ran something else is not taken for one that removed.
+func (s *sshShell) rmRF(ctx context.Context, relPath string) error {
+	in := &heldInput{done: make(chan struct{})}
+	defer in.Close()
+	cmd := "exec 3<&0; rm -rf " + shellQuote(s.abs(relPath)) +
+		" & p=$!; { read -r x <&3; kill $p; } >/dev/null 2>&1 & w=$!; exec 3<&-; wait $p; s=$?; kill $w 2>/dev/null; [ $s = 0 ] && echo " + removedWord + "; exit $s"
+	var out bytes.Buffer
+	err := s.exec(ctx, s.client, cmd, in, &out)
+	var exit *ssh.ExitError
+	switch {
+	case errors.As(err, &exit) && exit.ExitStatus() == 127:
+		return fmt.Errorf("%s: rm -rf %s: %w: %w", s.proto, relPath, errNoShell, err)
+	case err == nil && !strings.HasSuffix(strings.TrimRight(out.String(), "\r\n"), removedWord):
+		return fmt.Errorf("%s: rm -rf %s: the server answered %s: %w", s.proto, relPath, clip(out.String()), errNoShell)
+	}
+	return err
+}
+
+// heldInput is a command's input that gives nothing and stays open until
+// Close: a command that reads it sees its end when the session ends.
+type heldInput struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (h *heldInput) Read([]byte) (int, error) {
+	<-h.done
+	return 0, io.EOF
+}
+
+func (h *heldInput) Close() error {
+	h.once.Do(func() { close(h.done) })
+	return nil
 }
 
 func (s *sshShell) tailCmd(relPath string, offset int64) string {

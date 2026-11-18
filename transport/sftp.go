@@ -122,8 +122,9 @@ func newSFTPConn(ctx context.Context, client *ssh.Client) (*sftpConn, error) {
 
 type SFTPBackend struct {
 	sshShell
-	main *sftpConn // calls on files and folders; transfers too without extras
-	pool *connPool[*sftpConn]
+	main  *sftpConn // calls on files and folders; transfers too without extras
+	pool  *connPool[*sftpConn]
+	shell atomic.Int32 // whether the login shell runs commands: shellUnknown until asked
 }
 
 // NewSFTPBackend connects to rawURL; a cancel of ctx stops the connect.
@@ -573,13 +574,53 @@ func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return fmt.Errorf("sftp: refusing to remove the base directory")
 	}
-	err := b.onMain(ctx, func(c *sftp.Client) error { return removeAll(c, b.abs(relPath)) })
+	// One rm -rf on the shell removes a folder with one round trip, where
+	// the requests go one for each entry (S19). A server whose shell does
+	// not run it gets the requests.
+	err := errNoShell
+	if b.shellRuns(ctx) {
+		err = b.rmRF(ctx, relPath)
+	}
+	if errors.Is(err, errNoShell) {
+		err = b.onMain(ctx, func(c *sftp.Client) error { return removeAll(c, b.abs(relPath)) })
+	}
 	b.listCache.forgetRemoved(relPath)
 	if err != nil {
 		Log.Add("sftp", DirErr, "REMOVEALL "+relPath+": "+err.Error())
 	}
 	return err
 }
+
+// shellRuns says whether the login shell runs the commands it is sent,
+// asking it once for the connection: an SFTP-only server runs the sftp
+// server for every command, and that waits on an input held open for
+// requests that never come. A check that was stopped is asked again.
+func (b *SFTPBackend) shellRuns(ctx context.Context) bool {
+	switch b.shell.Load() {
+	case shellYes:
+		return true
+	case shellNo:
+		return false
+	}
+	err := b.checkShell(ctx)
+	switch {
+	case ctx.Err() != nil:
+		return false
+	case err != nil:
+		b.shell.Store(shellNo)
+		Log.Add("sftp", DirWarn, "folders are removed by SFTP requests: "+err.Error())
+		return false
+	}
+	b.shell.Store(shellYes)
+	return true
+}
+
+// What SFTPBackend.shellRuns found.
+const (
+	shellUnknown int32 = iota
+	shellYes
+	shellNo
+)
 
 func removeAll(c *sftp.Client, fullPath string) error {
 	// Lstat: a link is removed as a link. Stat followed it, and a folder

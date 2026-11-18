@@ -206,6 +206,12 @@ func TestSFTPCallsOnAHungServerEndOnCancel(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b, g, dir := hangingSFTP(t, 1)
+			if c.name == "RemoveAll" {
+				// With a shell that runs commands a folder goes by one
+				// rm -rf (S19), which the gate does not hold: here it goes
+				// by the requests, as on a server with no shell.
+				sftpInner(t, b).shell.Store(shellNo)
+			}
 			if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
 				t.Fatal(err)
 			}
