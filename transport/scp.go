@@ -90,14 +90,14 @@ func exitCode(err error) int {
 	return -1
 }
 
+// CopyFrom makes relPath's folder and writes the file in one command: the
+// folder was made by a command of its own, one more round trip for each
+// file, 14 hours for a million small files at 50 ms (S19).
 func (b *SCPBackend) CopyFrom(ctx context.Context, relPath string, src io.Reader, p model.PutParams) error {
-	fullPath := b.abs(relPath)
-	if _, err := b.run(ctx, "mkdir -p "+shellQuote(path.Dir(fullPath))); err != nil {
-		return err
-	}
+	fp := shellQuote(b.abs(relPath))
 	client, release := b.pool.acquire(ctx)
 	defer release()
-	err := b.exec(ctx, client, fmt.Sprintf("cat > %s && chmod %04o %s", shellQuote(fullPath), p.Mode.Perm(), shellQuote(fullPath)), src, nil)
+	err := b.exec(ctx, client, fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s", shellQuote(path.Dir(b.abs(relPath))), fp, p.Mode.Perm(), fp), src, nil)
 	b.listCache.invalidateAncestors(relPath)
 	return err
 }
