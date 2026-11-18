@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/atexit"
 
 	"sc/model"
@@ -546,17 +548,16 @@ func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	}
 	b.dirs.Clear()
 	defer func() {
-		b.objs.drop(oldRelPath)
+		b.objs.dropTree(oldRelPath)
 		b.listCache.invalidateAncestors(oldRelPath)
 		b.listCache.invalidateAncestors(newRelPath)
 		b.listCache.invalidateTree(oldRelPath)
 	}()
-	// operations.Move/DirMove use the remote's server-side move when it has
-	// one and fall back to copy-then-delete when it doesn't, so this works on
-	// stores with no rename primitive at all.
+	// Each object is moved on the server, by a move or a copy, and never
+	// downloaded and uploaded again inside rclone (moveOnServer, L21).
 	o, err := b.f.NewObject(ctx, oldRelPath)
 	if errors.Is(err, fs.ErrorIsDir) || errors.Is(err, fs.ErrorObjectNotFound) {
-		return operations.DirMove(ctx, b.f, oldRelPath, newRelPath)
+		return b.dirMove(ctx, oldRelPath, newRelPath)
 	}
 	if err != nil {
 		return err
@@ -564,8 +565,154 @@ func (b *RcloneBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	if err := b.Mkdir(ctx, parentDir(newRelPath), 0755); err != nil {
 		return err
 	}
-	_, err = operations.Move(ctx, b.f, nil, newRelPath, o)
-	return err
+	return b.moveOnServer(ctx, o, newRelPath)
+}
+
+// errNoServerMove refuses a rename on a store that can neither move nor
+// copy on the server: rclone downloaded each file and uploaded it again,
+// around sc's bandwidth limits and with no progress shown (L21).
+var errNoServerMove = fmt.Errorf("the store can neither move nor copy on the server, and sc does not download and upload to rename: %w", ErrUnsupported)
+
+// moveOnServer moves o to dst on the server: by a move, or by a copy and a
+// delete. operations.Move fell back to a download and an upload inside
+// rclone. The delete after a copy runs even once ctx ended: else the file
+// is in both places.
+func (b *RcloneBackend) moveOnServer(ctx context.Context, o fs.Object, dst string) error {
+	if b.feat.Move != nil {
+		_, err := b.feat.Move(ctx, o, dst)
+		if !errors.Is(err, fs.ErrorCantMove) {
+			return err
+		}
+	}
+	if b.feat.Copy != nil {
+		_, err := b.feat.Copy(ctx, o, dst)
+		if err == nil {
+			if err := o.Remove(context.WithoutCancel(ctx)); err != nil {
+				return fmt.Errorf("rclone: %s was copied to %s, but stays where it was: %w", o.Remote(), dst, err)
+			}
+			return nil
+		}
+		if !errors.Is(err, fs.ErrorCantCopy) {
+			return err
+		}
+	}
+	return fmt.Errorf("rclone: rename %s: %w", o.Remote(), errNoServerMove)
+}
+
+// rcloneMoveWorkers is how many objects a folder rename moves at once on a
+// store that renames no folder; rclone's own fallback ran 8 (--checkers).
+const rcloneMoveWorkers = 8
+
+// rcloneMoveLogEvery is how many objects a folder rename moves between two
+// lines in the log. A var for tests.
+var rcloneMoveLogEvery int64 = 1000
+
+// dirMove renames the folder oldRel to newRel: in one call where the store
+// has one, else object by object, each moved on the server (moveOnServer),
+// several at once. rclone's own fallback for that read the whole tree into
+// memory first, then moved under context.Background(): a stop did nothing,
+// and for a folder of a million objects nothing was said for hours (L21).
+// Here each object is moved as the listing gives it, the log says how many
+// every rcloneMoveLogEvery, and a stop ends the rename between objects:
+// what was moved is then in newRel, the rest still in oldRel, as the log
+// says. A listed name that is no path in oldRel stops it too: moved, it
+// would land outside newRel.
+func (b *RcloneBackend) dirMove(ctx context.Context, oldRel, newRel string) error {
+	if b.feat.DirMove != nil {
+		err := b.feat.DirMove(ctx, b.f, oldRel, newRel)
+		if !errors.Is(err, fs.ErrorCantDirMove) {
+			return err
+		}
+	}
+	if b.feat.Move == nil && b.feat.Copy == nil {
+		return fmt.Errorf("rclone: rename %s: %w", oldRel, errNoServerMove)
+	}
+	Log.Add("rclone", DirOut, fmt.Sprintf("rename %s -> %s: the store renames no folder; moving its objects one by one", oldRel, newRel))
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	type move struct {
+		o   fs.Object
+		dst string
+	}
+	moves := make(chan move)
+	var moved atomic.Int64
+	var wg sync.WaitGroup
+	for range rcloneMoveWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for m := range moves {
+				if ctx.Err() != nil {
+					continue // handed out as the stop came: not made
+				}
+				// The folder first, on a store with folders of its own:
+				// new itself has no entry in the listing.
+				err := b.ensureDir(ctx, parentDir(m.dst))
+				if err == nil {
+					err = b.moveOnServer(ctx, m.o, m.dst)
+				}
+				if err != nil {
+					stop(err)
+					continue
+				}
+				if n := moved.Add(1); n%rcloneMoveLogEvery == 0 {
+					Log.Add("rclone", DirOut, fmt.Sprintf("rename %s -> %s: %d objects moved", oldRel, newRel, n))
+				}
+			}
+		}()
+	}
+	var dirs []string // walk.ListR calls back for one listing at a time
+	listErr := walk.ListR(ctx, b.f, oldRel, true, -1, walk.ListAll, func(entries fs.DirEntries) error {
+		for _, e := range entries {
+			rel, ok := strings.CutPrefix(e.Remote(), oldRel+"/")
+			if !ok || rel == "" || cleanRel(rel) != rel {
+				return fmt.Errorf("rclone: rename %s: the listing gave %q, which is no path in it", oldRel, e.Remote())
+			}
+			dst := newRel + "/" + rel
+			switch e := e.(type) {
+			case fs.Directory:
+				dirs = append(dirs, e.Remote())
+				if err := b.ensureDir(ctx, dst); err != nil {
+					return err
+				}
+			case fs.Object:
+				select {
+				case moves <- move{e, dst}:
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				}
+			}
+		}
+		return nil
+	})
+	close(moves)
+	wg.Wait()
+	err := context.Cause(ctx)
+	if err == nil {
+		err = listErr
+	}
+	n := moved.Load()
+	if err != nil {
+		if n > 0 {
+			Log.Add("rclone", DirErr, fmt.Sprintf("rename %s -> %s stopped after %d objects: they are in %s, the rest is still in %s", oldRel, newRel, n, newRel, oldRel))
+		}
+		return err
+	}
+	if n == 0 && len(dirs) == 0 {
+		if err := b.ensureDir(ctx, newRel); err != nil { // an empty folder
+			return err
+		}
+	}
+	// The folders left, deepest first: on a store with folders of its own,
+	// each is empty now.
+	slices.SortFunc(dirs, func(x, y string) int { return strings.Count(y, "/") - strings.Count(x, "/") })
+	for _, d := range append(dirs, oldRel) {
+		if err := b.f.Rmdir(ctx, d); err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
+			return fmt.Errorf("rclone: rename %s: its %d objects were moved to %s, but the folder %s stays: %w", oldRel, n, newRel, d, err)
+		}
+	}
+	Log.Add("rclone", DirIn, fmt.Sprintf("rename %s -> %s: done, %d objects moved", oldRel, newRel, n))
+	return nil
 }
 
 func (b *RcloneBackend) Remove(ctx context.Context, relPath string) error {
@@ -591,7 +738,7 @@ func (b *RcloneBackend) RemoveAll(ctx context.Context, relPath string) error {
 	}
 	b.dirs.Clear()
 	defer func() {
-		b.objs.drop(relPath)
+		b.objs.dropTree(relPath)
 		b.listCache.invalidateAncestors(relPath)
 		b.listCache.invalidateTree(relPath)
 	}()
@@ -601,7 +748,33 @@ func (b *RcloneBackend) RemoveAll(ctx context.Context, relPath string) error {
 		}
 		return err
 	}
-	return nil
+	return b.purged(ctx, relPath)
+}
+
+// purgeRecheck is how long the check of a delete waits before it looks a
+// second time at what the first look found left: a store whose listings
+// lag behind its deletes may still show some. A var for tests.
+var purgeRecheck = 2 * time.Second
+
+// purged checks that the delete of relPath left nothing. rclone's own
+// delete for a store with no purge deletes what its listing gave; when that
+// listing failed part-way, it logged the failure and returned nil, and the
+// delete said OK with files left behind (L21).
+func (b *RcloneBackend) purged(ctx context.Context, relPath string) error {
+	for look := 1; ; look++ {
+		entries, err := b.f.List(ctx, relPath)
+		switch {
+		case errors.Is(err, fs.ErrorDirNotFound), err == nil && len(entries) == 0:
+			return nil
+		case err != nil:
+			return fmt.Errorf("rclone: %s was deleted, but the listing to check that failed: %w", relPath, err)
+		case look == 2:
+			return fmt.Errorf("rclone: %s still holds %s after the delete (%d entries left in it)", relPath, entries[0].Remote(), len(entries))
+		}
+		if err := sleepCtx(ctx, purgeRecheck); err != nil {
+			return err
+		}
+	}
 }
 
 func (b *RcloneBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
@@ -772,6 +945,21 @@ func (c *rcObjCache) drop(rel string) {
 	defer c.mu.Unlock()
 	delete(c.cur, rel)
 	delete(c.prev, rel)
+}
+
+// dropTree drops rel and every object under it: after a folder is renamed
+// or deleted, none is where the cache had it, and Checksum and Open
+// answered for files that were gone (L21).
+func (c *rcObjCache) dropTree(rel string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range []map[string]fs.Object{c.cur, c.prev} {
+		for k := range m {
+			if k == rel || strings.HasPrefix(k, rel+"/") {
+				delete(m, k)
+			}
+		}
+	}
 }
 
 // rcloneSecretKeys are the rclone option names whose values must never reach
