@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -354,7 +355,9 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 		}
 	}
 	tlsCfg := &tls.Config{ServerName: host, InsecureSkipVerify: insecure}
-	addr := host + ":" + port
+	// An IPv6 literal gets its brackets back: ftp://[::1]/ was dialed as
+	// "::1:21", which no dial takes (L25).
+	addr := net.JoinHostPort(host, port)
 
 	capture := &listCapture{}
 	conn, socks, err := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, capture)
@@ -1435,14 +1438,16 @@ type ftpHasher struct {
 	reader *textproto.Reader
 	writer *textproto.Writer
 	cmds   map[string]string
-	closed bool // guarded by mu
+	utf8   bool   // FEAT named UTF8
+	algo   string // what OPTS HASH chose on this connection; "" before one was asked
+	closed bool   // guarded by mu
 }
 
 // newFTPHasher opens the connection that asks for checksums. Until it is
 // logged in a cancel of ctx closes its socket.
 func newFTPHasher(ctx context.Context, host, port, user, pass, scheme string, tlsCfg *tls.Config) (*ftpHasher, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	rawTCP, err := dialer.DialContext(ctx, "tcp", host+":"+port)
+	rawTCP, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		return nil, err
 	}
@@ -1515,6 +1520,16 @@ func startFTPHasher(rawTCP net.Conn, user, pass, scheme string, tlsCfg *tls.Conf
 		h.close()
 		return nil, errNoHashCmds
 	}
+	// Names go over this connection as over the main one, which the library
+	// switches to UTF-8 when FEAT names it. Without it, a server that starts
+	// in another code page did not find a name with an é in it here, or
+	// found another file (L25). A refusal leaves the server as it was.
+	if h.utf8 {
+		if _, _, err := h.cmd("OPTS UTF8 ON"); err != nil {
+			h.close()
+			return nil, err
+		}
+	}
 	return h, nil
 }
 
@@ -1523,13 +1538,24 @@ func (h *ftpHasher) setConn(conn io.ReadWriter) {
 	h.writer = textproto.NewWriter(bufio.NewWriter(conn))
 }
 
+// errLineBreak is the error for a command with a line break in it, which is
+// never sent. The server read the rest as a command of its own, and each
+// reply from then on was taken for the one before's: a file got the sum of
+// what the rest asked for (L25). The library refuses those on the main
+// connection.
+var errLineBreak = errors.New("ftp: a name with a line break in it cannot be sent")
+
 func (h *ftpHasher) sendCmd(format string, args ...any) (int, string, error) {
-	cmd := fmt.Sprintf(format, args...)
-	if strings.HasPrefix(strings.ToUpper(cmd), "PASS ") {
-		cmd = "PASS ***"
+	line := fmt.Sprintf(format, args...)
+	shown := line
+	if strings.HasPrefix(strings.ToUpper(line), "PASS ") {
+		shown = "PASS ***"
 	}
-	Log.Add("ftp", DirOut, cmd)
-	if err := h.writer.PrintfLine(format, args...); err != nil {
+	if strings.ContainsAny(line, "\r\n") {
+		return 0, "", fmt.Errorf("%w: %q", errLineBreak, shown)
+	}
+	Log.Add("ftp", DirOut, shown)
+	if err := h.writer.PrintfLine("%s", line); err != nil {
 		Log.Add("ftp", DirErr, err.Error())
 		return 0, "", err
 	}
@@ -1551,6 +1577,8 @@ func (h *ftpHasher) readResp() (int, string, error) {
 func (h *ftpHasher) cmd(format string, args ...any) (int, string, error) {
 	code, msg, err := h.sendCmd(format, args...)
 	switch {
+	case errors.Is(err, errLineBreak):
+		return 0, "", err // nothing was sent: the connection is as it was
 	case err != nil:
 		return 0, "", fmt.Errorf("%w: %w", errHashConnGone, err)
 	case code == 421:
@@ -1593,22 +1621,31 @@ func (h *ftpHasher) close() {
 	h.conn.Close()
 }
 
+// The algorithms an FTP server sums with that sc compares with its own:
+// ChecksumAlgos offers these. XCRC and SHA-512 were read from FEAT too,
+// and never offered (L25).
 var ftpAlgoName = map[string]string{
 	"sha256": "SHA-256",
-	"sha512": "SHA-512",
 	"sha1":   "SHA-1",
 	"md5":    "MD5",
 }
 
 // ftpFeatCmds maps FEAT lines to the algorithm they serve.
-var ftpFeatCmds = map[string]string{"XSHA256": "sha256", "XSHA512": "sha512", "XSHA1": "sha1", "XMD5": "md5", "XCRC": "crc32"}
+var ftpFeatCmds = map[string]string{"XSHA256": "sha256", "XSHA1": "sha1", "XMD5": "md5"}
 
 // ftpHashAlgos maps HASH algorithm names to sc's.
-var ftpHashAlgos = map[string]string{"SHA-256": "sha256", "SHA-512": "sha512", "SHA-1": "sha1", "MD5": "md5"}
+var ftpHashAlgos = map[string]string{"SHA-256": "sha256", "SHA-1": "sha1", "MD5": "md5"}
+
+// ftpSumLen is how many hex digits a sum of each algorithm has.
+var ftpSumLen = map[string]int{"sha256": 64, "sha1": 40, "md5": 32}
 
 func (h *ftpHasher) parseFeat(msg string) {
 	for _, line := range strings.Split(msg, "\n") {
 		upper := strings.ToUpper(strings.TrimSpace(line))
+		if upper == "UTF8" {
+			h.utf8 = true
+			continue
+		}
 		if algo, ok := ftpFeatCmds[upper]; ok {
 			h.cmds[algo] = upper
 			continue
@@ -1625,36 +1662,63 @@ func (h *ftpHasher) parseFeat(msg string) {
 	}
 }
 
+// hash asks for the algo sum of fullPath. A sum is taken only when it is
+// one of algo: before, a HASH of the server's own choice, after a refused
+// OPTS HASH, and any text a 213 reply held were taken for one, and the
+// file compared as different from its copy (L25).
 func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 	cmd := h.cmds[algo]
 	if cmd == "" {
 		return "", fmt.Errorf("no hash command for %q", algo)
 	}
-	if cmd == "HASH" {
-		if name := ftpAlgoName[algo]; name != "" {
-			if _, _, err := h.cmd("OPTS HASH %s", name); err != nil {
-				return "", err
-			}
-		}
-		code, msg, err := h.cmd("HASH %s", fullPath)
+	if cmd != "HASH" {
+		code, msg, err := h.cmd("%s %s", cmd, fullPath)
 		if err != nil {
 			return "", err
 		}
 		if code != 213 {
-			return "", fmt.Errorf("HASH: %d %s", code, msg)
+			return "", fmt.Errorf("%s: %d %s", cmd, code, msg)
 		}
-		fields := strings.Fields(msg)
-		if len(fields) < 3 {
-			return "", fmt.Errorf("invalid HASH response: %s", msg)
-		}
-		return strings.ToLower(fields[2]), nil
+		sum, _, _ := strings.Cut(strings.TrimSpace(msg), " ")
+		return ftpSum(cmd, algo, sum)
 	}
-	code, msg, err := h.cmd("%s %s", cmd, fullPath)
+	// The choice holds for the connection: it is made again only for
+	// another algorithm, not before each file, a round trip each (L25).
+	name := ftpAlgoName[algo]
+	if h.algo != name {
+		code, msg, err := h.cmd("OPTS HASH %s", name)
+		if err != nil {
+			return "", err
+		}
+		if code != 200 {
+			return "", fmt.Errorf("OPTS HASH %s: %d %s", name, code, msg)
+		}
+		h.algo = name
+	}
+	code, msg, err := h.cmd("HASH %s", fullPath)
 	if err != nil {
 		return "", err
 	}
 	if code != 213 {
-		return "", fmt.Errorf("%s: %d %s", cmd, code, msg)
+		return "", fmt.Errorf("HASH: %d %s", code, msg)
 	}
-	return strings.ToLower(strings.TrimSpace(msg)), nil
+	// 213 SHA-256 0-49 <sum> <name>
+	fields := strings.Fields(msg)
+	if len(fields) < 3 {
+		return "", fmt.Errorf("invalid HASH response: %s", msg)
+	}
+	if !strings.EqualFold(fields[0], name) {
+		return "", fmt.Errorf("HASH answered with a %s sum, %s was asked for: %s", fields[0], name, msg)
+	}
+	return ftpSum("HASH", algo, fields[2])
+}
+
+// ftpSum returns sum in lower case when it is an algo sum: hex, as many
+// digits as algo has.
+func ftpSum(cmd, algo, sum string) (string, error) {
+	sum = strings.ToLower(sum)
+	if _, err := hex.DecodeString(sum); err != nil || len(sum) != ftpSumLen[algo] {
+		return "", fmt.Errorf("%s answered %q, which is no %s sum", cmd, sum, algo)
+	}
+	return sum, nil
 }

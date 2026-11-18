@@ -73,7 +73,7 @@ for name.
 | Protocol | Checksum |
 | --- | --- |
 | Local dir including remote mounts | XXH3, SHA256, MD5 |
-| ftp:// ftps:// ftpes:// with implicit/explicit TLS | XCRC, XSHA, HASH |
+| ftp:// ftps:// ftpes:// with implicit/explicit TLS | XSHA256, XSHA1, XMD5, HASH (SHA-256, SHA-1, MD5) |
 | sftp:// scp:// ssh:// | SHA/MD5 (over ssh) |
 | rsync://, rsync+ssh:// | Rsync MD4 (internal), SHA/MD5 (over ssh) |
 | webdav://, webdavs:// | MD5/SHA1 (`rclone --etag-hash`) |

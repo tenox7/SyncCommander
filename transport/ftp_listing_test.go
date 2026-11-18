@@ -3,7 +3,9 @@ package transport
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
@@ -38,7 +40,24 @@ type fakeFTPD struct {
 	// n-th connection away, the first being 1, as a server at its limit
 	// does; featFails(n) closes it at its FEAT, as a server going away.
 	// With dropOnSum every sum closes its connection with no reply.
-	hashes    bool
+	hashes bool
+	// hashFeat is a HASH line for FEAT, as "HASH SHA-1*;SHA-256": HASH
+	// sums a file of store with what OPTS HASH chose on its connection,
+	// at first the one marked *. With hashRefuses OPTS HASH refuses every
+	// choice; hashSays is the algorithm each HASH answers with, whatever
+	// was chosen. sumReply, set, is what every sum answers in place of
+	// the sum. utf8 makes FEAT name UTF8: a sum of a name beyond ASCII
+	// is then found only after OPTS UTF8 ON, as on a server that starts
+	// in another code page (L25).
+	hashFeat    string
+	hashRefuses bool
+	hashSays    string
+	sumReply    string
+	utf8        bool
+	// host is the address the server listens on, its data ports too;
+	// 127.0.0.1 when empty. heard keeps each connection's command lines.
+	host      string
+	heard     map[int][]string
 	dropOnSum bool
 	hangOn    string
 	hangAsked chan struct{}
@@ -102,7 +121,7 @@ func lsLine(name string, dir bool) string {
 
 func (f *fakeFTPD) start(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.Listen("tcp", net.JoinHostPort(f.listenHost(), "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +152,44 @@ func (f *fakeFTPD) start(t *testing.T) string {
 		}
 	}()
 	return l.Addr().String()
+}
+
+// listenHost is the address the server listens on.
+func (f *fakeFTPD) listenHost() string {
+	if f.host != "" {
+		return f.host
+	}
+	return "127.0.0.1"
+}
+
+// heardOn returns the command lines the n-th connection sent.
+func (f *fakeFTPD) heardOn(n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.heard[n])
+}
+
+// hashAlgos returns the algorithms of hashFeat and the one marked first.
+func (f *fakeFTPD) hashAlgos() (algos []string, first string) {
+	for _, a := range strings.Split(strings.TrimPrefix(f.hashFeat, "HASH "), ";") {
+		name := strings.TrimSuffix(a, "*")
+		algos = append(algos, name)
+		if first == "" || name != a {
+			first = name
+		}
+	}
+	return algos, first
+}
+
+// fakeSum is the algo sum of body, algo named as HASH names it.
+func fakeSum(algo string, body []byte) string {
+	switch algo {
+	case "SHA-1":
+		return fmt.Sprintf("%x", sha1.Sum(body))
+	case "MD5":
+		return fmt.Sprintf("%x", md5.Sum(body))
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(body))
 }
 
 // connTLS is the TLS config of one control connection and of its data
@@ -240,6 +297,8 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 	var pasv net.Listener
 	var rest int64
 	var from string
+	var algo string // what OPTS HASH chose here
+	utf8On := false
 	defer func() {
 		if pasv != nil {
 			pasv.Close()
@@ -253,6 +312,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 		cmd, arg, _ := strings.Cut(strings.TrimRight(line, "\r\n"), " ")
 		f.mu.Lock()
 		hang := f.hang
+		if f.heard == nil {
+			f.heard = map[int][]string{}
+		}
+		f.heard[n] = append(f.heard[n], strings.TrimRight(line, "\r\n"))
 		f.mu.Unlock()
 		if hang != "" && strings.EqualFold(cmd, hang) {
 			continue
@@ -286,6 +349,12 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 			if f.hashes {
 				feats += " XSHA256\r\n"
 			}
+			if f.hashFeat != "" {
+				feats += " " + f.hashFeat + "\r\n"
+			}
+			if f.utf8 {
+				feats += " UTF8\r\n"
+			}
 			if f.mdtm {
 				feats += " MDTM\r\n"
 			}
@@ -314,11 +383,57 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 			f.mu.Lock()
 			body, ok := f.store[p]
 			f.mu.Unlock()
-			if !ok {
+			if !ok || f.utf8 && !utf8On && strings.ContainsFunc(p, func(r rune) bool { return r > 127 }) {
 				reply("550 No such file.")
 				continue
 			}
+			if f.sumReply != "" {
+				reply("213 " + f.sumReply)
+				continue
+			}
 			reply(fmt.Sprintf("213 %x", sha256.Sum256(body)))
+		case "OPTS":
+			opt, val, _ := strings.Cut(arg, " ")
+			switch {
+			case strings.EqualFold(opt, "UTF8") && f.utf8:
+				utf8On = strings.EqualFold(val, "ON")
+				reply("200 UTF8 set to " + val + ".")
+			case strings.EqualFold(opt, "HASH") && f.hashFeat != "":
+				algos, _ := f.hashAlgos()
+				if f.hashRefuses || !slices.Contains(algos, strings.ToUpper(val)) {
+					reply("501 Unknown algorithm, current selection not changed.")
+					continue
+				}
+				algo = strings.ToUpper(val)
+				reply("200 " + algo)
+			default:
+				reply("501 Option not understood.")
+			}
+		case "HASH":
+			if f.hashFeat == "" {
+				reply("502 Command not implemented.")
+				continue
+			}
+			if algo == "" {
+				_, algo = f.hashAlgos()
+			}
+			p := path.Clean(arg)
+			f.mu.Lock()
+			body, ok := f.store[p]
+			f.mu.Unlock()
+			if !ok || f.utf8 && !utf8On && strings.ContainsFunc(p, func(r rune) bool { return r > 127 }) {
+				reply("550 No such file.")
+				continue
+			}
+			says := algo
+			if f.hashSays != "" {
+				says = f.hashSays
+			}
+			sum := fakeSum(says, body)
+			if f.sumReply != "" {
+				sum = f.sumReply
+			}
+			reply(fmt.Sprintf("213 %s 0-%d %s %s", says, max(len(body)-1, 0), sum, arg))
 		case "TYPE":
 			reply("200 Switching to Binary mode.")
 		case "PWD":
@@ -334,7 +449,7 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 				reply(fmt.Sprintf("229 Entering Extended Passive Mode (|||%d|)", f.epsvPort))
 				continue
 			}
-			if pasv, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			if pasv, err = net.Listen("tcp", net.JoinHostPort(f.listenHost(), "0")); err != nil {
 				reply("425 Cannot listen.")
 				continue
 			}
