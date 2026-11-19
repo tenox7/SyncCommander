@@ -695,14 +695,16 @@ func asPreloader(ctx context.Context, b Backend) RecursivePreloader {
 }
 
 // asPrefetcher returns b as a ChecksumPrefetcher when its Caps says it
-// prefetches; nil when not, or when that cannot be told: the checksums
-// that follow say why.
-func asPrefetcher(ctx context.Context, b Backend) ChecksumPrefetcher {
-	if caps, err := b.Capabilities(ctx); err != nil || !caps.PrefetchSums {
-		return nil
+// prefetches, and whether its fetch is a listing (Caps.ListedSums); nil
+// when not, or when that cannot be told: the checksums that follow say
+// why.
+func asPrefetcher(ctx context.Context, b Backend) (ChecksumPrefetcher, bool) {
+	caps, err := b.Capabilities(ctx)
+	if err != nil || !caps.PrefetchSums {
+		return nil, false
 	}
 	p, _ := b.(ChecksumPrefetcher)
-	return p
+	return p, p != nil && caps.ListedSums
 }
 
 // asBatcher returns b as a ChecksumBatcher when its Caps says it sums many
@@ -1057,7 +1059,7 @@ func (s *Scanner) runChecksumSides(ctx context.Context, groups []checksumGroup, 
 }
 
 func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGroup, side Side, algo string, onPairDone func()) {
-	prefetcher := asPrefetcher(ctx, s.backend(side))
+	prefetcher, listed := asPrefetcher(ctx, s.backend(side))
 	batcher := asBatcher(ctx, s.backend(side))
 	sem := make(chan struct{}, s.concurrency)
 
@@ -1082,14 +1084,9 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 		// One bulk fetch sums the group's folder for this pass; a file it
 		// has no sum for is summed in a batch, or by itself.
 		var prefetched map[string]string
-		if prefetcher != nil && g.dir != nil {
-			s.mu.RLock()
-			e, rel := g.dir.Sides[side].Entry, g.dir.RelPath
-			n := sideFileBytes(g.dir, side)
-			s.mu.RUnlock()
-			if e != nil && e.IsDir {
-				// The far side hashes every file under the folder.
-				prefetched, _ = prefetcher.PrefetchChecksums(WithHashBytes(ctx, n), rel, algo, true)
+		if prefetcher != nil {
+			if rel, recursive, n, ok := s.prefetchScope(g, side, listed); ok {
+				prefetched, _ = prefetcher.PrefetchChecksums(WithHashBytes(ctx, n), rel, algo, recursive)
 			}
 		}
 
@@ -1135,20 +1132,57 @@ func (s *Scanner) processChecksumSide(ctx context.Context, groups []checksumGrou
 	}
 }
 
-// sideFileBytes is the size of the files under dir on side: what a fetch
-// of their checksums has that side hash. Tree lock held.
-func sideFileBytes(dir *TreeNode, side Side) int64 {
-	var n int64
+// listedSumsShare: a backend whose sums come with a listing is asked for a
+// folder's only when the pass wants one in listedSumsShare of the files
+// there, or more. A listing of a million objects for ten sums costs more
+// than ten lookups; for all million, S3 lists them in a thousand requests.
+const listedSumsShare = 16
+
+// prefetchScope is the folder a bulk fetch for g takes on side, and
+// whether all under it: the group's folder and its subtree, where the far
+// side hashes every file. A backend whose fetch is a listing (listed) is
+// asked for the files right in the folder of a group with no folder of
+// its own too: on a flat bucket those are all the files, and each cost a
+// lookup (L20). It is asked only when the pass wants enough of the files
+// there (listedSumsShare). n is the bytes of those files on side: what a
+// fetch has that side hash. ok is false when no fetch is to be made.
+func (s *Scanner) prefetchScope(g checksumGroup, side Side, listed bool) (rel string, recursive bool, n int64, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	dir, recursive := g.dir, true
+	if dir == nil {
+		if !listed || g.parent == nil {
+			return "", false, 0, false
+		}
+		dir, recursive = g.parent, false
+	}
+	// The root has no entry of its own; a folder must be one on side.
+	if e := dir.Sides[side].Entry; dir.RelPath != "" && (e == nil || !e.IsDir) {
+		return "", false, 0, false
+	}
+	files, n := sideFiles(dir, side, recursive)
+	if listed && len(g.files)*listedSumsShare < files {
+		return "", false, 0, false
+	}
+	return dir.RelPath, recursive, n, true
+}
+
+// sideFiles counts the files on side right in dir, and with recursive all
+// under it, and their bytes. Tree lock held.
+func sideFiles(dir *TreeNode, side Side, recursive bool) (files int, n int64) {
 	for _, c := range dir.Children {
 		switch e := c.Sides[side].Entry; {
 		case e == nil || c.IsSpecial:
 		case c.IsDir:
-			n += sideFileBytes(c, side)
+			if recursive {
+				cf, cn := sideFiles(c, side, true)
+				files, n = files+cf, n+cn
+			}
 		default:
-			n += e.Size
+			files, n = files+1, n+e.Size
 		}
 	}
-	return n
+	return files, n
 }
 
 // A batch of files a backend sums with one request holds at most
@@ -1522,6 +1556,9 @@ func wrapListErr(side, relDir string, err error) error {
 type checksumGroup struct {
 	dir   *TreeNode
 	files []*TreeNode
+	// parent is the folder whose own files a group with no dir holds; nil
+	// for a group of one file.
+	parent *TreeNode
 }
 
 // groupFiles walks the live tree, so it holds the read lock: a scan or a copy
@@ -1559,7 +1596,7 @@ func groupFilesByTopLevel(root *TreeNode, onlyPending bool) []checksumGroup {
 		}
 	}
 	if len(rootFiles) > 0 {
-		groups = append([]checksumGroup{{files: rootFiles}}, groups...)
+		groups = append([]checksumGroup{{files: rootFiles, parent: root}}, groups...)
 	}
 	return groups
 }
@@ -1589,7 +1626,7 @@ func filterPartialCRCGroups(groups []checksumGroup) []checksumGroup {
 			}
 		}
 		if len(keep) > 0 {
-			out = append(out, checksumGroup{dir: g.dir, files: keep})
+			out = append(out, checksumGroup{dir: g.dir, files: keep, parent: g.parent})
 		}
 	}
 	return out

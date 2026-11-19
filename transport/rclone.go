@@ -408,6 +408,75 @@ func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (str
 	return sum, nil
 }
 
+// listsSums reports whether the remote's sums come with its listings, so
+// a folder's cost one listing of it, not a lookup for each file: it has a
+// sum, and rclone does not call its sums slow, as it does where they are
+// read from the file (local disk, sftp).
+func (b *RcloneBackend) listsSums() bool { return b != nil && len(b.avail) > 0 && !b.feat.SlowHash }
+
+// PrefetchChecksums gives the algo sums of the objects right in scope, and
+// with recursive of all under it, from one listing, as rclone md5sum reads
+// them: S3, GCS, B2, Azure, Drive and the like list them. A checksum pass
+// asked for each file by itself, and the object cache keeps only the last
+// 100,000 listed, so on a bigger tree each sum cost a lookup, a HEAD on
+// S3: 10M for 10M objects (L20). An object whose sum the listing lacks,
+// such as an S3 multipart upload, is looked up by Hash, Checkers at a
+// time; one with no sum is left out, for the caller to sum by itself. A
+// remote whose sums read the file gives none: the fetch would read every
+// file under scope, where the pass wants some.
+func (b *RcloneBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {
+	ht, err := b.hashType(algo)
+	if err != nil || !b.listsSums() {
+		return nil, nil
+	}
+	scope = cleanRel(scope)
+	where := b.f.Name() + ":" + path.Join(b.f.Root(), scope)
+	depth := 1
+	if recursive {
+		depth = -1
+	}
+	Log.Add("rclone", DirOut, "sums "+algo+" "+where)
+	var (
+		mu   sync.Mutex
+		sums = make(map[string]string)
+		wg   sync.WaitGroup
+		objs = make(chan fs.Object)
+	)
+	for range max(fs.GetConfig(ctx).Checkers, 1) {
+		wg.Go(func() {
+			for o := range objs {
+				if sum, err := o.Hash(ctx, ht); err == nil && sum != "" {
+					mu.Lock()
+					sums[strings.TrimPrefix(o.Remote(), "/")] = sum
+					mu.Unlock()
+				}
+			}
+		})
+	}
+	err = walk.ListR(ctx, b.f, scope, true, depth, walk.ListObjects, func(entries fs.DirEntries) error {
+		for _, e := range entries {
+			o, ok := e.(fs.Object)
+			if !ok {
+				continue
+			}
+			select {
+			case objs <- o:
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
+		}
+		return nil
+	})
+	close(objs)
+	wg.Wait()
+	if err != nil {
+		Log.Add("rclone", DirWarn, "sums "+where+": "+err.Error()+"; each file is summed by itself")
+		return nil, err
+	}
+	Log.Add("rclone", DirIn, fmt.Sprintf("%d %s sums", len(sums), algo))
+	return sums, nil
+}
+
 func (b *RcloneBackend) SetTimes(ctx context.Context, relPath string, mtime, atime, btime time.Time) error {
 	relPath = cleanRel(relPath)
 	if put, ok := b.putMtime.LoadAndDelete(relPath); ok && put.(time.Time).Equal(mtime) {

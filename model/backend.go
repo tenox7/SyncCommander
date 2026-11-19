@@ -159,6 +159,11 @@ type Caps struct {
 	PrefetchSums bool // ChecksumPrefetcher
 	BatchSums    bool // ChecksumBatcher
 	BatchRemove  bool // BatchRemover
+	// ListedSums: a prefetch is a listing, which carries the sums (rclone
+	// on S3, GCS, B2, Drive and the like), and reads no file. It pays for
+	// the files right in a folder too, but not for a few files of many
+	// (L20).
+	ListedSums bool
 	// OwnsProgress: CopyFrom counts the bytes it sends against the context's
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).

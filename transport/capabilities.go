@@ -55,8 +55,10 @@ func (b *ResticBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
 }
 
+// A remote whose sums come with its listings gives a folder's in one
+// listing (L20); on one whose sums read the file, a fetch gives none.
 func (b *RcloneBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true, PrefetchSums: true, ListedSums: b.listsSums()}, nil
 }
 
 // The fake takes copies as a local disk does (L22).
@@ -124,6 +126,7 @@ var (
 	_ model.Backend            = (*RcloneBackend)(nil)
 	_ model.SeekableOpener     = (*RcloneBackend)(nil)
 	_ model.RecursivePreloader = (*RcloneBackend)(nil)
+	_ model.ChecksumPrefetcher = (*RcloneBackend)(nil)
 	_ model.Backend            = (*FakeBackend)(nil)
 	_ model.Resumer            = (*FakeBackend)(nil)
 	_ model.PartWriter         = (*FakeBackend)(nil)

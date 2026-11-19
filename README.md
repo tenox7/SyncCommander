@@ -117,8 +117,9 @@ sc "rclone://:s3,provider=AWS,access_key_id=K,secret_access_key=S:bkt/p" /tmp/x
 ```
 
 Checksums come from whatever the remote already stores — free from the listing
-on object stores, over ssh on sftp — never by downloading. Remotes that keep
-none (crypt, http, smb, ftp) compare by size and mtime only.
+on object stores, one listing a folder (an S3 multipart upload costs a lookup),
+over ssh on sftp — never by downloading. Remotes that keep none (crypt, http,
+smb, ftp) compare by size and mtime only.
 
 Built-in backends are local, s3, b2, swift, crypt, http, smb, dropbox and
 onedrive; build with `-tags rclone_all` (`make build-all`) for all 68. Resuming an

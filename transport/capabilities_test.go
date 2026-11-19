@@ -59,7 +59,11 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		if known := name == "local"; (caps.Names.Case != model.FoldUnknown) != known {
 			t.Errorf("%s: Names %+v; known only for a local root", name, caps.Names)
 		}
-		caps.OwnsProgress, caps.RedialsItself, caps.Names = false, false, model.NameRule{}
+		// L20: a prefetch that is a listing says so; that is no method.
+		if caps.ListedSums && !caps.PrefetchSums {
+			t.Errorf("%s: ListedSums without PrefetchSums", name)
+		}
+		caps.OwnsProgress, caps.RedialsItself, caps.Names, caps.ListedSums = false, false, model.NameRule{}, false
 		if want := methodCaps(b); caps != want {
 			t.Errorf("%s: Caps %+v; its methods give %+v", name, caps, want)
 		}
