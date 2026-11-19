@@ -134,8 +134,10 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) {
 		m.settings.Adjust(1)
 	case " ", "enter":
 		// A compare option changes what the rollups count: recount now,
-		// not at the next change to the tree.
+		// not at the next change to the tree. A time option changes how
+		// the times compare: the scanner compares them again (U16).
 		m.settings.Toggle()
+		m.scanner.SetTimeOptions(*m.cmpOpts)
 		m.refreshTreeNow()
 	}
 }

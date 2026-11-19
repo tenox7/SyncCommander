@@ -71,6 +71,7 @@ type Scanner struct {
 	cksumProbed bool
 	cksumLeft   []string
 	cksumRight  []string
+	times       atomic.Pointer[timeOptions] // what compares use: the first scan's, then SetTimeOptions' (U16)
 }
 
 // concurrency caps per-side checksum parallelism; listWidth caps how many
@@ -139,6 +140,49 @@ func (s *Scanner) unlockTree() {
 	s.mu.Unlock()
 }
 
+// timeOptions are the compare options that apply to times.
+type timeOptions struct{ subSecond, grace, zoneShift bool }
+
+func timeOptionsOf(opts CompareOpts) timeOptions {
+	return timeOptions{opts.SubSecond, opts.TimeGrace, opts.IgnoreTZDST}
+}
+
+// withTimes is opts with the latest time options, for a compare made now:
+// a scan started before SetTimeOptions compares what it lists after it as
+// the rest of the tree is compared.
+func (s *Scanner) withTimes(opts CompareOpts) CompareOpts {
+	if t := s.times.Load(); t != nil {
+		opts.SubSecond, opts.TimeGrace, opts.IgnoreTZDST = t.subSecond, t.grace, t.zoneShift
+	}
+	return opts
+}
+
+// SetTimeOptions has the tree's times compared with the time options of
+// opts (sub-second, grace, TZ/DST) from now on, the entries listed already
+// included. They were applied as each folder was listed only, so a change
+// in Settings showed at the next rescan, and nothing said so (U16). The
+// other options are applied as the tree is read.
+func (s *Scanner) SetTimeOptions(opts CompareOpts) {
+	t := timeOptionsOf(opts)
+	if old := s.times.Load(); old != nil && *old == t {
+		return
+	}
+	s.lockTree()
+	defer s.unlockTree()
+	s.times.Store(&t)
+	if s.tree != nil {
+		recompare(s.tree.Children, s.withTimes(opts))
+	}
+}
+
+// recompare compares nodes, and all under them, again with opts.
+func recompare(nodes []*TreeNode, opts CompareOpts) {
+	for _, n := range nodes {
+		compareNode(n, opts)
+		recompare(n.Children, opts)
+	}
+}
+
 // ReadTree runs fn with the tree pinned under the shared read lock, so scanner
 // goroutines cannot mutate it while fn walks. Readers do not exclude each
 // other, so fn may only write the fields that belong to the single UI
@@ -173,6 +217,10 @@ func (s *Scanner) Cancel() {
 // Scan lists both trees from the root and, when opts.Checksum is set,
 // checksums every file present on both sides.
 func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
+	// A scan sets the time options only when nothing has: the UI reads opts
+	// before the scan starts, and a change in Settings made since then holds.
+	t := timeOptionsOf(opts)
+	s.times.CompareAndSwap(nil, &t)
 	ctx, cancel := context.WithCancel(ctx)
 	root := NewRootNode()
 	s.lockTree()
@@ -226,9 +274,13 @@ func (s *Scanner) Scan(ctx context.Context, opts CompareOpts) {
 				// New nodes only, so the merge may run unlocked: it reads no
 				// live node, even when another lister filled the folder
 				// meanwhile. The first to fill it wins.
-				children := mergeChildren(job.parent, nil, leftEntries, rightEntries, job.depth, opts, nil)
+				used := s.withTimes(opts)
+				children := mergeChildren(job.parent, nil, leftEntries, rightEntries, job.depth, used, nil)
 				s.lockTree()
 				if job.parent == root || !job.parent.Listed || job.parent.ListErr {
+					if now := s.withTimes(opts); now != used {
+						recompare(children, now) // the time options changed as it merged
+					}
 					job.parent.Children = children
 					job.parent.Listed = true
 					job.parent.ListErr = false
@@ -404,7 +456,7 @@ func (s *Scanner) RefreshTopLevel(ctx context.Context, opts CompareOpts) {
 		return
 	}
 	s.lockTree()
-	root.Children = MergeChildren(root, leftEntries, rightEntries, root.Depth+1, opts, nil)
+	root.Children = MergeChildren(root, leftEntries, rightEntries, root.Depth+1, s.withTimes(opts), nil)
 	root.Listed = true
 	root.ListErr = false
 	s.unlockTree()
@@ -434,7 +486,7 @@ func (s *Scanner) ListNode(ctx context.Context, node *TreeNode, opts CompareOpts
 	// The preserving merge reuses and rewrites the live child nodes, so it is a
 	// mutation like the assignment that follows it; both go under the lock.
 	s.lockTree()
-	node.Children = MergeChildren(node, leftEntries, rightEntries, node.Depth+1, opts, nil)
+	node.Children = MergeChildren(node, leftEntries, rightEntries, node.Depth+1, s.withTimes(opts), nil)
 	node.Listed = true
 	node.ListErr = false
 	s.unlockTree()
@@ -461,7 +513,7 @@ func (s *Scanner) refreshEntries(ctx context.Context, node *TreeNode, opts Compa
 	s.lockTree()
 	node.Sides[SideLeft].Entry = findEntry(leftEntries, node.Name)
 	node.Sides[SideRight].Entry = findEntry(rightEntries, node.Name)
-	compareNode(node, opts)
+	compareNode(node, s.withTimes(opts))
 	revalidateChecksum(node, changed)
 	s.unlockTree()
 	return nil
@@ -581,7 +633,7 @@ func (s *Scanner) rescanDir(ctx context.Context, node *TreeNode, opts CompareOpt
 			return nil
 		}
 		s.lockTree()
-		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, opts, changed)
+		children := MergeChildren(job.parent, leftEntries, rightEntries, job.depth, s.withTimes(opts), changed)
 		job.parent.Children = children
 		job.parent.Listed = true
 		job.parent.ListErr = false
@@ -759,7 +811,7 @@ func (s *Scanner) EnsureSubtreeListed(ctx context.Context, node *TreeNode, opts 
 				return nil
 			}
 			s.lockTree()
-			parent.Children = MergeChildren(parent, left, right, job.depth, opts, nil)
+			parent.Children = MergeChildren(parent, left, right, job.depth, s.withTimes(opts), nil)
 			parent.Listed = true
 			parent.ListErr = false
 			s.unlockTree()
@@ -841,7 +893,7 @@ func (s *Scanner) RefreshDir(parentDir string, left, right []FileEntry, opts Com
 	if parent == nil {
 		return
 	}
-	parent.Children = MergeChildren(parent, left, right, parent.Depth+1, opts, nil)
+	parent.Children = MergeChildren(parent, left, right, parent.Depth+1, s.withTimes(opts), nil)
 	parent.Listed = true
 	parent.ListErr = false
 }
@@ -882,7 +934,7 @@ func (s *Scanner) RenameNode(node *TreeNode, newName, newRel, oldRel string, opt
 	if parent == nil {
 		return false
 	}
-	merged := mergeRenamedCollision(parent, node, opts)
+	merged := mergeRenamedCollision(parent, node, s.withTimes(opts))
 	sortNodes(parent.Children)
 	return merged
 }
