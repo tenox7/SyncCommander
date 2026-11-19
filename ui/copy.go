@@ -192,29 +192,41 @@ func (m *Model) confirmCopy() tea.Cmd {
 // runCopy starts the copy, held to plan.
 func (m *Model) runCopy(node *model.TreeNode, leftToRight bool, plan transfer.Plan) tea.Cmd {
 	m.lastCopyBytes, m.lastCopyTick, m.slotSpins, m.speed = 0, time.Time{}, nil, speedHistory{}
+	m.copyNow, m.copyETA = speedNow{}, etaClock{}
 	return m.copyNode(node, leftToRight, plan)
 }
 
 // slotSpin is one in-flight row's liveness: the frame only advances on ticks
 // where that file's byte counter moved, so a stalled file shows a frozen glyph.
+// now is the file's speed now.
 type slotSpin struct {
 	bytes int64
 	frame int
+	now   speedNow
 }
 
-// tickCopy samples the transferred bytes for the speed chart and advances the
-// copy spinners only while bytes move, so a stalled transfer shows a frozen
-// spinner. Resumed prefixes don't count as movement.
-func (m *Model) tickCopy() {
+// tickCopy samples the transferred bytes for the speeds and the chart, and
+// advances the copy spinners only while bytes move, so a stalled transfer
+// shows a frozen spinner. Resumed prefixes don't count as movement.
+func (m *Model) tickCopy() { m.tickCopyAt(time.Now()) }
+
+func (m *Model) tickCopyAt(now time.Time) {
 	if !m.copying() {
 		return
 	}
 	m.copyProgress.SyncTotals()
-	m.tickSlotSpins()
+	m.tickSlotSpins(now)
 	cur := m.copyProgress.Bytes.Load() - m.copyProgress.BaseBytes.Load()
-	now := time.Now()
-	if !m.lastCopyTick.IsZero() {
-		m.speed.add(max(cur-m.lastCopyBytes, 0), now.Sub(m.lastCopyTick))
+	m.tickSpeedNow(now, cur)
+	// The first tick counts from the copy's start: what moved before it (a
+	// bandwidth limit's burst of a second) is in the average, and so in the
+	// chart, or the average stood above the chart's max.
+	last := m.lastCopyTick
+	if last.IsZero() && m.copyProgress.Start.Load() > 0 {
+		last = time.Unix(0, m.copyProgress.Start.Load())
+	}
+	if !last.IsZero() {
+		m.speed.add(max(cur-m.lastCopyBytes, 0), now.Sub(last))
 	}
 	m.lastCopyTick = now
 	if cur == m.lastCopyBytes {
@@ -224,7 +236,24 @@ func (m *Model) tickCopy() {
 	m.lastCopyBytes = cur
 }
 
-func (m *Model) tickSlotSpins() {
+// tickSpeedNow samples the copy's bytes for its speed now and its ETA. Both
+// start with the files: listing the subtree is no copy time.
+func (m *Model) tickSpeedNow(now time.Time, cur int64) {
+	p := m.copyProgress
+	if p.Listing.Load() || p.Start.Load() <= 0 {
+		return
+	}
+	start := time.Unix(0, p.Start.Load())
+	if !m.copyNow.start.Equal(start) {
+		m.copyNow, m.copyETA = speedNow{start: start}, etaClock{}
+	}
+	moved, dt := m.copyNow.add(now, cur)
+	m.copyETA.add(now, moved, dt, p.TotalBytes.Load()-p.Bytes.Load(), now.Sub(start), m.copyNow.rate > 0)
+}
+
+// tickSlotSpins samples each file at the now the total uses, so a file
+// and the total look back over the same span.
+func (m *Model) tickSlotSpins(now time.Time) {
 	next := make(map[string]slotSpin, len(m.slotSpins))
 	for _, s := range m.copyProgress.SnapshotSlots() {
 		prev, seen := m.slotSpins[s.File]
@@ -232,6 +261,12 @@ func (m *Model) tickSlotSpins() {
 			prev.frame = (prev.frame + 1) % len(spinnerFrames)
 		}
 		prev.bytes = s.Bytes
+		if s.Start > 0 {
+			if start := time.Unix(0, s.Start); !prev.now.start.Equal(start) {
+				prev.now = speedNow{start: start}
+			}
+			prev.now.add(now, s.Bytes-s.BaseBytes)
+		}
 		next[s.File] = prev
 	}
 	m.slotSpins = next

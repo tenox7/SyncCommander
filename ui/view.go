@@ -93,35 +93,40 @@ func (m *Model) copyPopup() string {
 	var slots []CopySlotView
 	if !batched {
 		for _, s := range p.SnapshotSlots() {
-			slots = append(slots, CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, BaseBytes: s.BaseBytes,
-				Elapsed: elapsedSince(s.Start), Spinner: spinnerFrames[m.slotSpins[s.File].frame]})
+			spin := m.slotSpins[s.File]
+			rate := 0.0 // a file the last tick did not see yet has none
+			if s.Start > 0 && spin.now.start.Equal(time.Unix(0, s.Start)) {
+				rate = spin.now.rate
+			}
+			slots = append(slots, CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, Rate: rate,
+				Spinner: spinnerFrames[spin.frame]})
 		}
 	}
 	return RenderCopyPopup(CopyPopupData{
-		LeftToRight:        p.LeftToRight.Load(),
-		Listing:            p.Listing.Load(),
-		DoneFiles:          p.Done.Load(),
-		FailedFiles:        p.Failed.Load(),
-		TimesNotSet:        p.TimesNotSet.Load(),
-		ModesNotSet:        p.ModesNotSet.Load(),
-		TotalFiles:         p.Total.Load(),
-		InFlight:           p.InFlight.Load(),
-		Parallel:           p.Parallel.Load(),
-		Batched:            batched,
-		BatchFile:          file,
-		BatchFileBytes:     bytes - p.FileStartBytes.Load(),
-		BatchFileSize:      p.FileSize.Load(),
-		BatchFileBaseBytes: baseBytes - p.FileStartBaseBytes.Load(),
-		BatchFileElapsed:   elapsedSince(p.FileStart.Load()),
-		Slots:              slots,
-		MaxSlotRows:        max(m.height-copyPopupFixedRows, 1),
-		BytesCopied:        bytes,
-		TotalBytes:         p.TotalBytes.Load(),
-		BaseBytes:          baseBytes,
-		TotalElapsed:       elapsedSince(p.Start.Load()),
-		Spinner:            spinnerFrames[m.copySpinFrame],
-		Speed:              m.speed.samples(),
-		SpeedPeak:          m.speed.peak,
+		LeftToRight:    p.LeftToRight.Load(),
+		Listing:        p.Listing.Load(),
+		DoneFiles:      p.Done.Load(),
+		FailedFiles:    p.Failed.Load(),
+		TimesNotSet:    p.TimesNotSet.Load(),
+		ModesNotSet:    p.ModesNotSet.Load(),
+		TotalFiles:     p.Total.Load(),
+		InFlight:       p.InFlight.Load(),
+		Parallel:       p.Parallel.Load(),
+		Batched:        batched,
+		BatchFile:      file,
+		BatchFileBytes: bytes - p.FileStartBytes.Load(),
+		BatchFileSize:  p.FileSize.Load(),
+		Slots:          slots,
+		MaxSlotRows:    max(m.height-copyPopupFixedRows, 1),
+		BytesCopied:    bytes,
+		TotalBytes:     p.TotalBytes.Load(),
+		BaseBytes:      baseBytes,
+		TotalElapsed:   elapsedSince(p.Start.Load()),
+		Rate:           m.copyNow.rate,
+		ETA:            m.copyETA.secs,
+		Spinner:        spinnerFrames[m.copySpinFrame],
+		Speed:          m.speed.samples(),
+		SpeedPeak:      m.speed.peak,
 	}, popupWidth(m.width))
 }
 
@@ -160,13 +165,11 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		info.FilesDone = m.copyProgress.Done.Load()
 		info.FilesTotal = m.copyProgress.Total.Load()
 		info.BytesCopied = m.copyProgress.Bytes.Load()
-		info.BaseBytes = m.copyProgress.BaseBytes.Load()
-		info.Elapsed = elapsedSince(m.copyProgress.Start.Load())
+		info.Rate = m.copyNow.rate
 	case m.deleting():
 		info.State = "DELETE"
 		info.FilesDone = m.deleteProgress.Done.Load()
 		info.FilesTotal = m.deleteProgress.Total.Load()
-		info.Elapsed = elapsedSince(m.deleteProgress.Start.Load())
 	case m.writing():
 		info.State = strings.ToUpper(m.write.kind.String()) // RENAME, TOUCH
 	case m.checksumming() || progress.Phase == model.PhaseChecksumming:

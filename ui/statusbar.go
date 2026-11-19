@@ -74,39 +74,38 @@ func formatHMS(secs int64) string {
 // per-file rows; BatchFile/BatchFileBytes are populated instead when the
 // transfer is running through a single batch session.
 type CopyPopupData struct {
-	LeftToRight        bool
-	Listing            bool
-	DoneFiles          int64
-	FailedFiles        int64
-	TimesNotSet        int64
-	ModesNotSet        int64
-	TotalFiles         int64
-	InFlight           int64
-	Parallel           int64
-	Batched            bool
-	BatchFile          string
-	BatchFileBytes     int64
-	BatchFileSize      int64
-	BatchFileBaseBytes int64
-	BatchFileElapsed   time.Duration
-	Slots              []CopySlotView
-	MaxSlotRows        int // rows the slots may take before "… N more"; 0 = no limit
-	BytesCopied        int64
-	TotalBytes         int64
-	BaseBytes          int64
-	TotalElapsed       time.Duration
-	Spinner            string
-	Speed              []float64 // bytes/sec history, oldest first
-	SpeedPeak          float64
+	LeftToRight    bool
+	Listing        bool
+	DoneFiles      int64
+	FailedFiles    int64
+	TimesNotSet    int64
+	ModesNotSet    int64
+	TotalFiles     int64
+	InFlight       int64
+	Parallel       int64
+	Batched        bool
+	BatchFile      string
+	BatchFileBytes int64
+	BatchFileSize  int64
+	Slots          []CopySlotView
+	MaxSlotRows    int // rows the slots may take before "… N more"; 0 = no limit
+	BytesCopied    int64
+	TotalBytes     int64
+	BaseBytes      int64
+	TotalElapsed   time.Duration // since the subtree was listed: the average's time
+	Rate           float64       // bytes/sec now (speedNow), over the span the slots' Rate uses
+	ETA            float64       // seconds, the ETA shown (etaClock); 0: none
+	Spinner        string
+	Speed          []float64 // bytes/sec history, oldest first
+	SpeedPeak      float64
 }
 
 type CopySlotView struct {
-	File      string
-	Size      int64
-	Bytes     int64
-	BaseBytes int64
-	Elapsed   time.Duration
-	Spinner   string
+	File    string
+	Size    int64
+	Bytes   int64
+	Rate    float64 // bytes/sec now (speedNow)
+	Spinner string
 }
 
 func RenderCopyPopup(d CopyPopupData, width int) string {
@@ -120,13 +119,16 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	if d.TotalBytes > 0 {
 		totalPct = int(d.BytesCopied * 100 / d.TotalBytes)
 	}
-	totalRealBytes := d.BytesCopied - d.BaseBytes
-	if totalRealBytes < 0 {
-		totalRealBytes = 0
+	// The rates in the column are speeds now: while the same files run, the
+	// total's is the sum of the files' above it. The average is the whole
+	// copy's: it is labelled "avg" on the chart's row, out of that column.
+	avgRate := 0.0
+	if realBytes := d.BytesCopied - d.BaseBytes; d.TotalElapsed >= 100*time.Millisecond && realBytes > 0 {
+		avgRate = float64(realBytes) / d.TotalElapsed.Seconds()
 	}
-	totalRate := 0.0
-	if d.TotalElapsed >= 100*time.Millisecond && totalRealBytes > 0 {
-		totalRate = float64(totalRealBytes) / d.TotalElapsed.Seconds()
+	eta := "--:--" // nothing moved in the last nowSpan: no rate, no ETA
+	if d.Rate > 0 {
+		eta = formatETASecs(d.ETA)
 	}
 
 	progressMark := spinOrDot(d.Spinner)
@@ -184,24 +186,18 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		if fileSize > 0 {
 			filePct = int(fileBytes * 100 / fileSize)
 		}
-		fileRealBytes := fileBytes - d.BatchFileBaseBytes
-		if fileRealBytes < 0 {
-			fileRealBytes = 0
-		}
-		fileRate := 0.0
-		if d.BatchFileElapsed >= 100*time.Millisecond && fileRealBytes > 0 {
-			fileRate = float64(fileRealBytes) / d.BatchFileElapsed.Seconds()
-		}
 		nameW := inner - lipgloss.Width(progressMark) - 1
 		if nameW < 5 {
 			nameW = 5
 		}
 		name := truncateName(d.BatchFile, nameW)
+		// A batch is one session that sends one file at a time: the
+		// file's speed is the session's.
 		rows = append(rows,
 			progressMark+" "+name,
 			rateRow(fmt.Sprintf("File:  %s/%s  ETA %s",
 				model.FormatSize(fileBytes), model.FormatSize(fileSize),
-				formatETA(fileSize-fileBytes, fileRate)), formatRateOrDash(fileRate), inner),
+				formatETA(fileSize-fileBytes, d.Rate)), formatRateOrDash(d.Rate), inner),
 			fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, totalBarWidth), filePct),
 		)
 	} else {
@@ -218,15 +214,10 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			if s.Size > 0 {
 				pct = int(min(s.Bytes, s.Size) * 100 / s.Size)
 			}
-			realBytes := max(s.Bytes-s.BaseBytes, 0)
-			rate := 0.0
-			if s.Elapsed >= 100*time.Millisecond && realBytes > 0 {
-				rate = float64(realBytes) / s.Elapsed.Seconds()
-			}
 			// The rate is right-aligned to its widest form ("1023.9 KB/s") so
 			// the columns hold still while the numbers change.
 			head := "  " + spinOrDot(s.Spinner) + " "
-			tail := fmt.Sprintf(" %s %3d%% %11s", progressBar(s.Bytes, s.Size, 10), pct, formatRateOrDash(rate))
+			tail := fmt.Sprintf(" %s %3d%% %11s", progressBar(s.Bytes, s.Size, 10), pct, formatRateOrDash(s.Rate))
 			nameW := max(inner-lipgloss.Width(head)-lipgloss.Width(tail), 8)
 			name := truncateName(s.File, nameW)
 			rows = append(rows, head+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
@@ -243,10 +234,10 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 	}
 	rows = append(rows,
 		rateRow(fmt.Sprintf("Total: %s/%s  ETA %s",
-			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes),
-			formatETA(d.TotalBytes-d.BytesCopied, totalRate)), formatRateOrDash(totalRate), inner),
+			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes), eta),
+			formatRateOrDash(d.Rate), inner),
 		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(d.BytesCopied, d.TotalBytes, totalBarWidth), totalPct),
-		speedRow(d.Speed, d.SpeedPeak, inner),
+		speedRow(d.Speed, d.SpeedPeak, avgRate, inner),
 		keys,
 	)
 
@@ -413,8 +404,7 @@ type StatusInfo struct {
 	FilesDone       int64
 	FilesTotal      int64
 	BytesCopied     int64
-	BaseBytes       int64
-	Elapsed         time.Duration
+	Rate            float64 // the copy's bytes/sec now, as the popup's total
 	Errors          int
 	Retries         int
 	Recovered       int
@@ -460,12 +450,8 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		details = fmt.Sprintf("CHECKSUM: %d/%d files", info.ChecksumDone, info.ChecksumTotal)
 	case "COPY":
 		rate := ""
-		realBytes := info.BytesCopied - info.BaseBytes
-		if realBytes < 0 {
-			realBytes = 0
-		}
-		if info.Elapsed > 0 && realBytes > 0 {
-			rate = " " + model.FormatRate(float64(realBytes)/info.Elapsed.Seconds())
+		if info.Rate > 0 {
+			rate = " " + model.FormatRate(info.Rate)
 		}
 		details = fmt.Sprintf("COPY: %d/%d files, %s%s", info.FilesDone, info.FilesTotal, model.FormatSize(info.BytesCopied), rate)
 	case "DELETE":

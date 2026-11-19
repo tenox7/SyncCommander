@@ -63,14 +63,145 @@ func (h *speedHistory) samples() []float64 {
 	return append(h.rates[:len(h.rates):len(h.rates)], min(cur, h.peak))
 }
 
-// speedRow is the popup's throughput chart, indented under the total bar
-// with the y ceiling labelled on the right.
-func speedRow(rates []float64, peak float64, inner int) string {
-	label := ""
-	if peak > 0 {
-		label = "max " + model.FormatRate(peak)
+const (
+	// nowSpan is how far back a speed now looks. The files in flight and the
+	// total look back the same span, so while the same files run, the total
+	// is the sum of their speeds.
+	nowSpan = 5 * time.Second
+	// etaSpan is the memory of the ETA's speed: the speed of etaSpan ago
+	// counts e times less than the speed now. After a change of speed, the
+	// ETA is right in about five minutes; a stall moves it by a few
+	// percent, not by hours.
+	etaSpan = 2 * time.Minute
+	// etaEase is how fast the ETA shown closes its gap to the remaining
+	// bytes over the ETA's speed: by 1-1/e of it every etaEase.
+	etaEase = 30 * time.Second
+)
+
+// speedNow is the speed of one byte counter now: what it moved in the last
+// nowSpan, or since start while it is younger. The counter is 0 at start.
+type speedNow struct {
+	start time.Time
+	at    []time.Time // samples, oldest first
+	bytes []int64
+	rate  float64
+}
+
+// add samples the counter, b, at now and sets rate. It returns what the
+// counter moved since the sample before, or since start, and in what time.
+func (s *speedNow) add(now time.Time, b int64) (int64, time.Duration) {
+	prevAt, prevB := s.start, int64(0)
+	if n := len(s.at); n > 0 {
+		prevAt, prevB = s.at[n-1], s.bytes[n-1]
 	}
-	label = fmt.Sprintf(" %14s", label)
+	s.at, s.bytes = append(s.at, now), append(s.bytes, b)
+	fromAt, fromB := s.start, int64(0)
+	for i := len(s.at) - 1; i >= 0; i-- {
+		if now.Sub(s.at[i]) >= nowSpan {
+			fromAt, fromB = s.at[i], s.bytes[i]
+			s.at, s.bytes = s.at[i:], s.bytes[i:]
+			break
+		}
+	}
+	s.rate = 0
+	if dt := now.Sub(fromAt); dt >= 100*time.Millisecond {
+		s.rate = max(float64(b-fromB), 0) / dt.Seconds()
+	}
+	return b - prevB, now.Sub(prevAt)
+}
+
+// etaSpeed is the speed the ETA uses: bytes over time, both made e times
+// smaller every etaSpan, so the last minute counts most and a burst little.
+type etaSpeed struct{ bytes, secs float64 }
+
+func (e *etaSpeed) add(b int64, dt time.Duration) {
+	k := math.Exp(-dt.Seconds() / etaSpan.Seconds())
+	e.bytes = e.bytes*k + float64(b)
+	e.secs = e.secs*k + dt.Seconds()
+}
+
+func (e *etaSpeed) rate() float64 {
+	if e.secs <= 0 {
+		return 0
+	}
+	return max(e.bytes/e.secs, 0)
+}
+
+// etaClock is the ETA the popup shows. The remaining bytes over etaSpeed
+// still jump by seconds or minutes from one tick to the next on a copy of
+// hours, as a counter moves in steps of a buffer. So the ETA shown counts
+// down with the clock, and each tick closes part of its gap to that ETA.
+type etaClock struct {
+	speed etaSpeed
+	secs  float64   // the ETA shown; 0: none
+	at    time.Time // when secs was set; zero: no ETA yet
+}
+
+// add folds a tick's bytes (moved in dt) into the speed and moves the ETA
+// shown. moving is false when nothing moved in the last nowSpan: the popup
+// shows no ETA, and the stall's time stays out of the speed, so the ETA
+// after it is the ETA before it. age is the time since the subtree was
+// listed: while it is short, the speed is not settled yet and the ETA
+// shown follows faster.
+func (e *etaClock) add(now time.Time, moved int64, dt time.Duration, remaining int64, age time.Duration, moving bool) {
+	if !moving {
+		return
+	}
+	e.speed.add(moved, dt)
+	rate := e.speed.rate()
+	switch {
+	case rate <= 0:
+		return
+	case remaining <= 0:
+		e.secs, e.at = 0, now
+		return
+	}
+	target := float64(remaining) / rate
+	if e.at.IsZero() || e.secs <= 0 {
+		e.secs, e.at = target, now
+		return
+	}
+	step := now.Sub(e.at).Seconds()
+	shown := e.secs - step
+	k := 1.0
+	if tau := min(etaEase, age/3).Seconds(); tau > 0 {
+		k = -math.Expm1(-step / tau)
+	}
+	e.secs, e.at = max(shown+(target-shown)*k, 0), now
+}
+
+// formatETASecs is an ETA in seconds as h:mm:ss, or --:-- for none.
+func formatETASecs(secs float64) string {
+	if secs <= 0 || secs >= 1e12 {
+		return "--:--"
+	}
+	return formatHMS(int64(secs + 0.5))
+}
+
+// speedRow is the popup's throughput chart, indented under the total bar,
+// with the copy's average speed and the y ceiling on the right. A row with
+// no room for the average next to a chart 10 cells wide shows the ceiling
+// only.
+func speedRow(rates []float64, peak, avg float64, inner int) string {
+	var parts []string
+	if avg > 0 {
+		parts = append(parts, "avg "+model.FormatRate(avg))
+	}
+	if peak > 0 {
+		parts = append(parts, "max "+model.FormatRate(peak))
+	}
+	// The label is 28 cells, as " avg 5.6 MB/s  max 15.2 MB/s", where that
+	// leaves the chart 10 cells, else 15, as " max 15.2 MB/s". The choice
+	// depends on the width only, so the chart holds still while the numbers
+	// change.
+	label := fmt.Sprintf(" %27s", strings.Join(parts, "  "))
+	if inner-4-28 < 10 {
+		label = ""
+		if peak > 0 {
+			label = "max " + model.FormatRate(peak)
+		}
+		label = fmt.Sprintf(" %14s", label)
+	}
 	return "    " + sparkline(rates, peak, max(inner-4-lipgloss.Width(label), 4)) + label
 }
 

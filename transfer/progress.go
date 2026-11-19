@@ -30,9 +30,7 @@ type Progress struct {
 	Start              atomic.Int64
 	File               atomic.Value
 	FileSize           atomic.Int64
-	FileStart          atomic.Int64
 	FileStartBytes     atomic.Int64
-	FileStartBaseBytes atomic.Int64
 	LeftToRight        atomic.Bool
 	Sem                atomic.Pointer[DynSem]
 
@@ -78,7 +76,7 @@ type SlotSnapshot struct {
 // previous copy's numbers while the subtree is still being listed.
 func (p *Progress) Reset(parallel int, leftToRight bool) {
 	for _, c := range []*atomic.Int64{&p.Total, &p.TotalBytes, &p.Done, &p.Failed, &p.TimesNotSet, &p.ModesNotSet, &p.InFlight, &p.Bytes, &p.BaseBytes,
-		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStart, &p.FileStartBytes, &p.FileStartBaseBytes} {
+		&p.CompletedBytes, &p.CompletedBaseBytes, &p.FileSize, &p.FileStartBytes} {
 		c.Store(0)
 	}
 	p.Parallel.Store(int64(parallel))
@@ -176,6 +174,4 @@ func (p *Progress) SyncTotals() {
 func (p *Progress) beginFile(size int64) {
 	p.FileSize.Store(size)
 	p.FileStartBytes.Store(p.Bytes.Load())
-	p.FileStartBaseBytes.Store(p.BaseBytes.Load())
-	p.FileStart.Store(time.Now().UnixNano())
 }

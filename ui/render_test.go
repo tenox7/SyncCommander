@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestStatusBarShowsTheStopKey(t *testing.T) {
 
 func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 	d := CopyPopupData{LeftToRight: true, DoneFiles: 1, TotalFiles: 4, BytesCopied: 50, TotalBytes: 200, Parallel: 2,
-		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Elapsed: time.Second, Spinner: "⠹"}},
+		Slots: []CopySlotView{{File: "a.bin", Size: 100, Bytes: 25, Rate: 25, Spinner: "⠹"}},
 		Speed: []float64{10, 20, 40}, SpeedPeak: 40}
 	s := ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
 	wantAll(t, "copy popup", s, "COPY  1/4 files", "a.bin", "⠹", "25%", "25 B/s", "⣠⡇", "max 40 B/s")
@@ -65,8 +66,8 @@ func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 // rate.
 func TestCopyPopupLinesTheRatesUp(t *testing.T) {
 	d := CopyPopupData{LeftToRight: true, DoneFiles: 1, TotalFiles: 4, InFlight: 1, Parallel: 2,
-		BytesCopied: 3 << 20, TotalBytes: 200 << 30, TotalElapsed: 2 * time.Second,
-		Slots: []CopySlotView{{File: "IMG_2268 1.JPG", Size: 4 << 20, Bytes: 2 << 20, Elapsed: time.Second}}}
+		BytesCopied: 3 << 20, TotalBytes: 200 << 30, TotalElapsed: 2 * time.Second, Rate: 1.5 * (1 << 20),
+		Slots: []CopySlotView{{File: "IMG_2268 1.JPG", Size: 4 << 20, Bytes: 2 << 20, Rate: 2 << 20}}}
 	// end is the column where rate ends on the line that holds row.
 	end := func(s, row, rate string) int {
 		t.Helper()
@@ -87,9 +88,10 @@ func TestCopyPopupLinesTheRatesUp(t *testing.T) {
 	if file, total := end(s, "IMG_2268", "2.0 MB/s"), end(s, "Total:", "1.5 MB/s"); file != total {
 		t.Errorf("the total rate ends at column %d, the file's at %d:\n%s", total, file, s)
 	}
-	d.Batched, d.BatchFile, d.BatchFileBytes, d.BatchFileSize, d.BatchFileElapsed = true, "big.iso", 1<<20, 4<<20, time.Second
+	// A batch sends one file at a time: the file's speed is the session's.
+	d.Batched, d.BatchFile, d.BatchFileBytes, d.BatchFileSize = true, "big.iso", 1<<20, 4<<20
 	s = ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
-	if file, total := end(s, "File:", "1.0 MB/s"), end(s, "Total:", "1.5 MB/s"); file != total {
+	if file, total := end(s, "File:", "1.5 MB/s"), end(s, "Total:", "1.5 MB/s"); file != total {
 		t.Errorf("batch: the total rate ends at column %d, the file's at %d:\n%s", total, file, s)
 	}
 	d.Batched = false
@@ -196,5 +198,112 @@ func TestCopyPopupTakesFilesWithoutTimesFromTheCopy(t *testing.T) {
 	m.copyProgress.TimesNotSet.Store(3)
 	if out := m.copyPopup(); !strings.Contains(out, "3 NO TIMES") {
 		t.Errorf("the popup does not show the copy's count:\n%s", out)
+	}
+}
+
+// lineWith is the first line of s that holds sub.
+func lineWith(t *testing.T, s, sub string) string {
+	t.Helper()
+	for _, l := range strings.Split(s, "\n") {
+		if strings.Contains(l, sub) {
+			return l
+		}
+	}
+	t.Fatalf("no line with %q:\n%s", sub, s)
+	return ""
+}
+
+// etaSecs reads the ETA on the Total line of a popup: m:ss or h:mm:ss.
+func etaSecs(t *testing.T, s string) float64 {
+	t.Helper()
+	f := strings.Fields(lineWith(t, s, "Total:"))
+	for i := range len(f) - 1 {
+		if f[i] != "ETA" {
+			continue
+		}
+		secs := 0
+		for _, p := range strings.Split(f[i+1], ":") {
+			n, err := strconv.Atoi(p)
+			if err != nil {
+				t.Fatalf("ETA %q", f[i+1])
+			}
+			secs = secs*60 + n
+		}
+		return float64(secs)
+	}
+	t.Fatalf("no ETA in %q", f)
+	return 0
+}
+
+// The screenshot that asked: files at 1.2 to 2.2 MB/s over a Total of
+// 5.6 MB/s and an ETA of 9:20:23, both from the average of four hours. Now
+// the Total is the speed now, the ETA is the one the clock keeps, and the
+// average is labelled avg on the chart's row. A copy that moved nothing in
+// the last nowSpan shows no speed and no ETA.
+func TestCopyPopupTotalIsTheSpeedNow(t *testing.T) {
+	d := CopyPopupData{LeftToRight: true, DoneFiles: 120, TotalFiles: 400, InFlight: 7, Parallel: 7,
+		BytesCopied: 80 << 30, TotalBytes: 268 << 30, TotalElapsed: 4 * time.Hour,
+		Rate: 12.2 * mib, ETA: 15779, Speed: []float64{5 * mib, 12 * mib}, SpeedPeak: 14 * mib}
+	for _, r := range []float64{1.2, 1.7, 1.7, 1.8, 2.1, 1.5, 2.2} {
+		d.Slots = append(d.Slots, CopySlotView{File: "IMG_2268.JPG", Size: 4 * mib, Bytes: 2 * mib, Rate: r * mib})
+	}
+	s := ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
+	if total := lineWith(t, s, "Total:"); !strings.Contains(total, "ETA 4:22:59") || !strings.Contains(total, "12.2 MB/s") {
+		t.Fatalf("Total line %q", total)
+	}
+	wantAll(t, "copy popup", s, "avg 5.7 MB/s  max 14.0 MB/s")
+	d.Rate = 0
+	s = ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
+	if total := lineWith(t, s, "Total:"); !strings.Contains(total, "ETA --:--") || !strings.Contains(total, "— B/s") {
+		t.Fatalf("stalled: Total line %q", total)
+	}
+}
+
+// The status bar shows the copy's speed now, as the popup's Total does.
+func TestStatusBarShowsTheSpeedNow(t *testing.T) {
+	s := ansi.Strip(RenderStatusBar(StatusInfo{State: "COPY", FilesDone: 3, FilesTotal: 9, BytesCopied: 1 << 30, Rate: 12.2 * mib}, 160))
+	if !strings.Contains(s, "COPY: 3/9 files") || !strings.Contains(s, " 12.2 MB/s") {
+		t.Fatalf("status bar: %s", s)
+	}
+}
+
+// From the ticks of a copy: the popup's Total and the status bar show the
+// speed now, the ETA follows that speed and not the average, and the
+// average is on the chart's row. Then nothing moves: no speed, no ETA.
+func TestCopyTicksShowTheSpeedNow(t *testing.T) {
+	src := openBackendOrSkip(t, "fake://tiny")
+	m := newTestModel(t, src, src)
+	p := m.copyProgress
+	p.Reset(2, true)
+	runningOp(m, opCopy, nil)
+	t0 := time.Now().Add(-15 * time.Minute)
+	p.Start.Store(t0.UnixNano())
+	p.TotalBytes.Store(10 << 30)
+	at, b := t0, 0.0
+	run := func(d time.Duration, rate float64) {
+		for range int(d / tick100) {
+			at, b = at.Add(tick100), b+rate/10
+			p.CompletedBytes.Store(int64(b))
+			m.tickCopyAt(at)
+		}
+	}
+	run(5*time.Minute, mib)
+	run(10*time.Minute, 7*mib)
+	s := ansi.Strip(m.copyPopup())
+	if total := lineWith(t, s, "Total:"); !strings.Contains(total, "7.0 MB/s") {
+		t.Fatalf("Total line %q", total)
+	}
+	wantAll(t, "copy popup", s, "avg 5.0 MB/s")
+	remaining := float64(10<<30) - b
+	if eta, want := etaSecs(t, s), remaining/(7*mib); !near(eta, want, 0.03) {
+		t.Fatalf("ETA %s, want about %s, not the average's %s", formatETASecs(eta), formatETASecs(want), formatETASecs(remaining/(5*mib)))
+	}
+	if bar := ansi.Strip(RenderStatusBar(m.buildStatus(m.scanner.Progress()), 160)); !strings.Contains(bar, " 7.0 MB/s") {
+		t.Fatalf("status bar: %s", bar)
+	}
+	run(nowSpan, 0)
+	s = ansi.Strip(m.copyPopup())
+	if total := lineWith(t, s, "Total:"); !strings.Contains(total, "ETA --:--") || !strings.Contains(total, "— B/s") {
+		t.Fatalf("stalled: Total line %q", total)
 	}
 }

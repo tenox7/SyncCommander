@@ -69,6 +69,8 @@ type Model struct {
 	lastCopyTick  time.Time
 	slotSpins     map[string]slotSpin
 	speed         speedHistory
+	copyNow       speedNow // the copy's speed now: the popup's total and the status bar
+	copyETA       etaClock
 	tickActive    bool
 
 	settings   *SettingsDialog
