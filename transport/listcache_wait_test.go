@@ -197,15 +197,23 @@ func TestListCacheListOutsideTheRunsScopeDoesNotWait(t *testing.T) {
 }
 
 // W-M2: a fresh run over another scope left the waiters of the old run
-// waiting for the new one. Now one outside the new scope lists live.
-func TestListCacheFreshRunElsewhereSendsAWaiterLive(t *testing.T) {
+// waiting for the new one; then it stopped the old run, and they listed
+// live. Now the old run goes on beside the new one (R9): its waiter waits
+// for it alone and gets its folder from it.
+func TestListCacheFreshRunElsewhereLeavesAWaiterItsRun(t *testing.T) {
 	c := newListCache()
 	g1, g2 := newRunGate(t), newRunGate(t)
-	c.start(context.Background(), "a", gatedRun(g1, func(func(string, []model.FileEntry), func(string)) error { return nil }))
+	c.start(context.Background(), "a", gatedRun(g1, func(emit func(string, []model.FileEntry), complete func(string)) error {
+		emit("a/y", []model.FileEntry{{Name: "y1"}})
+		complete("a/y")
+		return nil
+	}))
 	waiter := serveWith(c, context.Background(), "a/y")
 	stillWaits(t, waiter)
 	c.start(model.WithFreshListing(context.Background()), "b", gatedRun(g2, func(func(string, []model.FileEntry), func(string)) error { return nil }))
-	if o := served(t, waiter); o.err != nil || !o.lived {
-		t.Errorf("a/y, outside the new run's scope: err %v, live %v; want a live listing", o.err, o.lived)
+	stillWaits(t, waiter)
+	g1.open()
+	if o := served(t, waiter); o.err != nil || o.lived || len(o.entries) != 1 || o.entries[0].Name != "y1" {
+		t.Errorf("a/y: %+v, err %v, live %v; want its run's [y1]", o.entries, o.err, o.lived)
 	}
 }
