@@ -20,19 +20,22 @@ func (b *LocalBackend) Capabilities(context.Context) (model.Caps, error) {
 }
 
 // The ssh shell sums many files with one command (S19).
+// The ssh shells remove a folder's entries with one script (R16).
 func (b *SFTPBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true,
+		BatchRemove: true}, nil
 }
 
 func (b *SCPBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true,
+		BatchRemove: true}, nil
 }
 
 // An rsync destination counts its own upload progress (OwnsProgress). The
 // region checksums of rsync+ssh are its shell's.
 func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, RegionSums: true, OpenAt: true, SendLocal: true, RecvLocal: true, Batch: true,
-		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true}, nil
+		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true, BatchRemove: true}, nil
 }
 
 // A daemon deletes a folder's entries in one run (R16). Each call dials
@@ -116,6 +119,9 @@ var (
 	_ model.LocalReceiver      = (*RsyncBackend)(nil)
 	_ model.RecursivePreloader = (*RsyncBackend)(nil)
 	_ model.BatchRemover       = (*RsyncBackend)(nil)
+	_ model.BatchRemover       = (*RsyncSSHBackend)(nil)
+	_ model.BatchRemover       = (*SCPBackend)(nil)
+	_ model.BatchRemover       = (*SFTPBackend)(nil)
 	_ model.Backend            = (*FTPBackend)(nil)
 	_ model.Resumer            = (*FTPBackend)(nil)
 	_ model.SeekableOpener     = (*FTPBackend)(nil)

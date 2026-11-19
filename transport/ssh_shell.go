@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path"
@@ -81,7 +82,13 @@ func (s *sshShell) abs(relPath string) string { return path.Join(s.base, cleanRe
 // exec runs cmd on client with the given stdin and stdout. A failure carries
 // the command's stderr, which is what "exited with status 1" hides.
 func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader, stdout io.Writer) error {
-	Log.Add(s.proto, DirOut, cmd)
+	return s.execAs(ctx, client, cmd, cmd, stdin, stdout)
+}
+
+// execAs is exec, with the log showing logged for cmd: what a script on
+// the input of sh does.
+func (s *sshShell) execAs(ctx context.Context, client *ssh.Client, cmd, logged string, stdin io.Reader, stdout io.Writer) error {
+	Log.Add(s.proto, DirOut, logged)
 	session, err := client.NewSession()
 	if err != nil {
 		Log.Add(s.proto, DirErr, err.Error())
@@ -111,7 +118,8 @@ func (s *sshShell) exec(ctx context.Context, client *ssh.Client, cmd string, std
 // tries a copy again on the same source while none of it has been read,
 // and the read in flight took up to 32 KiB the second try never sent: the
 // file came out short, with every byte of the source counted (S24).
-// A heldOpen input is written nothing and stays open until the command ends.
+// A heldOpen input is written nothing and stays open until the command ends;
+// a heldAfter input is written and then stays open so.
 func runFed(session *ssh.Session, cmd string, stdin io.Reader) error {
 	if stdin == nil {
 		return session.Run(cmd)
@@ -125,6 +133,14 @@ func runFed(session *ssh.Session, cmd string, stdin io.Reader) error {
 	}
 	if _, ok := stdin.(heldOpen); ok {
 		return session.Wait()
+	}
+	if h, ok := stdin.(heldAfter); ok {
+		// A command that ended closes the channel, and the copy stops on it.
+		_, copyErr := io.Copy(w, h.Reader)
+		if err := session.Wait(); err != nil {
+			return err
+		}
+		return copyErr
 	}
 	// A command that ended closes the channel, and the copy stops on it.
 	_, copyErr := io.Copy(w, stdin)
@@ -1036,6 +1052,126 @@ func (s *sshShell) RemoveAll(ctx context.Context, relPath string) error {
 	return err
 }
 
+// rmArgMax is the most bytes of names one rm of RemoveIn's is given, each
+// name with its NUL and its pointer: a command's arguments and its
+// environment share one limit on the server, 24 KiB by default on older
+// AIX.
+var rmArgMax = 8 << 10
+
+// rmScriptMax is the most bytes of names, counted as for rmArgMax, that one
+// script of RemoveIn's holds: the shell reads all of a script before it
+// runs any of it.
+var rmScriptMax = 1 << 20
+
+// RemoveIn removes the entries of dir that items name (model.BatchRemover):
+// the files with rm -f, the folders with rm -rf. One command ran for each
+// entry, a round trip each: a mirror that deleted 100k files ran 100k
+// commands (R16). The names go to sh on its input, as many in one script
+// as rmScriptMax takes, so a folder's deletes are one command, or a few. An
+// entry that is not there is no failure, and a name that is no entry of
+// the folder (model.IsFileName) is refused before anything runs. When a
+// script fails, those after it still run, and the first failure is
+// returned: the caller lists the folder to see what went.
+func (s *sshShell) RemoveIn(ctx context.Context, dir string, items []model.RemoveItem) error {
+	dir = cleanRel(dir)
+	var files, dirs []string
+	for _, it := range items {
+		if !model.IsFileName(it.Name) {
+			return fmt.Errorf("%s: %q is no name in a folder: %w", s.proto, it.Name, fs.ErrInvalid)
+		}
+		if it.IsDir {
+			dirs = append(dirs, it.Name)
+		} else {
+			files = append(files, it.Name)
+		}
+	}
+	defer func() {
+		if len(files) > 0 {
+			s.listCache.invalidate(dir)
+		}
+		for _, name := range dirs {
+			s.listCache.forgetRemoved(path.Join(dir, name))
+			s.forgetDirs(path.Join(dir, name))
+		}
+	}()
+	where := dir
+	if where == "" {
+		where = "/"
+	}
+	var first error
+	for f, d := files, dirs; len(f)+len(d) > 0; {
+		script, nf, nd := rmScript(s.abs(dir), f, d)
+		f, d = f[nf:], d[nd:]
+		err := s.rmRun(ctx, fmt.Sprintf("REMOVE %d in %s", nf+nd, where), script)
+		switch {
+		case err == nil:
+		case ctx.Err() != nil, errors.Is(err, errNoShell), errors.Is(err, fs.ErrNotExist):
+			return err
+		case first == nil:
+			first = err
+		}
+	}
+	return first
+}
+
+// rmScript is the script for sh that removes, in folder, files with rm -f
+// and then dirs with rm -rf, as many as rmScriptMax takes and at least one,
+// with how many of each it took; an rm takes rmArgMax of them. Each rm runs
+// in the background, as rmRF's does, and a read of the session's input,
+// which the client holds open until the command ends (heldAfter), stops
+// the script and the rm it waits for when that input ends, as it does when
+// the session closes. The script is one compound command, which the shell
+// reads whole before it runs any of it: that read finds none of the script
+// left. It exits 112 when the folder is not there and 127 when rm is not,
+// and prints removedWord when every rm went through.
+func rmScript(folder string, files, dirs []string) (string, int, int) {
+	var b strings.Builder
+	q := shellQuote(folder)
+	b.WriteString("{\n[ -d " + q + " ] || exit 112\ncd " + q + " || exit 1\ns=0 p=\n" +
+		"trap '[ -n \"$p\" ] && kill $p 2>/dev/null; exit 143' 15\n" +
+		"exec 3<&0\n{ read x <&3; kill $$; } >/dev/null 2>&1 &\nw=$!\nexec 3<&-\n")
+	size, took := 0, [2]int{}
+	for i, run := range [2]struct {
+		flag  string
+		names []string
+	}{{"-f", files}, {"-rf", dirs}} {
+		for took[i] < len(run.names) && size < rmScriptMax {
+			b.WriteString("rm " + run.flag + " --")
+			for args := 0; took[i] < len(run.names); took[i]++ {
+				name := run.names[took[i]]
+				cost := len(name) + 9
+				if args > 0 && (args+cost > rmArgMax || size+cost > rmScriptMax) {
+					break
+				}
+				b.WriteString(" " + shellQuote(name))
+				args += cost
+				size += cost
+			}
+			b.WriteString(" & p=$!\nwait $p; c=$?\nif [ $c = 127 ]; then kill $w 2>/dev/null; exit 127; fi\n[ $c = 0 ] || s=1\n")
+		}
+	}
+	b.WriteString("kill $w 2>/dev/null\n[ $s = 0 ] && echo " + removedWord + "\nexit $s\n}\n")
+	return b.String(), took[0], took[1]
+}
+
+// rmRun runs script, one of rmScript's, with sh, logged as what.
+func (s *sshShell) rmRun(ctx context.Context, what, script string) error {
+	var out bytes.Buffer
+	err := s.execAs(ctx, s.client, "sh", what, heldAfter{strings.NewReader(script)}, &out)
+	var exit *ssh.ExitError
+	switch {
+	case errors.As(err, &exit) && exit.ExitStatus() == 127:
+		return fmt.Errorf("%s: %s: %w: %w", s.proto, what, errNoShell, err)
+	case errors.As(err, &exit) && exit.ExitStatus() == 112:
+		return fmt.Errorf("%s: %s: the folder it is in is not there: %w", s.proto, what, fs.ErrNotExist)
+	case err == nil && !strings.HasSuffix(strings.TrimRight(out.String(), "\r\n"), removedWord):
+		return fmt.Errorf("%s: %s: the server answered %s: %w", s.proto, what, clip(out.String()), errNoShell)
+	case err != nil:
+		return fmt.Errorf("%s: %s: %w", s.proto, what, err)
+	}
+	return nil
+}
+
 // errNoShell is a command the server did not run as it was sent: it runs
 // something else for every command, as ForceCommand internal-sftp does, or
 // it has no such program.
@@ -1077,6 +1213,11 @@ type heldOpen struct{}
 func (heldOpen) Read([]byte) (int, error) {
 	return 0, errors.New("a held input has nothing to read")
 }
+
+// heldAfter is the input of a script that reads its input on, after the
+// script, to see its session end: runFed writes the script and keeps the
+// input open until the command ends (sshShell.RemoveIn).
+type heldAfter struct{ io.Reader }
 
 func (s *sshShell) tailCmd(relPath string, offset int64) string {
 	return fmt.Sprintf("tail -c +%d %s", offset+1, shellQuote(s.abs(relPath)))

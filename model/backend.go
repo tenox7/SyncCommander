@@ -431,7 +431,8 @@ type BatchSender interface {
 // BatchRemover is implemented by backends that remove several entries of
 // one folder in one round trip. An rsync daemon has no delete: each is a
 // --delete run, which lists the folder, so a mirror that deleted V of a
-// folder's N entries one by one listed it V times (R16).
+// folder's N entries one by one listed it V times (R16). Over an ssh shell
+// each was a command, a round trip each.
 type BatchRemover interface {
 	// RemoveIn removes the entries of dir that items name: a file as
 	// Remove does, a folder with what it holds, as RemoveAll does. An

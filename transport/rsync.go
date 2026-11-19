@@ -912,8 +912,8 @@ func (b *RsyncBackend) removeRun(ctx context.Context, label, dir string, items [
 	for _, it := range items {
 		full := path.Join(dir, it.Name)
 		switch {
-		case it.Name == "" || it.Name == "." || it.Name == ".." || strings.Contains(it.Name, "/"):
-			return fmt.Errorf("rsync: %s: %q is no name in a folder", label, it.Name)
+		case !model.IsFileName(it.Name):
+			return fmt.Errorf("rsync: %s: %q is no name in a folder: %w", label, it.Name, fs.ErrInvalid)
 		case strings.ContainsAny(full, "\r\n"):
 			return fmt.Errorf("rsync: a daemon cannot be sent a name with a line break: %q", full)
 		}

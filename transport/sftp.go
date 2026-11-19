@@ -667,6 +667,40 @@ func (b *SFTPBackend) Remove(ctx context.Context, relPath string) error {
 	return err
 }
 
+// RemoveIn removes dir's entries with sh, a script for many
+// (sshShell.RemoveIn), or, on a server whose shell does not run it, with a
+// request for each, as Remove and RemoveAll do. A file that is not there
+// is no failure, as with rm -f.
+func (b *SFTPBackend) RemoveIn(ctx context.Context, dir string, items []model.RemoveItem) error {
+	for _, it := range items {
+		if !model.IsFileName(it.Name) {
+			return fmt.Errorf("sftp: %q is no name in a folder: %w", it.Name, fs.ErrInvalid)
+		}
+	}
+	if ok, _ := b.useShell(ctx); ok {
+		if err := b.sshShell.RemoveIn(ctx, dir, items); !errors.Is(err, errNoShell) {
+			return err
+		}
+	}
+	var first error
+	for _, it := range items {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rel := path.Join(cleanRel(dir), it.Name)
+		var err error
+		if it.IsDir {
+			err = b.RemoveAll(ctx, rel)
+		} else {
+			err = b.Remove(ctx, rel)
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 func (b *SFTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 	if isBaseRel(relPath) {
 		return fmt.Errorf("sftp: refusing to remove the base directory")
