@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/textproto"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,6 +201,14 @@ func isPermanentError(err error) bool {
 	var se *statusError
 	if errors.As(err, &se) {
 		return se.final()
+	}
+	// An FTP reply is read by its class: 5yz is a permanent negative reply
+	// (RFC 959), which the same command gets again. vsftpd's "550 Failed to
+	// open file." for a file gone since the scan was tried six times, some
+	// 15 s, where a server whose words held "no such file" was not (L12).
+	var reply *textproto.Error
+	if errors.As(err, &reply) && reply.Code >= 500 && reply.Code < 600 {
+		return true
 	}
 	var pe *fs.PathError
 	if errors.As(err, &pe) && pe.Err != nil {

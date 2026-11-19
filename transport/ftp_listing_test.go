@@ -53,6 +53,7 @@ type fakeFTPD struct {
 	hashRefuses bool
 	hashSays    string
 	sumReply    string
+	sumFails    string // set, every sum gets this reply in place of one
 	utf8        bool
 	// host is the address the server listens on, its data ports too;
 	// 127.0.0.1 when empty. heard keeps each connection's command lines.
@@ -372,6 +373,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 				reply("502 Command not implemented.")
 				continue
 			}
+			if f.sumFails != "" {
+				reply(f.sumFails)
+				continue
+			}
 			f.mu.Lock()
 			drop := f.dropOnSum
 			f.mu.Unlock()
@@ -416,6 +421,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 		case "HASH":
 			if f.hashFeat == "" {
 				reply("502 Command not implemented.")
+				continue
+			}
+			if f.sumFails != "" {
+				reply(f.sumFails)
 				continue
 			}
 			if algo == "" {

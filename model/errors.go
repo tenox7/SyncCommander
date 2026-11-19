@@ -29,8 +29,9 @@ type kindError struct{ kind, err error }
 func (e *kindError) Error() string   { return e.err.Error() }
 func (e *kindError) Unwrap() []error { return []error{e.kind, e.err} }
 
-// WithKind marks err as being of kind (ErrAuth, ErrUnreachable,
-// ErrConnLost, ErrNoSpace), its message unchanged. nil stays nil.
+// WithKind marks err as being of kind, its message unchanged: one of the
+// kinds above, or another the retry policy reads with errors.Is, as
+// fs.ErrNotExist. nil stays nil.
 func WithKind(kind, err error) error {
 	if err == nil || errors.Is(err, kind) {
 		return err

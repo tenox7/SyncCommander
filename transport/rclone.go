@@ -309,10 +309,23 @@ func (b *RcloneBackend) object(ctx context.Context, relPath string) (fs.Object, 
 	}
 	o, err := b.f.NewObject(ctx, relPath)
 	if err != nil {
-		return nil, err
+		return nil, rcloneErr(err)
 	}
 	b.objs.put(relPath, o)
 	return o, nil
+}
+
+// rcloneErr gives rclone's errors the kinds the retry policy reads (D3):
+// "object not found" read as a passing failure, and a file gone since the
+// scan was asked for six times, some 15 s (L12).
+func rcloneErr(err error) error {
+	switch {
+	case errors.Is(err, fs.ErrorObjectNotFound), errors.Is(err, fs.ErrorDirNotFound):
+		return model.WithKind(os.ErrNotExist, err)
+	case errors.Is(err, fs.ErrorPermissionDenied):
+		return model.WithKind(os.ErrPermission, err)
+	}
+	return err
 }
 
 // Every method cleans its path first (cleanRel): rclone joins a path onto
@@ -859,7 +872,7 @@ func (b *RcloneBackend) Open(ctx context.Context, relPath string) (io.ReadCloser
 	}
 	rc, err := o.Open(ctx)
 	if err != nil {
-		return nil, err
+		return nil, rcloneErr(err)
 	}
 	return LimitReadCloser(ctx, rc), nil
 }
@@ -873,13 +886,13 @@ func (b *RcloneBackend) OpenAt(ctx context.Context, relPath string, offset int64
 	if offset == 0 {
 		rc, err := o.Open(ctx)
 		if err != nil {
-			return nil, err
+			return nil, rcloneErr(err)
 		}
 		return LimitReadCloser(ctx, rc), nil
 	}
 	rc, err := o.Open(ctx, &fs.RangeOption{Start: offset, End: -1})
 	if err != nil {
-		return nil, err
+		return nil, rcloneErr(err)
 	}
 	return LimitReadCloser(ctx, rc), nil
 }

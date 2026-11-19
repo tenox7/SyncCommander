@@ -1759,7 +1759,7 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 			return "", err
 		}
 		if code != 213 {
-			return "", fmt.Errorf("%s: %d %s", cmd, code, msg)
+			return "", fmt.Errorf("%s: %w", cmd, &textproto.Error{Code: code, Msg: msg})
 		}
 		sum, _, _ := strings.Cut(strings.TrimSpace(msg), " ")
 		return ftpSum(cmd, algo, sum)
@@ -1773,7 +1773,11 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 			return "", err
 		}
 		if code != 200 {
-			return "", fmt.Errorf("OPTS HASH %s: %d %s", name, code, msg)
+			err := fmt.Errorf("OPTS HASH %s: %w", name, &textproto.Error{Code: code, Msg: msg})
+			if code >= 500 { // no algo sum to give by HASH, for any file
+				err = model.WithKind(ErrUnsupported, err)
+			}
+			return "", err
 		}
 		h.algo = name
 	}
@@ -1782,7 +1786,7 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 		return "", err
 	}
 	if code != 213 {
-		return "", fmt.Errorf("HASH: %d %s", code, msg)
+		return "", fmt.Errorf("HASH: %w", &textproto.Error{Code: code, Msg: msg})
 	}
 	// 213 SHA-256 0-49 <sum> <name>
 	fields := strings.Fields(msg)
