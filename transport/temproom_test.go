@@ -134,7 +134,7 @@ func TestAFullTempFailsTheFileNotTheCopy(t *testing.T) {
 	}
 	withFree(t, 1<<40) // what fills is the write, not the check
 	ctx := context.Background()
-	_, _, err := stageUpload(ctx, strings.NewReader("data"), "/dev/full", model.PutParams{Mode: 0o644})
+	_, _, _, err := stageUpload(ctx, strings.NewReader("data"), "/dev/full", model.PutParams{Mode: 0o644})
 	fullTemp(t, "stageUpload", err)
 	err = spoolTo(ctx, spoolSource{"data"}, "/dev/full", model.PutParams{Mode: 0o644})
 	fullTemp(t, "spoolTo", err)

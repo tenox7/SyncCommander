@@ -402,7 +402,10 @@ func (l *rsyncListing) unreadBy(msg string) ([]string, bool) {
 // progress counter until the returned stop runs: the growth beyond skip of
 // the file itself for a receive in place (--append), else of rsync's temp
 // file (see tailDirSize). stop(true), after a receive that worked, credits
-// what the last look missed: the file is all there. Without a counter it
+// what the last look missed: the file is all there. stop(false) takes back
+// what was credited: rsync takes away what a failed receive wrote, and the
+// try that follows receives, and credits, it again. It stayed, and a file
+// that failed once counted more than its size (R14). Without a counter it
 // is a no-op.
 func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int64) func(ok bool) {
 	counter := progressFromContext(ctx)
@@ -427,7 +430,14 @@ func tailProgress(ctx context.Context, dir, base string, inplace bool, skip int6
 	return func(ok bool) {
 		close(stop)
 		<-done
-		if ok && known {
+		if !ok {
+			counter.Add(-adder.Used())
+			if baseAdder != nil {
+				baseProgressFromContext(ctx).Add(-baseAdder.Used())
+			}
+			return
+		}
+		if known {
 			adder.Add(size)
 		}
 	}
@@ -540,15 +550,19 @@ func appendVerifySilence(offset int64) time.Duration { return 2 * HashTime(offse
 
 // stageUpload spools src into tmpFile so rsync can send from disk, crediting
 // half the progress budget for the read (the push credits the rest). Returns
-// the push-phase adder and its budget, nil without progress. A file the
-// temp folder has no room for fails before a byte is read (roomFor).
-func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.PutParams) (*CappedAdder, int64, error) {
+// the push-phase adder and its budget, nil without progress, and unstage,
+// which takes back what the read credited: the caller runs it when the push
+// fails, as the staged file goes with it and the try that follows stages,
+// and credits, it again. Only the push half was taken back, and a file that
+// failed once counted one and a half times its size (R14). A file the temp
+// folder has no room for fails before a byte is read (roomFor).
+func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.PutParams) (*CappedAdder, int64, func(), error) {
 	if err := roomFor(filepath.Dir(tmpFile), p.Size); err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, p.Mode)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	counter := progressFromContext(ctx)
 	fileSize := max(p.Size, 0)
@@ -575,13 +589,16 @@ func stageUpload(ctx context.Context, src io.Reader, tmpFile string, p model.Put
 	if err == nil {
 		err = stampModTime(tmpFile, p.ModTime)
 	}
-	if err != nil {
+	unstage := func() {
 		if readAdder != nil {
 			counter.Add(-readAdder.Used())
 		}
-		return nil, 0, err
 	}
-	return pushAdder, pushBudget, nil
+	if err != nil {
+		unstage()
+		return nil, 0, nil, err
+	}
+	return pushAdder, pushBudget, unstage, nil
 }
 
 // spoolTo writes the whole source into path so rsync can send it from disk.

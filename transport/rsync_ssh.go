@@ -478,9 +478,13 @@ func (b *RsyncSSHBackend) CopyFrom(ctx context.Context, relPath string, src io.R
 	}
 	defer os.RemoveAll(tmpDir)
 	tmpFile := filepath.Join(tmpDir, filepath.Base(relPath))
-	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, p)
+	pushAdder, pushBudget, unstage, err := stageUpload(ctx, src, tmpFile, p)
 	if err != nil {
 		return err
 	}
-	return b.sendFile(ctx, "SEND "+relPath+" via", tmpFile, relPath, "", nil, pushAdder, pushBudget)
+	if err := b.sendFile(ctx, "SEND "+relPath+" via", tmpFile, relPath, "", nil, pushAdder, pushBudget); err != nil {
+		unstage()
+		return err
+	}
+	return nil
 }

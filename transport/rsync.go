@@ -743,7 +743,7 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err != nil {
 		return err
 	}
-	pushAdder, pushBudget, err := stageUpload(ctx, src, tmpFile, p)
+	pushAdder, pushBudget, unstage, err := stageUpload(ctx, src, tmpFile, p)
 	if err != nil {
 		return err
 	}
@@ -751,6 +751,8 @@ func (b *RsyncBackend) CopyFrom(ctx context.Context, relPath string, src io.Read
 	if err == nil {
 		b.noteSent(relPath, tmpFile)
 		b.sawDirs(parentDir(relPath))
+	} else {
+		unstage()
 	}
 	b.listCache.invalidateAncestors(relPath)
 	return err
