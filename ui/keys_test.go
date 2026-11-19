@@ -61,6 +61,27 @@ func TestCursorKeysMoveBothPanels(t *testing.T) {
 	}
 }
 
+// Home and End put the cursor on the first and the last row of both
+// panels, and scroll so that the row shows.
+func TestHomeAndEndJumpToTheFirstAndLastRow(t *testing.T) {
+	m := scannedModel(t, "fake://tiny", "fake://tiny")
+	press(m, "}") // expand all: more rows than one page
+	p, o := m.left.panel, m.right.panel
+	last := len(p.rows) - 1
+	if last < p.height {
+		t.Fatalf("%d rows fit on a page of %d: the test needs more", last+1, p.height)
+	}
+	press(m, "down")
+	press(m, "end")
+	if off := last - p.height + 1; p.cursor != last || o.cursor != last || p.offset != off || o.offset != off {
+		t.Fatalf("end: cursors %d/%d offsets %d/%d, want cursor %d offset %d", p.cursor, o.cursor, p.offset, o.offset, last, off)
+	}
+	press(m, "home")
+	if p.cursor != 0 || o.cursor != 0 || p.offset != 0 || o.offset != 0 {
+		t.Fatalf("home: cursors %d/%d offsets %d/%d, want 0", p.cursor, o.cursor, p.offset, o.offset)
+	}
+}
+
 func TestExpandAllAndCollapseAllKeys(t *testing.T) {
 	m := scannedModel(t, "fake://tiny", "fake://tiny")
 	top := 1 + len(m.scanner.Tree().Children)

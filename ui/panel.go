@@ -105,6 +105,17 @@ func (p *Panel) PageDown() {
 	p.clampOffset()
 }
 
+// Home puts the cursor on the first row, and End on the last row.
+func (p *Panel) Home() {
+	p.cursor = 0
+	p.clampOffset()
+}
+
+func (p *Panel) End() {
+	p.cursor = max(len(p.rows)-1, 0)
+	p.clampOffset()
+}
+
 // Toggle folds or unfolds the cursor node and says whether there was one.
 // Runs under changeView.
 func (p *Panel) Toggle() bool {

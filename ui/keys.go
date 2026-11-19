@@ -65,6 +65,10 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 		m.move((*Panel).PageUp)
 	case "pgdown":
 		m.move((*Panel).PageDown)
+	case "home":
+		m.move((*Panel).Home)
+	case "end":
+		m.move((*Panel).End)
 	case "enter", "right", "l":
 		return m.toggleCursor()
 	case "left", "h":

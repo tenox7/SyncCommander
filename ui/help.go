@@ -27,6 +27,7 @@ var helpNavigation = []helpEntry{
 	{"{", "Collapse all"},
 	{"Tab", "Switch panel"},
 	{"PgUp/Dn", "Page up / down"},
+	{"Home/End", "First / last row"},
 	{"n", "Next difference"},
 	{"/", "Search (regex)"},
 	{"i", "Info / statistics"},
