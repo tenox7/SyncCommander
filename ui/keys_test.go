@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,6 +82,50 @@ func TestHomeAndEndJumpToTheFirstAndLastRow(t *testing.T) {
 	if p.cursor != 0 || o.cursor != 0 || p.offset != 0 || o.offset != 0 {
 		t.Fatalf("home: cursors %d/%d offsets %d/%d, want 0", p.cursor, o.cursor, p.offset, o.offset)
 	}
+}
+
+// msgTypes runs cmd, and each command of a batch, and gives the types of
+// the messages they send.
+func msgTypes(cmd tea.Cmd) []string {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	b, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []string{fmt.Sprintf("%T", msg)}
+	}
+	var types []string
+	for _, c := range b {
+		types = append(types, msgTypes(c)...)
+	}
+	return types
+}
+
+// Ctrl+L clears the screen and draws it again at the terminal's size: on
+// the panels, under a dialog or the log, and while a copy runs. It did
+// nothing in the last three.
+func TestCtrlLRedrawsTheScreenEverywhere(t *testing.T) {
+	m := scannedModel(t, "fake://tiny", "fake://tiny")
+	want := []string{fmt.Sprintf("%T", tea.ClearScreen()), fmt.Sprintf("%T", tea.WindowSize()())}
+	slices.Sort(want)
+	check := func(where string) {
+		t.Helper()
+		got := msgTypes(press(m, "ctrl+l"))
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("ctrl+l %s sent %v, want %v", where, got, want)
+		}
+	}
+	check("on the panels")
+	press(m, "~")
+	check("in the log")
+	press(m, "esc")
+	press(m, "?")
+	check("in the help")
+	press(m, "esc")
+	runningOp(m, opCopy, nil)
+	check("while a copy runs")
 }
 
 func TestExpandAllAndCollapseAllKeys(t *testing.T) {

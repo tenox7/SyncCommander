@@ -4,13 +4,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// handleKey routes a key press: ctrl+c always quits, an open dialog owns the
-// keyboard, a running write allows only its own few keys.
+// handleKey routes a key press: ctrl+c always quits and ctrl+l always
+// redraws the screen, an open dialog owns the keyboard, a running write
+// allows only its own few keys.
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	if k == "ctrl+c" {
 		m.cancelOps()
 		return m, tea.Quit
+	}
+	if k == "ctrl+l" {
+		return m, redraw()
 	}
 	if d := m.openModal(); d != nil {
 		cmd := m.handleModalKey(d, msg)
@@ -26,6 +30,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	return m, m.handleTreeKey(k)
 }
+
+// redraw is ctrl+l: it clears the screen and draws every line again, at the
+// size the terminal has now, in case a resize came without notice. It
+// worked only on the panels: under a dialog or the log, or while a copy
+// ran, text that another program wrote over sc stayed on the screen.
+func redraw() tea.Cmd { return tea.Batch(tea.ClearScreen, tea.WindowSize()) }
 
 // handleWriteKey is the key set while a copy, a delete, a rename or a touch
 // runs: the write holds the keys, so nothing starts beside it (mayStart).
@@ -111,8 +121,6 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 		m.right.panel.wrap = !m.right.panel.wrap
 	case "\\":
 		m.relativeCounts = !m.relativeCounts
-	case "ctrl+l":
-		return tea.ClearScreen
 	case "?":
 		m.help.Open()
 	case "~", "`":
