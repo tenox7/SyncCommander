@@ -178,8 +178,8 @@ func (b *lazyBackend) markBrokenIf(inner model.Backend, err error) error {
 
 // redialsItself reports whether inner makes its own connections again
 // (Caps.RedialsItself): a lost one fails the call it met, and the retry
-// goes to inner. Dropped and made again, an rclone, WebDAV or restic
-// backend lost its caches, and its running recursive listing went on
+// goes to inner. Dropped and made again, an rclone, WebDAV, restic or
+// rsync daemon backend lost its caches, and its running recursive listing went on
 // filling a cache no call read any more: a scan of a large bucket went on
 // folder by folder (L19, W-X3). Capabilities ask nothing of the server.
 func redialsItself(inner model.Backend) bool {

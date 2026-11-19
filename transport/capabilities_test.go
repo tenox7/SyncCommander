@@ -51,9 +51,10 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		if owns := name == "rsync" || name == "rsync+ssh"; caps.OwnsProgress != owns {
 			t.Errorf("%s: OwnsProgress = %v, want %v", name, caps.OwnsProgress, owns)
 		}
-		// L19: the HTTP backends and rclone's make their own connections
-		// again; those with a connection to lose do not.
-		if redials := name == "webdav" || name == "restic" || name == "rclone"; caps.RedialsItself != redials {
+		// L19, R8: the HTTP backends, rclone's and the rsync daemon's make
+		// their own connections again; those with a connection to lose do
+		// not.
+		if redials := name == "webdav" || name == "restic" || name == "rclone" || name == "rsync"; caps.RedialsItself != redials {
 			t.Errorf("%s: RedialsItself = %v, want %v", name, caps.RedialsItself, redials)
 		}
 		if known := name == "local"; (caps.Names.Case != model.FoldUnknown) != known {

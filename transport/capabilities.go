@@ -35,10 +35,14 @@ func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true}, nil
 }
 
-// A daemon deletes a folder's entries in one run (R16).
+// A daemon deletes a folder's entries in one run (R16). Each call dials
+// the daemon by itself, so a lost connection fails the call it met, never
+// the backend (RedialsItself): stock rsyncd resets the connection when a
+// path is not there, and the backend was dropped with its listing cache,
+// its running listing left to fill it, and the mtimes uploads sent (R8).
 func (b *RsyncBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, OpenAt: true, SendLocal: true, RecvLocal: true, Preload: true,
-		PrefetchSums: true, BatchRemove: true, OwnsProgress: true}, nil
+		PrefetchSums: true, BatchRemove: true, OwnsProgress: true, RedialsItself: true}, nil
 }
 
 func (b *FTPBackend) Capabilities(context.Context) (model.Caps, error) {
