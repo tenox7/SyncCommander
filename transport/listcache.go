@@ -41,6 +41,7 @@ type listCache struct {
 	retryProto string             // set: a failed run is tried again (retryingRuns)
 	kept       map[string]bool    // folders an earlier try of the run listed in full
 	cutShort   bool               // the latest run ended cut off (runRetryable): resume runs it again
+	index      folderIndex        // the folders entries and complete hold, by the folder each is in (W-M8)
 }
 
 // listCacheCarrier is a backend whose list cache goes on with the backend
@@ -63,6 +64,7 @@ func newListCache() *listCache {
 func (c *listCache) reset() {
 	c.entries = make(map[string][]model.FileEntry)
 	c.complete = make(map[string]bool)
+	c.index = make(folderIndex)
 	c.stale, c.staleTree = nil, nil
 	c.kept = nil
 }
@@ -310,6 +312,7 @@ func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
 		return // a folder an earlier try listed in full: no second copy
 	}
 	c.entries[parent] = append(c.entries[parent], entries...)
+	c.index.add(parent)
 }
 
 // fill keeps the whole listing of dir that a live call got while it listed
@@ -341,6 +344,7 @@ func (c *listCache) markCompleteLocked(dir string) {
 			c.entries[dir] = nil
 		}
 	}
+	c.index.add(dir) // fill keeps dir's entries even when a write marked it
 	c.cond.Broadcast()
 }
 
@@ -451,17 +455,16 @@ func (c *listCache) forgetRemoved(relPath string) {
 	c.invalidate(parentDir(relPath))
 }
 
+// invalidateTree drops the listing of prefix and those of the folders
+// under it, walking those alone: it looked at every folder held, for each
+// file deleted or moved too (W-M8).
 func (c *listCache) invalidateTree(prefix string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for k := range c.entries {
-		if k == prefix || strings.HasPrefix(k, prefix+"/") {
-			c.drop(k)
-		}
-	}
+	c.index.cut(prefix, c.drop)
 	if c.running() {
 		if c.staleTree == nil {
 			c.staleTree = make(map[string]bool)

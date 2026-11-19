@@ -68,7 +68,7 @@ type WebDAVBackend struct {
 	availAlgos []string // the checksums the server gives; nil until asked
 	sums       *wdSumCache
 	listCache  *listCache
-	dirs       sync.Map // collections known to exist, so uploads skip the MKCOL walk
+	dirs       dirMemo  // collections known to exist, so uploads skip the MKCOL walk
 	mkcols     sync.Map // in-flight MKCOLs by dir, so racing uploads send only one
 	noInfinity atomic.Bool
 	// The mtime a copy sets (W-M4). putMtime holds, by path, the time a
@@ -810,7 +810,7 @@ func (b *WebDAVBackend) CopyFrom(ctx context.Context, relPath string, src io.Rea
 			b.headerSets.Store(true)
 		}
 	}
-	b.dirs.Store(parentDir(relPath), struct{}{})
+	b.dirs.know(parentDir(relPath))
 	b.sums.invalidate(relPath)
 	b.listCache.invalidateAncestors(relPath)
 	return nil
@@ -834,7 +834,7 @@ func (b *WebDAVBackend) remakeParent(ctx context.Context, relPath, status string
 		return err
 	}
 	for d := dir; d != ""; d = parentDir(d) {
-		b.dirs.Delete(d)
+		b.dirs.forget(d)
 	}
 	if merr := b.ensureDir(ctx, dir); merr != nil {
 		return &fs.PathError{Op: "PUT", Path: relPath, Err: fmt.Errorf("%s, and its folder could not be made: %w", status, merr)}
@@ -847,15 +847,11 @@ func (b *WebDAVBackend) remakeParent(ctx context.Context, relPath, status string
 
 // forgetDirs drops rel and the folders under it from the memo of folders
 // that are there: deleted or moved. Any delete or rename emptied the memo,
-// and every folder then cost a MKCOL again (W-M5).
+// and every folder then cost a MKCOL again (W-M5). It looked at every
+// folder known, each a listing showed, on each delete of a file too: now
+// it walks those under rel alone (W-M8).
 func (b *WebDAVBackend) forgetDirs(rel string) {
-	rel = strings.Trim(rel, "/")
-	b.dirs.Range(func(k, _ any) bool {
-		if d := k.(string); rel == "" || d == rel || strings.HasPrefix(d, rel+"/") {
-			b.dirs.Delete(k)
-		}
-		return true
-	})
+	b.dirs.forgetTree(strings.Trim(rel, "/"))
 }
 
 // knowDir puts rel into the memo of folders that are there: a listing
@@ -863,8 +859,13 @@ func (b *WebDAVBackend) forgetDirs(rel string) {
 // listing showed cost a MKCOL (W-M5).
 func (b *WebDAVBackend) knowDir(rel string) {
 	if rel = strings.Trim(rel, "/"); rel != "" {
-		b.dirs.Store(rel, struct{}{})
+		b.dirs.know(rel)
 	}
+}
+
+// knowsDir reports whether rel is in the memo of folders that are there.
+func (b *WebDAVBackend) knowsDir(rel string) bool {
+	return b.dirs.knows(strings.Trim(rel, "/"))
 }
 
 func (b *WebDAVBackend) Mkdir(ctx context.Context, relPath string, _ os.FileMode) error {
@@ -893,7 +894,7 @@ func (b *WebDAVBackend) ensureDir(ctx context.Context, dir string) error {
 	if dir == "" {
 		return nil
 	}
-	if _, ok := b.dirs.Load(dir); ok {
+	if b.knowsDir(dir) {
 		return nil
 	}
 	if err := b.ensureDir(ctx, parentDir(dir)); err != nil {
@@ -923,7 +924,7 @@ func (b *WebDAVBackend) mkcolOnce(ctx context.Context, dir string) error {
 	drainClose(resp.Body)
 	switch code := resp.StatusCode; {
 	case code/100 == 2, code == http.StatusMethodNotAllowed, code == http.StatusConflict:
-		b.dirs.Store(dir, struct{}{})
+		b.dirs.know(dir)
 		return nil
 	default:
 		return statusErr(resp, "MKCOL %s", dir)
