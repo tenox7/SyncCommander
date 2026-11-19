@@ -159,7 +159,7 @@ func TestDeleteDialogSaysWhatTheFolderHolds(t *testing.T) {
 		{false, "big", "0+ files, 0+ folders (not fully scanned)"},
 	} {
 		lb, rb := openBackendOrSkip(t, left), openBackendOrSkip(t, right)
-		m := NewModel(lb, rb, lb.BasePath(), rb.BasePath(), &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true}, false, c.deep, 2, 8, false, false)
+		m := NewModel(lb, rb, lb.BasePath(), rb.BasePath(), &model.CompareOpts{Size: true, ModTime: true, TimeGrace: true}, false, c.deep, 2, 8, false, false, false)
 		m.width, m.height = 120, 40
 		m.layoutPanels()
 		m.scanner.Scan(context.Background(), *m.cmpOpts)

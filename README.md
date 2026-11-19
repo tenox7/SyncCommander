@@ -17,6 +17,7 @@ A tool for manual comparison, inspection, verification and troubleshooting of fi
 - Parallel copies.
 - Batch copies for small files.
 - Mouse: wheel moves the cursor, click selects, double-click or a click on the arrow expands/collapses; `-mouse=false` to disable.
+- Counts: `\` switches the dirs, files and sizes, in the top bars and on every row, between how much more (+) or less (-) a side holds than the other side and what it holds; `-relative=false` starts with what it holds.
 
 ## Bandwidth limit
 

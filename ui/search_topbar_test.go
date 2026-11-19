@@ -110,9 +110,11 @@ func TestTopBarIsOneLine(t *testing.T) {
 	stats := &TreeStats{LeftFiles: 12345678, RightFiles: 1, LeftDirs: 123456, RightDirs: 2, LeftSize: 9 << 40, RightSize: 1}
 	for _, w := range []int{1, 2, 10, 40} {
 		for _, left := range []bool{true, false} {
-			bar := ansi.Strip(RenderPanelTopBar(stats, left, "⠋ checksumming...", w))
-			if strings.Contains(bar, "\n") || ansi.StringWidth(bar) > max(w, 2) {
-				t.Errorf("width %d: the bar is %q", w, bar)
+			for _, relative := range []bool{false, true} {
+				bar := ansi.Strip(RenderPanelTopBar(stats, left, relative, "⠋ checksumming...", w))
+				if strings.Contains(bar, "\n") || ansi.StringWidth(bar) > max(w, 2) {
+					t.Errorf("width %d: the bar is %q", w, bar)
+				}
 			}
 		}
 	}

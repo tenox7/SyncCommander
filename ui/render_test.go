@@ -80,8 +80,22 @@ func TestDeletePopupClampsProgress(t *testing.T) {
 
 func TestPanelTopBarDeltasFollowTheSide(t *testing.T) {
 	stats := &TreeStats{LeftDirs: 3, RightDirs: 1, LeftFiles: 10, RightFiles: 12, LeftSize: 3 << 10, RightSize: 1 << 10}
-	wantAll(t, "left top bar", ansi.Strip(RenderPanelTopBar(stats, true, "", 60)), "+2d -2f +")
-	wantAll(t, "right top bar", ansi.Strip(RenderPanelTopBar(stats, false, "", 60)), "-2d +2f -")
+	wantAll(t, "left top bar", ansi.Strip(RenderPanelTopBar(stats, true, true, "", 60)), "+2d -2f +2.0K")
+	wantAll(t, "right top bar", ansi.Strip(RenderPanelTopBar(stats, false, true, "", 60)), "-2d +2f -2.0K")
+}
+
+// Absolute, each top bar shows what its own side holds, with no sign.
+func TestPanelTopBarTotalsFollowTheSide(t *testing.T) {
+	stats := &TreeStats{LeftDirs: 3, RightDirs: 1, LeftFiles: 10, RightFiles: 12, LeftSize: 3 << 10, RightSize: 1 << 10}
+	for _, c := range []struct {
+		left bool
+		want string
+	}{{true, "3d 10f 3.0K"}, {false, "1d 12f 1.0K"}} {
+		bar := ansi.Strip(RenderPanelTopBar(stats, c.left, false, "", 60))
+		if !strings.Contains(bar, c.want) || strings.ContainsAny(bar, "+-") {
+			t.Errorf("left %v: the bar is %q, want %q and no sign", c.left, bar, c.want)
+		}
+	}
 }
 
 func TestDialogsRenderWithinTheScreen(t *testing.T) {

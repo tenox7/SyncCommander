@@ -22,7 +22,11 @@ type Panel struct {
 	side    model.Side
 	wrap    bool
 	cmpOpts *model.CompareOpts
-	spinner string
+	// relative points at the model's switch (\): the size and the d and f
+	// columns show how much more (+) or less (-) this side holds than the
+	// other side, not what it holds.
+	relative *bool
+	spinner  string
 }
 
 func NewPanel(title string, side model.Side) *Panel {
@@ -398,6 +402,10 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 	return fmt.Sprintf("%s %s %s  %s", chrome, label, st, val)
 }
 
+// inlineInfo is a row's columns on the right: a file's age and size, a
+// folder's dirs, files and size. Relative (\), a size or count is this
+// side's less the other side's, and the age stays as it is. A row whose
+// differences are all zero shows none, so the rows that differ stand out.
 func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	entry := node.Sides[p.side].Entry
 	if entry == nil {
@@ -406,10 +414,29 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	if entry.IsSpecial() {
 		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), shortKind(entry)))
 	}
+	relative := p.relative != nil && *p.relative
 	if !entry.IsDir {
-		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), model.FormatSize(entry.Size)))
+		size := model.FormatSize(entry.Size)
+		if relative {
+			d := entry.Size
+			if o := node.Sides[p.side.Other()].Entry; o != nil {
+				d -= o.Size
+			}
+			size = ""
+			if d != 0 {
+				size = formatSizeDelta(d)
+			}
+		}
+		return styleChrome.Render(fmt.Sprintf("%8s %7s", model.TimeAgo(entry.ModTime), size))
 	}
-	t := node.Totals(p.side)
+	t, o := node.Totals(p.side), node.Totals(p.side.Other())
+	if relative {
+		if t == o {
+			return ""
+		}
+		return styleChrome.Render(fmt.Sprintf("%4sd %5sf %7s",
+			formatDelta(t.Dirs-o.Dirs), formatDelta(t.Files-o.Files), formatSizeDelta(t.Size-o.Size)))
+	}
 	if t.Dirs == 0 && t.Files == 0 {
 		return ""
 	}

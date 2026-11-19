@@ -29,13 +29,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleWriteKey is the key set while a copy, a delete, a rename or a touch
 // runs: the write holds the keys, so nothing starts beside it (mayStart).
-// x stops it; + and - change a copy's files in flight.
+// x stops it; + and - change a copy's files in flight. \ changes only what
+// the counts show, so it works here too.
 func (m *Model) handleWriteKey(k string) {
 	switch k {
 	case "x", "X":
 		m.stopWrite()
 	case "~", "`":
 		m.logView.Open()
+	case "\\":
+		m.relativeCounts = !m.relativeCounts
 	case "-":
 		m.adjustCopyParallel(-1)
 	case "+", "=":
@@ -102,6 +105,8 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 	case "w":
 		m.left.panel.wrap = !m.left.panel.wrap
 		m.right.panel.wrap = !m.right.panel.wrap
+	case "\\":
+		m.relativeCounts = !m.relativeCounts
 	case "ctrl+l":
 		return tea.ClearScreen
 	case "?":

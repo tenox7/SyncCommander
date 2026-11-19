@@ -347,28 +347,27 @@ func progressBar(done, total int64, barWidth int) string {
 	return bar + strings.Repeat("░", barWidth-full)
 }
 
-func RenderPanelTopBar(stats *TreeStats, isLeft bool, prefix string, width int) string {
+// RenderPanelTopBar is one panel's top line: the dirs, files and size its
+// side holds or, relative (\), how much more (+) or less (-) it holds than
+// the other side.
+func RenderPanelTopBar(stats *TreeStats, isLeft, relative bool, prefix string, width int) string {
 	var sb strings.Builder
 	if prefix != "" {
 		sb.WriteString(prefix)
 		sb.WriteString("  ")
 	}
 	if stats != nil {
-		var dirDelta, fileDelta int
-		var sizeDelta int64
-		if isLeft {
-			dirDelta = stats.LeftDirs - stats.RightDirs
-			fileDelta = stats.LeftFiles - stats.RightFiles
-			sizeDelta = stats.LeftSize - stats.RightSize
-		} else {
-			dirDelta = stats.RightDirs - stats.LeftDirs
-			fileDelta = stats.RightFiles - stats.LeftFiles
-			sizeDelta = stats.RightSize - stats.LeftSize
+		dirs, files, size := stats.LeftDirs, stats.LeftFiles, stats.LeftSize
+		oDirs, oFiles, oSize := stats.RightDirs, stats.RightFiles, stats.RightSize
+		if !isLeft {
+			dirs, files, size, oDirs, oFiles, oSize = oDirs, oFiles, oSize, dirs, files, size
 		}
-		sb.WriteString(fmt.Sprintf("%sd %sf %s",
-			formatDelta(dirDelta),
-			formatDelta(fileDelta),
-			formatSizeDelta(sizeDelta)))
+		if relative {
+			sb.WriteString(fmt.Sprintf("%sd %sf %s",
+				formatDelta(dirs-oDirs), formatDelta(files-oFiles), formatSizeDelta(size-oSize)))
+		} else {
+			sb.WriteString(fmt.Sprintf("%dd %df %s", dirs, files, model.FormatSize(size)))
+		}
 	}
 	// One line: a longer text wrapped onto a second, and the two halves,
 	// joined with +, broke the top of the screen (U24). The bar's padding

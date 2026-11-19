@@ -46,8 +46,8 @@ func (m *Model) View() string {
 		operation = spinner + " checksumming..."
 	}
 	m.setPanelSpinners(spinner, progress)
-	topBar := RenderPanelTopBar(m.cachedStats, true, operation, m.left.panel.width) +
-		RenderPanelTopBar(m.cachedStats, false, operation, m.right.panel.width)
+	topBar := RenderPanelTopBar(m.cachedStats, true, m.relativeCounts, operation, m.left.panel.width) +
+		RenderPanelTopBar(m.cachedStats, false, m.relativeCounts, operation, m.right.panel.width)
 	status := m.buildStatus(progress)
 	status.Spinner = spinner
 	var left, right string

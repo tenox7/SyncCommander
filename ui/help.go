@@ -33,6 +33,7 @@ var helpNavigation = []helpEntry{
 	{"~", "Remote protocol log"},
 	{"=", "Settings"},
 	{"w", "Toggle line wrap"},
+	{"\\", "Toggle relative counts"},
 	{"Ctrl+L", "Redraw screen"},
 	{"q", "Quit"},
 }

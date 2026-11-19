@@ -52,6 +52,7 @@ func main() {
 	deepScan := flag.Bool("deep-scan", true, "scan recursively at startup (false: list root + top level only, expand on demand)")
 	verifyResume := flag.Bool("verify-resume", true, "checksum-verify a resumed (appended) copy; on mismatch recopy the file in full")
 	mouse := flag.Bool("mouse", true, "mouse support (false: leave text selection to the terminal)")
+	relative := flag.Bool("relative", true, "show the dirs, files and sizes as how much more (+) or less (-) each side holds than the other (false: what each side holds); \\ toggles")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address, unauthenticated: keep it on localhost (e.g. localhost:6060)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
@@ -149,7 +150,7 @@ func main() {
 	// The model owns the backends from here: it closes those its panes
 	// hold, and waits for those a reopen replaced. main closed the first
 	// pair as well, so after a reopen they were closed twice (U25).
-	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume)
+	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume, *relative)
 	progOpts := []tea.ProgramOption{tea.WithAltScreen()}
 	if *mouse {
 		progOpts = append(progOpts, tea.WithMouseCellMotion())

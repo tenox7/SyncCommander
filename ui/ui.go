@@ -53,6 +53,9 @@ type Model struct {
 	parallelMax    int
 	batchTransfer  bool
 	verifyResume   bool
+	// relativeCounts (\) shows the sizes and counts, in the top bars and on
+	// each row, as how much more or less a side holds than the other side.
+	relativeCounts bool
 
 	activeLeft    bool
 	lastSelect    time.Time // last click that only moved the cursor, for double-click
@@ -89,7 +92,7 @@ type Model struct {
 	rowsBuilt      bool
 }
 
-func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume bool) *Model {
+func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *model.CompareOpts, insecure, deepScan bool, copyParallel, scanParallel int, batchTransfer, verifyResume, relativeCounts bool) *Model {
 	copyParallel, scanParallel = max(copyParallel, 1), max(scanParallel, 1)
 	lp := NewPanel(left.BasePath(), model.SideLeft)
 	rp := NewPanel(right.BasePath(), model.SideRight)
@@ -105,6 +108,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		scanParallel:   scanParallel,
 		batchTransfer:  batchTransfer,
 		verifyResume:   verifyResume,
+		relativeCounts: relativeCounts,
 		settings:       NewSettingsDialog(),
 		input:          NewInputDialog(),
 		confirm:        NewConfirmDialog(),
@@ -120,6 +124,8 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 	}
 	lp.cmpOpts = m.cmpOpts
 	rp.cmpOpts = m.cmpOpts
+	lp.relative = &m.relativeCounts
+	rp.relative = &m.relativeCounts
 	m.settings.SetOptions([]Option{
 		{Label: "Size", Value: &m.cmpOpts.Size},
 		{Label: "Modify time", Value: &m.cmpOpts.ModTime},
@@ -136,6 +142,7 @@ func NewModel(left, right model.Backend, leftArg, rightArg string, cmpOpts *mode
 		{Label: "Parallel copies", IntValue: &m.copyParallel, IntMin: 1, IntMax: m.parallelMax},
 		{Label: "Bandwidth limit in", GetRate: transport.BandwidthIn, SetRate: transport.SetBandwidthIn},
 		{Label: "Bandwidth limit out", GetRate: transport.BandwidthOut, SetRate: transport.SetBandwidthOut},
+		{Label: "Counts relative to the other side (\\)", Value: &m.relativeCounts},
 	})
 	return m
 }
