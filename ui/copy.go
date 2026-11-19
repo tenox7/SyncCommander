@@ -257,6 +257,14 @@ func (m *Model) tickSlotSpins(now time.Time) {
 	next := make(map[string]slotSpin, len(m.slotSpins))
 	for _, s := range m.copyProgress.SnapshotSlots() {
 		prev, seen := m.slotSpins[s.File]
+		if !s.Active {
+			// A free slot's row shows the file that ended in it as it was:
+			// its spinner and its speed hold still.
+			if seen {
+				next[s.File] = prev
+			}
+			continue
+		}
 		if !seen || prev.bytes != s.Bytes {
 			prev.frame = (prev.frame + 1) % len(spinnerFrames)
 		}

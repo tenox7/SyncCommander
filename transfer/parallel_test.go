@@ -113,10 +113,51 @@ func TestCopyRaisedMidRunStartsMoreFiles(t *testing.T) {
 
 	p.SetParallel(4)
 	waitFor(t, "4 files in flight", func() bool { return dst.running.Load() == 4 })
-	if got := len(p.SnapshotSlots()); got != 4 {
-		t.Fatalf("popup has %d rows for 4 files in flight", got)
+	active := 0
+	for _, s := range p.SnapshotSlots() {
+		if s.Active {
+			active++
+		}
+	}
+	if active != 4 {
+		t.Fatalf("popup has %d rows in flight for 4 files in flight", active)
 	}
 	finishAll(t, dst, done, p, 8)
+}
+
+// The popup gave a row to the slots in flight only: a file that ended a
+// moment before the next one took its slot took its row with it for a tick,
+// and the popup jumped by a row. A free slot now stays in its place with the
+// file that ended in it, and a slot in flight always has its file.
+func TestAFreeSlotKeepsItsPlaceAndItsFile(t *testing.T) {
+	p := &Progress{}
+	p.Reset(2, true)
+	dst, done := startGatedCopy(t, 2, 2, p)
+	waitFor(t, "2 files in flight", func() bool { return dst.running.Load() == 2 })
+	for _, s := range p.SnapshotSlots() {
+		if !s.Active || s.File == "" || s.Start == 0 || s.End != 0 {
+			t.Fatalf("a slot in flight is %+v, want its file, its start and no end", s)
+		}
+	}
+	dst.release <- struct{}{}
+	waitFor(t, "a file done", func() bool { return p.Done.Load() == 1 })
+	slots := p.SnapshotSlots()
+	if len(slots) != 2 {
+		t.Fatalf("%d slots after a file ended, want 2: %+v", len(slots), slots)
+	}
+	free := 0
+	for _, s := range slots {
+		if !s.Active {
+			free++
+			if !strings.HasPrefix(s.File, "d/f") || s.Bytes != 1 || s.End == 0 {
+				t.Errorf("the free slot is %+v, want the file that ended in it, its byte and its end", s)
+			}
+		}
+	}
+	if free != 1 {
+		t.Errorf("%d free slots, want 1: %+v", free, slots)
+	}
+	finishAll(t, dst, done, p, 2)
 }
 
 // + pressed while the subtree is still being listed, before the workers

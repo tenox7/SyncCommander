@@ -649,11 +649,8 @@ func (c *copier) copyOne(f item) {
 		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
 		return
 	}
-	slot := p.claimSlot()
+	slot := p.claimSlot(f.relPath, srcEntry.Size)
 	defer p.releaseSlot(slot)
-	slot.File.Store(f.relPath)
-	slot.Size.Store(srcEntry.Size)
-	slot.Start.Store(time.Now().UnixNano())
 	slotBytes, slotBase := &slot.Bytes, &slot.BaseBytes
 	p.File.Store(f.relPath)
 	p.beginFile(srcEntry.Size)

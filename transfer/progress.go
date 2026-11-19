@@ -54,22 +54,28 @@ func (p *Progress) SetParallel(n int) {
 // Slot tracks one in-flight file for the multi-slot popup. Each parallel
 // worker claims a slot at start and releases it at the end; the transport
 // writes byte deltas into Bytes via the context counter. Slots are added as
-// workers need them, since + can raise the worker count mid-copy.
+// workers need them, since + can raise the worker count mid-copy. A free
+// slot keeps the file that ended in it until the next file claims it.
 type Slot struct {
 	File      atomic.Value
 	Size      atomic.Int64
 	Bytes     atomic.Int64
 	BaseBytes atomic.Int64
 	Start     atomic.Int64
+	End       atomic.Int64 // when its file ended, UnixNano; 0 while one is in flight
 	Active    atomic.Bool
 }
 
+// SlotSnapshot is one slot as the popup draws it. A free slot (not Active)
+// holds the file that ended in it, or none.
 type SlotSnapshot struct {
 	File      string
 	Size      int64
 	Bytes     int64
 	BaseBytes int64
 	Start     int64
+	End       int64
+	Active    bool
 }
 
 // Reset rearms every counter for a new transfer, so the popup never shows the
@@ -97,9 +103,11 @@ func (p *Progress) resetSlots(n int) {
 	}
 }
 
-// claimSlot hands the worker the first free slot, adding one when every slot
-// is busy. It runs once per file, so the write lock costs nothing.
-func (p *Progress) claimSlot() *Slot {
+// claimSlot hands the worker the first free slot for file, adding one when
+// every slot is busy. It runs once per file, so the write lock costs
+// nothing. The slot takes file, size and the start under the lock the
+// snapshot reads with, so no snapshot holds a slot in flight with no file.
+func (p *Progress) claimSlot(file string, size int64) *Slot {
 	p.slotsMu.Lock()
 	defer p.slotsMu.Unlock()
 	var s *Slot
@@ -113,29 +121,34 @@ func (p *Progress) claimSlot() *Slot {
 		s = &Slot{}
 		p.slots = append(p.slots, s)
 	}
-	s.File.Store("")
-	s.Size.Store(0)
+	s.File.Store(file)
+	s.Size.Store(size)
 	s.Bytes.Store(0)
 	s.BaseBytes.Store(0)
-	s.Start.Store(0)
+	s.Start.Store(time.Now().UnixNano())
+	s.End.Store(0)
 	s.Active.Store(true)
 	return s
 }
 
+// releaseSlot frees s. It keeps its file and counts until the next claim:
+// SyncTotals counts the slots in flight only.
 func (p *Progress) releaseSlot(s *Slot) {
 	p.CompletedBytes.Add(s.Bytes.Load())
 	p.CompletedBaseBytes.Add(s.BaseBytes.Load())
+	s.End.Store(time.Now().UnixNano())
 	s.Active.Store(false)
 }
 
+// SnapshotSlots copies every slot, in its place, the free ones too. The
+// popup gave a row to the slots in flight only: a file that ended a moment
+// before the next one claimed its slot took its row with it for a tick,
+// and the popup jumped by a row.
 func (p *Progress) SnapshotSlots() []SlotSnapshot {
 	p.slotsMu.RLock()
 	defer p.slotsMu.RUnlock()
 	out := make([]SlotSnapshot, 0, len(p.slots))
 	for _, s := range p.slots {
-		if !s.Active.Load() {
-			continue
-		}
 		file, _ := s.File.Load().(string)
 		out = append(out, SlotSnapshot{
 			File:      file,
@@ -143,6 +156,8 @@ func (p *Progress) SnapshotSlots() []SlotSnapshot {
 			Bytes:     s.Bytes.Load(),
 			BaseBytes: s.BaseBytes.Load(),
 			Start:     s.Start.Load(),
+			End:       s.End.Load(),
+			Active:    s.Active.Load(),
 		})
 	}
 	return out

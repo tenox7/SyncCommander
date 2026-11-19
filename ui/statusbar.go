@@ -70,9 +70,10 @@ func formatHMS(secs int64) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// CopyPopupData is the input to RenderCopyPopup. Slots are the in-flight
-// per-file rows; BatchFile/BatchFileBytes are populated instead when the
-// transfer is running through a single batch session.
+// CopyPopupData is the input to RenderCopyPopup. Slots are the per-file
+// rows, one per slot in its place; a slot with no file (File "") is a blank
+// row. BatchFile/BatchFileBytes are populated instead when the transfer is
+// running through a single batch session.
 type CopyPopupData struct {
 	LeftToRight    bool
 	Listing        bool
@@ -201,15 +202,34 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, totalBarWidth), filePct),
 		)
 	} else {
-		if len(d.Slots) == 0 && !d.Listing {
+		// A slot with no file is a blank row, which holds the popup's height.
+		// With no file in any, the first row says the copy waits.
+		waiting := !d.Listing
+		for _, s := range d.Slots {
+			waiting = waiting && s.File == ""
+		}
+		if waiting && len(d.Slots) == 0 {
 			rows = append(rows, "  (waiting…)")
 		}
-		slots, hidden := d.Slots, 0
+		slots, hidden, cut := d.Slots, 0, false
 		if d.MaxSlotRows > 0 && len(slots) > d.MaxSlotRows {
 			keep := d.MaxSlotRows - 1 // the last row says how many are hidden
-			slots, hidden = slots[:keep], len(slots)-keep
+			for _, s := range slots[keep:] {
+				if s.File != "" {
+					hidden++
+				}
+			}
+			slots, cut = slots[:keep], true
 		}
-		for _, s := range slots {
+		for i, s := range slots {
+			if s.File == "" {
+				row := ""
+				if waiting && i == 0 {
+					row = "  (waiting…)"
+				}
+				rows = append(rows, row)
+				continue
+			}
 			pct := 0
 			if s.Size > 0 {
 				pct = int(min(s.Bytes, s.Size) * 100 / s.Size)
@@ -222,8 +242,12 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 			name := truncateName(s.File, nameW)
 			rows = append(rows, head+name+strings.Repeat(" ", max(nameW-lipgloss.Width(name), 0))+tail)
 		}
-		if hidden > 0 {
-			rows = append(rows, fmt.Sprintf("  … %d more", hidden))
+		if cut {
+			more := "" // the hidden rows hold no file: a blank row in their place
+			if hidden > 0 {
+				more = fmt.Sprintf("  … %d more", hidden)
+			}
+			rows = append(rows, more)
 		}
 	}
 

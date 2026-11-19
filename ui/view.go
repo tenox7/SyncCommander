@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"sc/model"
+	"sc/transfer"
 	"sc/transport"
 )
 
@@ -85,22 +86,16 @@ func (m *Model) setPanelSpinners(spinner string, progress model.ScanProgress) {
 // the top bar and status bar it should leave visible.
 const copyPopupFixedRows = 2 + 5 + 2
 
-func (m *Model) copyPopup() string {
+func (m *Model) copyPopup() string { return m.copyPopupAt(time.Now()) }
+
+func (m *Model) copyPopupAt(now time.Time) string {
 	p := m.copyProgress
 	file, _ := p.File.Load().(string)
 	batched := p.Batched.Load()
 	bytes, baseBytes := p.Bytes.Load(), p.BaseBytes.Load()
 	var slots []CopySlotView
 	if !batched {
-		for _, s := range p.SnapshotSlots() {
-			spin := m.slotSpins[s.File]
-			rate := 0.0 // a file the last tick did not see yet has none
-			if s.Start > 0 && spin.now.start.Equal(time.Unix(0, s.Start)) {
-				rate = spin.now.rate
-			}
-			slots = append(slots, CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, Rate: rate,
-				Spinner: spinnerFrames[spin.frame]})
-		}
+		slots = m.slotRows(p.SnapshotSlots(), int(p.Parallel.Load()), now)
 	}
 	return RenderCopyPopup(CopyPopupData{
 		LeftToRight:    p.LeftToRight.Load(),
@@ -128,6 +123,42 @@ func (m *Model) copyPopup() string {
 		Speed:          m.speed.samples(),
 		SpeedPeak:      m.speed.peak,
 	}, popupWidth(m.width))
+}
+
+// freeSlotHold is how long a free slot's row shows the file that ended in
+// it, as it was. The next file takes the slot in a moment, and the row goes
+// from the one file to the next with nothing between. A slot free for
+// longer (the copy's last files) shows a blank row.
+const freeSlotHold = time.Second
+
+// slotRows is a row for each slot, in its place: as many as files may be in
+// flight (parallel), and more while + or - leaves a file in flight past
+// them. So the popup's height holds while files come and go: it gave rows
+// to the slots in flight only, and lost one for a tick each time a file
+// ended a moment before the next took its slot. A row with no file is a
+// blank one.
+func (m *Model) slotRows(snap []transfer.SlotSnapshot, parallel int, now time.Time) []CopySlotView {
+	n := parallel
+	for i, s := range snap {
+		if s.Active {
+			n = max(n, i+1)
+		}
+	}
+	rows := make([]CopySlotView, n)
+	for i := range min(n, len(snap)) {
+		s := snap[i]
+		if !s.Active && (s.End == 0 || now.Sub(time.Unix(0, s.End)) > freeSlotHold) {
+			continue
+		}
+		spin := m.slotSpins[s.File]
+		rate := 0.0 // a file the last tick did not see yet has none
+		if s.Start > 0 && spin.now.start.Equal(time.Unix(0, s.Start)) {
+			rate = spin.now.rate
+		}
+		rows[i] = CopySlotView{File: s.File, Size: s.Size, Bytes: s.Bytes, Rate: rate,
+			Spinner: spinnerFrames[spin.frame]}
+	}
+	return rows
 }
 
 func (m *Model) deletePopup() string {
