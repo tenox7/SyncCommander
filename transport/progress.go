@@ -156,7 +156,8 @@ func tailDirSize(stop <-chan struct{}, dir, basename string, inplace bool, adder
 			last = n
 		}
 	}
-	temp := tempWatch{dir: dir, base: basename, start: time.Now()}
+	now := time.Now()
+	temp := tempWatch{dir: dir, base: basename, start: now, searched: now}
 	update := func(now time.Time, search bool) {
 		if !inplace {
 			adder.Add(temp.grown(now, search))
@@ -195,7 +196,10 @@ func fileSizeOf(p string) int64 {
 // while no temp file is followed or the one followed did not grow since
 // the last read: a temp file left by a run that was killed never grows,
 // the live one does. Before, every file read the whole folder ten times a
-// second (F9).
+// second (F9). The first read is a second in: a file received by then is
+// credited whole when it is done, and a copy of many small files into one
+// folder read all of it for each file that ran past the first look, a
+// tenth of a second (R15).
 type tempWatch struct {
 	dir, base string
 	start     time.Time // what was written before this is not counted
