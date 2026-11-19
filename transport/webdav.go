@@ -439,6 +439,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 	self := strings.Trim(relDir, "/")
 	var entries []model.FileEntry
 	sawSelf := false
+	run := b.sums.listing()
 	err := b.propfindEach(ctx, relDir, defaultWDDepth, func(r wdResponse) error {
 		e, sums, err := b.entryFromResponse(r)
 		switch {
@@ -458,7 +459,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 			Log.Add("webdav", DirErr, err.Error())
 			return err
 		}
-		b.sums.put(e.RelPath, sums)
+		b.sums.put(run, e.RelPath, e.IsDir, sums)
 		entries = append(entries, e)
 		return nil
 	})
@@ -475,6 +476,7 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 			b.knowDir(e.RelPath)
 		}
 	}
+	b.sums.sweep(run, self)
 	Log.Add("webdav", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	return entries, nil
 }
@@ -511,7 +513,7 @@ func (b *WebDAVBackend) Stat(ctx context.Context, relPath string) (model.FileEnt
 		case got.RelPath != rel:
 			return nil // depth 0 is the path itself; a server that adds more is ignored
 		}
-		b.sums.put(got.RelPath, sums)
+		b.sums.put(0, got.RelPath, got.IsDir, sums)
 		e, found = got, true
 		return nil
 	})
@@ -590,7 +592,14 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 	// were never completed, and the cache drops them. A cut-off answer
 	// keeps the folders completed before the cut (listCache.keepAfterLocked).
 	self := strings.Trim(scope, "/")
+	run := b.sums.listing()
 	g := &emitGrouper{emit: emit, complete: complete, childlessUnknown: true}
+	if complete != nil {
+		g.complete = func(dir string) {
+			b.sums.sweep(run, dir)
+			complete(dir)
+		}
+	}
 	n := 0
 	err = readMultistatus(resp.Body, func(r wdResponse) error {
 		e, sums, err := b.entryFromResponse(r)
@@ -602,7 +611,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 		case self != "" && !strings.HasPrefix(e.RelPath, self+"/"):
 			return fmt.Errorf("the server listed %q, which is not in %s", r.Href, b.pathFor(scope))
 		}
-		b.sums.put(e.RelPath, sums)
+		b.sums.put(run, e.RelPath, e.IsDir, sums)
 		if e.IsDir {
 			b.knowDir(e.RelPath)
 		}
@@ -616,6 +625,7 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 		return err
 	}
 	g.finish()
+	b.sums.sweep(run, self)
 	Log.Add("webdav", DirIn, fmt.Sprintf("RPROPFIND %d entries", n))
 	return nil
 }
@@ -649,7 +659,7 @@ func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
 		if err != nil {
 			return err
 		}
-		b.sums.put(e.RelPath, sums)
+		b.sums.put(0, e.RelPath, e.IsDir, sums)
 	}
 	return nil
 }
@@ -982,6 +992,7 @@ func (b *WebDAVBackend) Rename(ctx context.Context, oldRelPath, newRelPath strin
 	b.forgetDirs(oldRelPath)
 	b.forgetDirs(newRelPath)
 	b.sums.invalidate(oldRelPath)
+	b.sums.invalidate(newRelPath)
 	b.listCache.invalidateTree(oldRelPath)
 	b.listCache.invalidateAncestors(oldRelPath)
 	b.listCache.invalidateAncestors(newRelPath)
@@ -1172,49 +1183,149 @@ func (s *wdSums) sum(algo string) (string, bool) {
 	return hex.EncodeToString(s.field(algo)), true
 }
 
-// wdSumCache is the sums the latest answer about each file gave, and the
-// files it gave none.
+// wdSumCache is what the latest answers said about each file's sums, by
+// folder: a folder deleted, moved or no longer listed takes the sums of
+// every file under it along. They were one map by path, and the files of
+// such a folder stayed in it for the session (W-M8).
 type wdSumCache struct {
-	mu   sync.Mutex
-	m    map[string]wdSums
-	none map[string]struct{}
-	seen uint8 // each sum an answer gave, for any file
+	mu      sync.Mutex
+	folders map[string]*wdFolderSums // by path, "" the base; each one's parent too
+	runs    uint32                   // listings started (listing)
+	seen    uint8                    // each sum an answer gave, for any file
+}
+
+// wdFolderSums is what the answers said about the files right in one
+// folder, and the folders right in it that the cache holds. none and
+// kids are made when needed: most folders have neither.
+type wdFolderSums struct {
+	sums   fewMap[wdSums]    // by name
+	none   *fewMap[struct{}] // the files an answer gave no sums, by name
+	kids   *fewMap[struct{}] // by path
+	stamp  uint32            // the latest listing whose entries replaced the files'
+	listed uint32            // the latest listing that showed the folder is there
+}
+
+// forget drops what f holds about name.
+func (f *wdFolderSums) forget(name string) {
+	f.sums.del(name)
+	if f.none != nil {
+		f.none.del(name)
+	}
+}
+
+// replace drops what f holds about its files, for run's listing.
+func (f *wdFolderSums) replace(run uint32) {
+	f.sums, f.none, f.stamp = fewMap[wdSums]{}, nil, run
+}
+
+// eachKid hands the path of each folder right in f that the cache holds.
+func (f *wdFolderSums) eachKid(fn func(string)) {
+	if f.kids != nil {
+		f.kids.each(func(k string, _ struct{}) { fn(k) })
+	}
 }
 
 func newWDSumCache() *wdSumCache {
-	return &wdSumCache{m: make(map[string]wdSums), none: make(map[string]struct{})}
+	return &wdSumCache{folders: make(map[string]*wdFolderSums)}
 }
 
-// put records the sums an answer gave for relPath. They replace what an
-// older answer said, and an answer with none says the file has none. They
-// were added to it, and one with none was ignored: after another client
-// rewrote a file of the same size, Checksum gave the old sum, with no
-// request, and the compare said "same" (W-M3).
-func (c *wdSumCache) put(relPath string, sums map[string]string) {
-	s := wdSumsOf(sums)
+// splitRel is relPath's folder and name.
+func splitRel(relPath string) (dir, name string) {
+	if i := strings.LastIndexByte(relPath, '/'); i >= 0 {
+		return relPath[:i], relPath[i+1:]
+	}
+	return "", relPath
+}
+
+// listing starts a listing, for put and sweep. The first entry it gives
+// in a folder replaces what older answers said about the files there.
+func (c *wdSumCache) listing() uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s.have == 0 {
-		delete(c.m, relPath)
-		c.none[relPath] = struct{}{}
+	c.runs++
+	return c.runs
+}
+
+// put records what an answer said about relPath: a file's sums, or none,
+// or that it is a folder. run is the listing it came in, 0 for an answer
+// about relPath alone. The sums replace what an older answer said, and an
+// answer with none says the file has none. They were added to it, and one
+// with none was ignored: after another client rewrote a file of the same
+// size, Checksum gave the old sum, with no request, and the compare said
+// "same" (W-M3).
+func (c *wdSumCache) put(run uint32, relPath string, isDir bool, sums map[string]string) {
+	s := wdSumsOf(sums)
+	relPath = strings.Trim(relPath, "/")
+	dir, name := splitRel(relPath)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if isDir {
+		if f := c.folders[dir]; f != nil {
+			f.forget(name)
+		}
+		if f := c.folders[relPath]; f != nil {
+			f.listed = max(f.listed, run)
+		}
 		return
 	}
-	delete(c.none, relPath)
-	c.m[relPath] = s
+	c.cutLocked(relPath) // a folder that is a file now
+	f := c.folderLocked(dir, run)
+	if f.stamp < run {
+		f.replace(run)
+	}
+	if s.have == 0 {
+		f.sums.del(name)
+		if f.none == nil {
+			f.none = &fewMap[struct{}]{}
+		}
+		f.none.set(name, struct{}{})
+		return
+	}
+	if f.none != nil {
+		f.none.del(name)
+	}
+	f.sums.set(name, s)
 	c.seen |= s.have
+}
+
+// folderLocked is dir's entry, made with each folder above it that has
+// none. A listing that gives a file in dir shows dir is there.
+func (c *wdSumCache) folderLocked(dir string, run uint32) *wdFolderSums {
+	f := c.folders[dir]
+	if f == nil {
+		f = &wdFolderSums{}
+		c.folders[dir] = f
+		if dir != "" {
+			up, _ := splitRel(dir)
+			parent := c.folderLocked(up, run)
+			if parent.kids == nil {
+				parent.kids = &fewMap[struct{}]{}
+			}
+			parent.kids.set(dir, struct{}{})
+		}
+	}
+	f.listed = max(f.listed, run)
+	return f
 }
 
 // get is relPath's algo sum, as the latest answer about it gave it: ok
 // says there is one. known says there was an answer: with none, a file
 // is asked no more.
 func (c *wdSumCache) get(relPath, algo string) (h string, ok, known bool) {
+	dir, name := splitRel(strings.Trim(relPath, "/"))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s, found := c.m[relPath]; found {
+	f := c.folders[dir]
+	if f == nil {
+		return "", false, false
+	}
+	if s, found := f.sums.get(name); found {
 		h, ok = s.sum(algo)
 		return h, ok, true
 	}
-	_, known = c.none[relPath]
+	if f.none != nil {
+		_, known = f.none.get(name)
+	}
 	return "", false, known
 }
 
@@ -1231,9 +1342,68 @@ func (c *wdSumCache) algos() map[string]bool {
 	return seen
 }
 
-func (c *wdSumCache) invalidate(relPath string) {
+// sweep ends run's listing of dir once it is whole. When run gave no
+// file there, what older answers said about dir's files goes; each folder
+// in dir that run did not give goes with every folder under it. A folder
+// or a file another client deleted kept its sums for the session (W-M8).
+// A folder that is still there keeps the sums under it, though run did
+// not list them: they cost a PROPFIND a file to ask again.
+func (c *wdSumCache) sweep(run uint32, dir string) {
+	dir = strings.Trim(dir, "/")
 	c.mu.Lock()
-	delete(c.m, relPath)
-	delete(c.none, relPath)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	f := c.folders[dir]
+	if f == nil {
+		return
+	}
+	if f.stamp < run {
+		f.replace(run)
+	}
+	var gone []string
+	f.eachKid(func(k string) {
+		if n := c.folders[k]; n == nil || n.listed < run {
+			gone = append(gone, k)
+		}
+	})
+	for _, k := range gone {
+		f.kids.del(k)
+		c.cutLocked(k)
+	}
+}
+
+// invalidate drops what the answers said about relPath: a file's sums, or
+// those of every file under a folder. A folder deleted or moved whole kept
+// them for the session (W-M8).
+func (c *wdSumCache) invalidate(relPath string) {
+	relPath = strings.Trim(relPath, "/")
+	dir, name := splitRel(relPath)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if f := c.folders[dir]; f != nil {
+		f.forget(name)
+	}
+	c.cutLocked(relPath)
+}
+
+// cutLocked drops the folder p, if the cache holds it, with every folder
+// under it, walking those alone.
+func (c *wdSumCache) cutLocked(p string) {
+	if c.folders[p] == nil {
+		return
+	}
+	if p != "" {
+		up, _ := splitRel(p)
+		if f := c.folders[up]; f != nil && f.kids != nil {
+			f.kids.del(p)
+		}
+	}
+	todo := []string{p}
+	for len(todo) > 0 {
+		d := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		if f := c.folders[d]; f != nil {
+			f.eachKid(func(k string) { todo = append(todo, k) })
+			delete(c.folders, d)
+		}
+	}
 }

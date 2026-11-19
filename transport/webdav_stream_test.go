@@ -67,11 +67,7 @@ func TestWebDAVListingIsReadAsItComes(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the server sent no listing")
 	}
-	read := func() int {
-		b.sums.mu.Lock()
-		defer b.sums.mu.Unlock()
-		return len(b.sums.m)
-	}
+	read := b.sums.held
 	for deadline := time.Now().Add(3 * time.Second); read() < n && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)
 	}

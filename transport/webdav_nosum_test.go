@@ -189,7 +189,7 @@ func TestWebDAVSumsTakeLittleRoom(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	c := newWDSumCache()
 	for _, n := range names {
-		c.put(n, map[string]string{"md5": md5s, "sha1": sha1s})
+		c.put(0, n, false, map[string]string{"md5": md5s, "sha1": sha1s})
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&after)
