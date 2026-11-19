@@ -585,7 +585,7 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
-		result = append(result, b.entryLocked(path.Join(relDir, e.Name), path.Join(dir, e.Name), e))
+		result = append(result, b.entryLocked(path.Join(relDir, e.Name), path.Join(dir, e.Name), e, false))
 	}
 	return result, nil
 }
@@ -610,10 +610,13 @@ func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir stri
 }
 
 // entryLocked is the row of relPath, at p on the server, which a listing or
-// MLST described as e. MLSD and MLST carry times to the second; only a
-// listing that came from LIST costs one MDTM, per entry. A LIST time with no
-// MDTM is kept to the minute, or the day (listTimeRes).
-func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntry {
+// MLST described as e. MLSD and MLST carry times to the second. A LIST
+// time is kept to the minute, or the day (listTimeRes), which the compare
+// takes as exactly as that (L17); with exact, as for a Stat, MDTM reads it
+// to the second. A listing asked MDTM for every entry: a round trip a
+// file, which the time for a listing ran out on, and 14 hours for 1M
+// files at 50 ms (L15).
+func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry, exact bool) model.FileEntry {
 	mode := os.FileMode(0644)
 	switch e.Type {
 	case ftp.EntryTypeFolder:
@@ -626,7 +629,7 @@ func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry) model.FileEntr
 	modTime, res := e.Time, model.TimeSecond
 	if !b.conn.IsTimePreciseInList() {
 		res = listTimeRes(e.Time)
-		if b.conn.IsGetTimeSupported() {
+		if exact && b.conn.IsGetTimeSupported() {
 			if t, err := b.conn.GetTime(p); err == nil {
 				modTime, res = t, model.TimeSecond
 			}
@@ -692,7 +695,7 @@ func (b *FTPBackend) statLocked(ctx context.Context, relPath string) (model.File
 	if raw != nil {
 		markMLSDTypes(raw.Bytes(), []*ftp.Entry{e})
 	}
-	return b.entryLocked(relPath, p, e), nil
+	return b.entryLocked(relPath, p, e, true), nil
 }
 
 func (b *FTPBackend) statByListingLocked(ctx context.Context, relPath, p string) (model.FileEntry, error) {
@@ -709,7 +712,7 @@ func (b *FTPBackend) statByListingLocked(ctx context.Context, relPath, p string)
 	name := path.Base(relPath)
 	for _, e := range entries {
 		if e.Name == name {
-			return b.entryLocked(relPath, path.Join(dir, name), e), nil
+			return b.entryLocked(relPath, path.Join(dir, name), e, true), nil
 		}
 	}
 	return model.FileEntry{}, fmt.Errorf("ftp: %s: %w", relPath, fs.ErrNotExist)

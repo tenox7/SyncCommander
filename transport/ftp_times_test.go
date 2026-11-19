@@ -15,7 +15,8 @@ import (
 // L17: vsftpd has no MFMT. It sets a time with "MDTM time path"
 // (mdtm_write), which sc did not use, so SetTimes failed for every upload
 // and every file copied there differed by mtime after the copy. Now it is
-// used, and the time set is the time listed.
+// used, and the time set is the time the server reads back, by MDTM: a
+// listing has it to the minute (L15).
 func TestFTPSetsTimesOnVsftpd(t *testing.T) {
 	f := &fakeFTPD{mdtm: true, ls: map[string][]string{
 		"/": {lsLine(".", true), lsLine("..", true), lsLine("f.txt", false)},
@@ -32,14 +33,8 @@ func TestFTPSetsTimesOnVsftpd(t *testing.T) {
 	if len(set) != 1 || !strings.HasPrefix(set[0], "MDTM 20261118123456 ") {
 		t.Errorf("the commands that set a time: %q; want one MDTM 20261118123456", set)
 	}
-	entries, err := b.List(model.WithFreshListing(ctx), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if e.Name == "f.txt" && !e.ModTime.Equal(mt) {
-			t.Errorf("f.txt lists %v, want the time set, %v", e.ModTime, mt)
-		}
+	if e, err := b.Stat(ctx, "f.txt"); err != nil || !e.ModTime.Equal(mt) {
+		t.Errorf("Stat(f.txt) = %v, %v; want the time set, %v", e.ModTime, err, mt)
 	}
 }
 
