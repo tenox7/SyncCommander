@@ -135,24 +135,40 @@ func (b *WebDAVBackend) checkBase(ms *wdMultistatus) error {
 func (b *WebDAVBackend) BasePath() string { return b.display }
 
 func (b *WebDAVBackend) propfind(ctx context.Context, relPath, depth string) (*wdMultistatus, error) {
+	var ms wdMultistatus
+	if err := b.propfindEach(ctx, relPath, depth, func(r wdResponse) error { ms.Response = append(ms.Response, r); return nil }); err != nil {
+		return nil, err
+	}
+	return &ms, nil
+}
+
+// propfindEach sends a PROPFIND of relPath at depth and hands each response
+// of the answer to each as it is read. A listing was read whole first, each
+// response with its strings, and made into entries after: a folder of 1M
+// files was held twice (W-M8). An error each gives ends the read, and is
+// given back as it is.
+func (b *WebDAVBackend) propfindEach(ctx context.Context, relPath, depth string, each func(wdResponse) error) error {
 	resp, err := b.do(ctx, "PROPFIND", b.urlFor(relPath, true), strings.NewReader(wdPropfindBody), map[string]string{
 		"Depth":        depth,
 		"Content-Type": "application/xml",
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
-		return nil, statusErr(resp, "PROPFIND %s", relPath)
+		return statusErr(resp, "PROPFIND %s", relPath)
 	}
-	var ms wdMultistatus
-	if err := readMultistatus(resp.Body, func(r wdResponse) error { ms.Response = append(ms.Response, r); return nil }); err != nil {
+	var handed error
+	err = readMultistatus(resp.Body, func(r wdResponse) error {
+		handed = each(r)
+		return handed
+	})
+	if err != nil && handed == nil {
 		err = &fs.PathError{Op: "PROPFIND", Path: relPath, Err: err}
 		Log.Add("webdav", DirErr, err.Error())
-		return nil, err
 	}
-	return &ms, nil
+	return err
 }
 
 // readMultistatus calls each for every response of a PROPFIND answer. The
@@ -417,15 +433,13 @@ func withoutMtime(entries []model.FileEntry) []model.FileEntry {
 	return entries
 }
 
+// liveList is one PROPFIND of relDir at depth 1, each entry made as its
+// response is read (propfindEach).
 func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	ms, err := b.propfind(ctx, relDir, defaultWDDepth)
-	if err != nil {
-		return nil, err
-	}
 	self := strings.Trim(relDir, "/")
 	var entries []model.FileEntry
 	sawSelf := false
-	for _, r := range ms.Response {
+	err := b.propfindEach(ctx, relDir, defaultWDDepth, func(r wdResponse) error {
 		e, sums, err := b.entryFromResponse(r)
 		switch {
 		case err != nil:
@@ -433,19 +447,23 @@ func (b *WebDAVBackend) liveList(ctx context.Context, relDir string) ([]model.Fi
 			err = fmt.Errorf("%s is a file on the server, not a folder", b.pathFor(relDir))
 		case e.RelPath == self:
 			sawSelf = true
-			continue
+			return nil
 		case parentDir(e.RelPath) != self && !strings.HasPrefix(e.RelPath, self+"/") && self != "":
 			err = fmt.Errorf("the server listed %q, which is not in %s", r.Href, b.pathFor(relDir))
 		case parentDir(e.RelPath) != self:
-			continue // deeper than asked; listed with its own folder
+			return nil // deeper than asked; listed with its own folder
 		}
 		if err != nil {
 			err = &fs.PathError{Op: "PROPFIND", Path: b.pathFor(relDir), Err: err}
 			Log.Add("webdav", DirErr, err.Error())
-			return nil, err
+			return err
 		}
 		b.sums.put(e.RelPath, sums)
 		entries = append(entries, e)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if !sawSelf {
 		err := fmt.Errorf("PROPFIND %s: the answer does not include the folder itself", b.pathFor(relDir))

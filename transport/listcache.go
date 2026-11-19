@@ -144,7 +144,8 @@ func (c *listCache) staleLocked(dir string) bool {
 
 // recursiveLister streams a subtree: emit appends a batch of children to
 // parent, complete declares that every child of dir has been emitted.
-// Emitters whose order cannot prove that never call complete.
+// Emitters whose order cannot prove that never call complete. A batch is
+// the cache's once emitted: the lister keeps no hold of it.
 type recursiveLister func(ctx context.Context, scope string, emit func(parent string, entries []model.FileEntry), complete func(dir string)) error
 
 // unreadDirs is the result of a recursive listing that ran to the end but
@@ -300,7 +301,9 @@ func (c *listCache) serve(ctx context.Context, relDir string, live func(context.
 }
 
 // emit appends entries for parent without waking awaiters: a parent may
-// arrive in several batches, so a single emit can be a partial view.
+// arrive in several batches, so a single emit can be a partial view. The
+// first batch of a parent is kept as it came: it was copied, and a folder
+// of 1M files was held twice while it came (W-M8).
 func (c *listCache) emit(parent string, entries []model.FileEntry) {
 	c.mu.Lock()
 	c.emitLocked(parent, entries)
@@ -311,7 +314,11 @@ func (c *listCache) emitLocked(parent string, entries []model.FileEntry) {
 	if c.staleLocked(parent) || c.kept[parent] {
 		return // a folder an earlier try listed in full: no second copy
 	}
-	c.entries[parent] = append(c.entries[parent], entries...)
+	if cur := c.entries[parent]; len(cur) == 0 {
+		c.entries[parent] = entries
+	} else {
+		c.entries[parent] = append(cur, entries...)
+	}
 	c.index.add(parent)
 }
 
