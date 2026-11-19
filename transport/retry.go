@@ -139,6 +139,22 @@ func TriggerFatalAbort(ctx context.Context) {
 	}
 }
 
+// ErrUserCanceled is the cause the UI gives an operation's context when the
+// user stops it: x, quit or a reopen. A fatal abort cancels that context
+// with no cause. It is a context.Canceled: code that returns a context's
+// cause (the list cache, rclone) gives it where it gave context.Canceled,
+// and errors.Is(err, context.Canceled) and the log's filter must still see
+// a cancel in it.
+var ErrUserCanceled = fmt.Errorf("%w by the user", context.Canceled)
+
+// UserCanceled reports whether the user stopped the operation ctx is part
+// of. A file or a delete that fails after that did not fail: the cancel cut
+// it off. The log shows no error for it, and opens for none (it opened on
+// each cancel, with an ERR and a FAIL line for what the cancel cut off).
+func UserCanceled(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrUserCanceled)
+}
+
 func pluralRetries(n int) string {
 	if n == 1 {
 		return "retry"

@@ -67,6 +67,7 @@ type copier struct {
 	ctx        context.Context
 	stop       context.CancelFunc // ends the whole copy
 	stopped    atomic.Bool
+	cut        atomic.Int64 // files the user's cancel cut off: counted as done, not failed
 	p          *Progress
 	src, dst   model.Backend
 	mu         sync.Mutex
@@ -132,6 +133,12 @@ func Copy(ctx context.Context, req Request) Result {
 	listed := !isDir || req.Scanner.EnsureSubtreeListed(ctx, req.Node, req.Opts)
 	p.Listing.Store(false)
 	if !listed {
+		// The user's x while the subtree was listed: nothing was copied, and
+		// nothing failed.
+		if transport.UserCanceled(ctx) {
+			transport.Log.Add("copy", transport.DirIn, "COPY canceled while listing "+displayPath(req.RelPath))
+			return Result{}
+		}
 		// Counted as a failure so the popup and status bar show it, not just
 		// the log.
 		p.Failed.Add(1)
@@ -173,9 +180,18 @@ func Copy(ctx context.Context, req Request) Result {
 	} else {
 		res.RescanRoot = req.Scanner.FindNearestDestNode(model.DirOf(req.RelPath), req.LeftToRight)
 	}
-	if c.stopped.Load() {
+	switch {
+	case c.stopped.Load():
 		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY stopped: %d of %d tried, %d of them failed", p.Done.Load(), p.Total.Load(), failed))
-	} else if failed > 0 {
+	case c.canceled():
+		// No FAIL: what failed before the cancel has its own ERR line, and
+		// what the cancel cut off did not fail.
+		msg := fmt.Sprintf("COPY canceled: %d of %d done", p.Done.Load()-c.cut.Load(), p.Total.Load())
+		if failed > 0 {
+			msg += fmt.Sprintf(", %d of them failed", failed)
+		}
+		transport.Log.Add("copy", transport.DirIn, msg)
+	case failed > 0:
 		transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("COPY finished with %d failure(s) of %d", failed, p.Total.Load()))
 	}
 	if n := p.TimesNotSet.Load(); n > 0 {
@@ -486,6 +502,11 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	})
 	p.InFlight.Store(0)
 	p.Batched.Store(false)
+	if err != nil && c.canceled() {
+		// The user's x: nothing goes file by file, and what the session
+		// sent stays counted (a failed session counts from 0 again, below).
+		return true
+	}
 	if err != nil {
 		if !errors.Is(err, transport.ErrUnsupported) {
 			transport.Log.Add("copy", transport.DirErr, "BATCH "+c.req.RelPath+": "+err.Error())
@@ -545,12 +566,22 @@ func (c *copier) runParallel(files []item) {
 	wg.Wait()
 }
 
+// canceled reports whether the user canceled the copy. The copier's own
+// stop (a failure no file gets through) is not the user's.
+func (c *copier) canceled() bool { return transport.UserCanceled(c.ctx) }
+
 // failed counts one failure and logs it. A failure after which no other file
 // can get through stops the whole copy: a refused login, a side that
 // stopped connecting after its connects failed in a row, a destination
 // that is full (transport.GivesUp). The other files would each fail the
-// same way after their own tries (F7).
+// same way after their own tries (F7). A file that fails once the user
+// canceled is no failure: the cancel cut it off, and the next copy sends it.
 func (c *copier) failed(what string, err error) {
+	if c.canceled() {
+		c.cut.Add(1)
+		transport.Log.Add("copy", transport.DirIn, what+": canceled")
+		return
+	}
 	c.p.Failed.Add(1)
 	transport.Log.Add("copy", transport.DirErr, what+": "+err.Error())
 	if transport.GivesUp(err) && c.stopped.CompareAndSwap(false, true) {
@@ -641,7 +672,11 @@ func (c *copier) copyOne(f item) {
 		if hasTime(srcEntry) {
 			if err := c.dst.SetTimes(fileCtx, f.relPath, srcEntry.ModTime, srcEntry.ATime.Time(), srcEntry.BirthTime.Time()); err != nil && !errors.Is(err, transport.ErrUnsupported) {
 				p.TimesNotSet.Add(1)
-				transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
+				// After the user's x, no ERR line: the WARN line at the
+				// end still counts the file.
+				if !c.canceled() {
+					transport.Log.Add("copy", transport.DirErr, "settimes "+f.relPath+": "+err.Error())
+				}
 			}
 		}
 		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK"+how)
@@ -744,7 +779,12 @@ func (c *copier) mirrorDelete() {
 		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: the copy stopped")
 		return
 	case c.ctx.Err() != nil:
-		transport.Log.Add("copy", transport.DirErr, "mirror delete skipped: copy canceled")
+		// The user's own x is no error.
+		level := transport.DirErr
+		if c.canceled() {
+			level = transport.DirIn
+		}
+		transport.Log.Add("copy", level, "mirror delete skipped: copy canceled")
 		return
 	case failed > 0:
 		transport.Log.Add("copy", transport.DirErr, fmt.Sprintf("mirror delete skipped: %d file(s) failed to copy", failed))
@@ -764,11 +804,19 @@ func (c *copier) mirrorDelete() {
 	}
 	kept := 0 // still only on the destination: the next copy asks
 	// A delete that failed, or that an error kept from running, counts as a
-	// failure where the user sees it: the popup, the status bar (F17).
+	// failure where the user sees it: the popup, the status bar (F17). One
+	// that the user's x cut off, or kept from running, is no failure.
 	delFailed := 0
+	finished := false
 	defer func() {
 		if delFailed > 0 {
 			c.p.Failed.Add(int64(delFailed))
+		}
+		switch {
+		case !finished && c.canceled():
+			// What failed before the cancel has its own ERR line.
+			transport.Log.Add("copy", transport.DirIn, "mirror delete canceled")
+		case delFailed > 0:
 			transport.Log.Add("copy", transport.DirFail, fmt.Sprintf("mirror delete finished with %d failure(s) of %d", delFailed, len(c.req.Plan.Deletes)))
 		}
 	}()
@@ -781,6 +829,9 @@ func (c *copier) mirrorDelete() {
 		}
 		keep, err := c.stillDestOnly(dir)
 		if err != nil {
+			if c.canceled() {
+				return
+			}
 			delFailed += len(byDir[dir])
 			transport.Log.Add("copy", transport.DirErr, "mirror delete in "+displayPath(dir)+" skipped: "+err.Error())
 			continue
@@ -798,6 +849,9 @@ func (c *copier) mirrorDelete() {
 		}
 		if batches && len(victims) > 1 {
 			delFailed += c.removeIn(br, dir, victims)
+			if c.canceled() {
+				return
+			}
 			continue
 		}
 		for _, d := range victims {
@@ -806,6 +860,9 @@ func (c *copier) mirrorDelete() {
 			}
 			c.markChanged(d.RelPath)
 			if err := c.remove(entry{relPath: d.RelPath, isDir: d.IsDir}); err != nil {
+				if c.canceled() {
+					return
+				}
 				delFailed++
 				transport.Log.Add("copy", transport.DirErr, "mirror delete "+d.RelPath+": "+err.Error())
 				continue
@@ -813,6 +870,7 @@ func (c *copier) mirrorDelete() {
 			transport.Log.Add("copy", transport.DirIn, "mirror delete "+d.RelPath)
 		}
 	}
+	finished = true
 	for _, p := range c.unplannedDeletes() {
 		transport.Log.Add("copy", transport.DirWarn, "mirror delete "+p+" skipped: the dialog did not show it")
 		kept++
@@ -834,6 +892,9 @@ func (c *copier) removeIn(br model.BatchRemover, dir string, victims []Delete) (
 		items[i] = model.RemoveItem{Name: path.Base(d.RelPath), IsDir: d.IsDir}
 	}
 	err := br.RemoveIn(c.ctx, dir, items)
+	if err != nil && c.canceled() {
+		return 0 // the user's x cut the call off: the rescan shows what is gone
+	}
 	gone := map[string]bool{} // after a failed call, what dir no longer lists
 	if err != nil {
 		if list, lerr := c.dst.List(model.WithFreshListing(c.ctx), dir); lerr == nil {

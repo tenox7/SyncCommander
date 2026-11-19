@@ -41,9 +41,11 @@ func (k opKind) String() string {
 // nothing showed them, x did not stop them, and a second write could start
 // beside them (U14).
 type op struct {
-	kind    opKind
-	gen     uint64
-	cancel  context.CancelFunc
+	kind opKind
+	gen  uint64
+	// cancel ends the context: with transport.ErrUserCanceled when the user
+	// stops the operation, with nil once it is over.
+	cancel  context.CancelCauseFunc
 	stopped bool // the user stopped it: x again says nothing more
 }
 
@@ -110,9 +112,10 @@ func (m *Model) start(kind opKind, run func(ctx context.Context, done opDoneMsg)
 		return nil
 	}
 	m.opGen++
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	if kind.writes() {
-		ctx = transport.ContextWithFatalCancel(ctx, cancel)
+		// No cause: what a fatal abort cuts off failed.
+		ctx = transport.ContextWithFatalCancel(ctx, func() { cancel(nil) })
 	}
 	done := opDoneMsg{kind: kind, gen: m.opGen}
 	*m.slot(kind) = &op{kind: kind, gen: done.gen, cancel: cancel}
@@ -130,7 +133,7 @@ func (m *Model) finishOp(msg doneMsg) tea.Cmd {
 	if *slot == nil || (*slot).gen != h.gen {
 		return nil
 	}
-	(*slot).cancel()
+	(*slot).cancel(nil)
 	*slot = nil
 	m.refreshTreeNow()
 	m.autoOpenLog()
@@ -197,7 +200,7 @@ func covers(a, b *model.TreeNode) bool {
 func (m *Model) cancelOps() {
 	for _, slot := range []**op{&m.scan, &m.cksum, &m.write} {
 		if *slot != nil {
-			(*slot).cancel()
+			(*slot).cancel(transport.ErrUserCanceled)
 			*slot = nil
 		}
 	}
@@ -211,7 +214,7 @@ func (m *Model) stopScanOps() {
 	for _, o := range []*op{m.scan, m.cksum} {
 		if o != nil && !o.stopped {
 			o.stopped = true
-			o.cancel()
+			o.cancel(transport.ErrUserCanceled)
 			transport.Log.Add("scan", transport.DirIn, "user canceled "+o.kind.String())
 		}
 	}
@@ -258,7 +261,7 @@ func (m *Model) stopWrite() {
 		what = "transfer"
 	}
 	transport.Log.Add(o.kind.String(), transport.DirIn, "user canceled "+what)
-	o.cancel()
+	o.cancel(transport.ErrUserCanceled)
 }
 
 func (m *Model) startScan() tea.Cmd {

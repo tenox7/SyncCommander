@@ -53,7 +53,7 @@ func runningOp(m *Model, kind opKind, stop context.CancelFunc) *op {
 		stop = func() {}
 	}
 	m.opGen++
-	o := &op{kind: kind, gen: m.opGen, cancel: stop}
+	o := &op{kind: kind, gen: m.opGen, cancel: func(error) { stop() }}
 	*m.slot(kind) = o
 	return o
 }

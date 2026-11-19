@@ -154,8 +154,13 @@ func (m *Model) deleteNode(node *model.TreeNode, side model.Presence) tea.Cmd {
 				break
 			}
 			if err := removeOne(ctx, s.backend, relPath, isDir); err != nil {
-				progress.Failed.Add(1)
-				transport.Log.Add("delete", transport.DirFail, s.name+" "+relPath+": "+err.Error())
+				// What x cut off did not fail; the refresh shows what is left.
+				if transport.UserCanceled(ctx) {
+					transport.Log.Add("delete", transport.DirIn, s.name+" "+relPath+": canceled")
+				} else {
+					progress.Failed.Add(1)
+					transport.Log.Add("delete", transport.DirFail, s.name+" "+relPath+": "+err.Error())
+				}
 			} else {
 				transport.Log.Add("delete", transport.DirIn, s.name+" "+relPath)
 			}
