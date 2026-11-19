@@ -2,12 +2,12 @@ package transport
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,6 +82,7 @@ type WebDAVBackend struct {
 	headerSets atomic.Bool
 	noMtime    atomic.Bool
 	mtimeProbe atomic.Int32
+	noSum      sync.Once // the first file the server gives no sum of the algo asked
 }
 
 // NewWebDAVBackend connects to rawURL and checks its base is a folder; a
@@ -602,19 +603,38 @@ func (b *WebDAVBackend) runRecursiveList(ctx context.Context, scope string, emit
 }
 
 // Checksum is the algo checksum the server gives for relPath (oc:checksums),
-// from the listing that carried it or a PROPFIND of relPath alone.
+// from the listing that carried it or a PROPFIND of relPath alone. A file
+// an answer gave no such sum is asked no more, and none is a final answer.
+// Each such file was a PROPFIND, and its error one that a retry took for
+// passing: six PROPFINDs and some 15 s of waits a file (W-M8).
 func (b *WebDAVBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
-	if h, ok := b.sums.get(relPath, algo); ok {
-		return h, nil
+	h, ok, known := b.sums.get(relPath, algo)
+	if !known {
+		if err := b.statInto(ctx, relPath); err != nil {
+			return "", err
+		}
+		h, ok, _ = b.sums.get(relPath, algo)
 	}
-	if err := b.statInto(ctx, relPath); err != nil {
+	if !ok {
+		err := noSumError{algo: algo, path: relPath}
+		b.noSum.Do(func() {
+			Log.Add("webdav", DirWarn, fmt.Sprintf("%v; it and other files without one show as unknown by checksum", err))
+		})
 		return "", err
 	}
-	if h, ok := b.sums.get(relPath, algo); ok {
-		return h, nil
-	}
-	return "", fmt.Errorf("no %s checksum for %s", algo, relPath)
+	return h, nil
 }
+
+// noSumError is a file the server gives no sum of algo. Another try gets
+// none either, and it is no fault of the server's: ErrUnsupported, which
+// Retry gives back at once, with no line in the log.
+type noSumError struct{ algo, path string }
+
+func (e noSumError) Error() string {
+	return fmt.Sprintf("the server gives no %s checksum for %s", e.algo, e.path)
+}
+
+func (noSumError) Is(target error) bool { return target == ErrUnsupported }
 
 func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
 	ms, err := b.propfind(ctx, relPath, "0")
@@ -1101,51 +1121,108 @@ func (b *WebDAVBackend) OpenAt(ctx context.Context, relPath string, offset int64
 	return rangeBody(ctx, resp, fmt.Sprintf("GET %s @%d", relPath, offset), offset)
 }
 
+// wdSums is the sums one answer gave for a file, as bytes, and which there
+// are (have). A map of strings for each file took some 370 bytes of it,
+// 370 MB for 1M files (W-M8).
+type wdSums struct {
+	have   uint8
+	md5    [16]byte
+	sha1   [20]byte
+	sha256 [32]byte
+}
+
+// wdSumBits are the sums sc reads, each with its bit in wdSums.have.
+var wdSumBits = map[string]uint8{"md5": 1, "sha1": 2, "sha256": 4}
+
+func (s *wdSums) field(algo string) []byte {
+	switch algo {
+	case "md5":
+		return s.md5[:]
+	case "sha1":
+		return s.sha1[:]
+	case "sha256":
+		return s.sha256[:]
+	}
+	return nil
+}
+
+// wdSumsOf is sums as bytes. A sum that is no hex, or not as long as its
+// algo's, is none.
+func wdSumsOf(sums map[string]string) wdSums {
+	var s wdSums
+	for algo, h := range sums {
+		f := s.field(algo)
+		if f == nil || len(h) != 2*len(f) {
+			continue
+		}
+		if _, err := hex.Decode(f, []byte(h)); err == nil {
+			s.have |= wdSumBits[algo]
+		}
+	}
+	return s
+}
+
+func (s *wdSums) sum(algo string) (string, bool) {
+	if s.have&wdSumBits[algo] == 0 {
+		return "", false
+	}
+	return hex.EncodeToString(s.field(algo)), true
+}
+
+// wdSumCache is the sums the latest answer about each file gave, and the
+// files it gave none.
 type wdSumCache struct {
-	mu sync.Mutex
-	m  map[string]map[string]string
+	mu   sync.Mutex
+	m    map[string]wdSums
+	none map[string]struct{}
+	seen uint8 // each sum an answer gave, for any file
 }
 
 func newWDSumCache() *wdSumCache {
-	return &wdSumCache{m: make(map[string]map[string]string)}
+	return &wdSumCache{m: make(map[string]wdSums), none: make(map[string]struct{})}
 }
 
-// put records the sums a listing gave for relPath. They replace what an
-// older listing said, and a listing with none drops that. They were added
-// to it, and one with none was ignored: after another client rewrote a
-// file of the same size, Checksum gave the old sum, with no request, and
-// the compare said "same" (W-M3).
+// put records the sums an answer gave for relPath. They replace what an
+// older answer said, and an answer with none says the file has none. They
+// were added to it, and one with none was ignored: after another client
+// rewrote a file of the same size, Checksum gave the old sum, with no
+// request, and the compare said "same" (W-M3).
 func (c *wdSumCache) put(relPath string, sums map[string]string) {
+	s := wdSumsOf(sums)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(sums) == 0 {
+	if s.have == 0 {
 		delete(c.m, relPath)
+		c.none[relPath] = struct{}{}
 		return
 	}
-	c.m[relPath] = maps.Clone(sums)
+	delete(c.none, relPath)
+	c.m[relPath] = s
+	c.seen |= s.have
 }
 
-func (c *wdSumCache) get(relPath, algo string) (string, bool) {
+// get is relPath's algo sum, as the latest answer about it gave it: ok
+// says there is one. known says there was an answer: with none, a file
+// is asked no more.
+func (c *wdSumCache) get(relPath, algo string) (h string, ok, known bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e := c.m[relPath]; e != nil {
-		h, ok := e[algo]
-		return h, ok
+	if s, found := c.m[relPath]; found {
+		h, ok = s.sum(algo)
+		return h, ok, true
 	}
-	return "", false
+	_, known = c.none[relPath]
+	return "", false, known
 }
 
-// algos is the checksums the listings so far carried, for any file.
+// algos is the checksums the answers so far carried, for any file.
 func (c *wdSumCache) algos() map[string]bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	seen := map[string]bool{}
-	for _, sums := range c.m {
-		for a := range sums {
+	for a, bit := range wdSumBits {
+		if c.seen&bit != 0 {
 			seen[a] = true
-		}
-		if seen["sha256"] && seen["sha1"] && seen["md5"] {
-			break // all sc reads
 		}
 	}
 	return seen
@@ -1154,5 +1231,6 @@ func (c *wdSumCache) algos() map[string]bool {
 func (c *wdSumCache) invalidate(relPath string) {
 	c.mu.Lock()
 	delete(c.m, relPath)
+	delete(c.none, relPath)
 	c.mu.Unlock()
 }
