@@ -56,6 +56,9 @@ type Model struct {
 	// relativeCounts (\) shows the sizes and counts, in the top bars and on
 	// each row, as how much more or less a side holds than the other side.
 	relativeCounts bool
+	// mouse is -mouse: sc may take the mouse. mouseOn is whether it has it
+	// now: an open dialog gives it to the terminal (syncMouse).
+	mouse, mouseOn bool
 
 	activeLeft    bool
 	lastSelect    time.Time // last click that only moved the cursor, for double-click
@@ -165,7 +168,35 @@ func (m *Model) ensureTick() tea.Cmd {
 	return m.tickCmd()
 }
 
+// SetMouse says whether the program takes the mouse when it starts
+// (-mouse).
+func (m *Model) SetMouse(on bool) { m.mouse, m.mouseOn = on, on }
+
+// Update handles msg. After it, an open dialog has the terminal take the
+// mouse, and a closed one gives it back to sc (syncMouse): a dialog opens
+// on keys, and the log also on a tick.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	mdl, cmd := m.update(msg)
+	return mdl, tea.Batch(cmd, m.syncMouse())
+}
+
+// syncMouse gives the mouse to the terminal while a dialog is open, so
+// the dialog's text can be selected and copied, and takes it back for the
+// panels. sc then sees no wheel in a dialog: a terminal that sends the
+// wheel as the arrow keys still scrolls the log.
+func (m *Model) syncMouse() tea.Cmd {
+	want := m.mouse && m.openModal() == nil
+	if want == m.mouseOn {
+		return nil
+	}
+	m.mouseOn = want
+	if want {
+		return tea.EnableMouseCellMotion
+	}
+	return tea.DisableMouse
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)

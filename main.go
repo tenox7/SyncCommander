@@ -151,6 +151,7 @@ func main() {
 	// hold, and waits for those a reopen replaced. main closed the first
 	// pair as well, so after a reopen they were closed twice (U25).
 	mdl := ui.NewModel(left, right, leftPath, rightPath, opts, *insecure, *deepScan, *parallel, *scanParallel, *batch, *verifyResume, *relative)
+	mdl.SetMouse(*mouse)
 	progOpts := []tea.ProgramOption{tea.WithAltScreen()}
 	if *mouse {
 		progOpts = append(progOpts, tea.WithMouseCellMotion())

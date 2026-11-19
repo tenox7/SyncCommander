@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,6 +29,39 @@ func TestWheelMovesCursorOnlyWhereArrowsScroll(t *testing.T) {
 	mouse(m, tea.MouseButtonWheelDown, 0, 0)
 	if m.left.panel.cursor != 1 {
 		t.Fatal("wheel moved the cursor under the help dialog")
+	}
+}
+
+// A dialog gives the mouse to the terminal, so its text can be selected
+// and copied; closing it takes the mouse back for the panels. The log also
+// opens by itself on a tick, so every message is followed by the check.
+// With -mouse=false sc never takes the mouse.
+func TestDialogsGiveTheMouseToTheTerminal(t *testing.T) {
+	m := scannedModel(t, "fake://tiny", "fake://tiny")
+	m.SetMouse(true)
+	want := func(what string, cmd tea.Cmd, msg tea.Msg) {
+		t.Helper()
+		if cmd == nil {
+			t.Errorf("%s sent nothing, want %T", what, msg)
+		} else if got := cmd(); fmt.Sprintf("%T", got) != fmt.Sprintf("%T", msg) {
+			t.Errorf("%s sent %T, want %T", what, got, msg)
+		}
+	}
+	for _, k := range []string{"i", "~", "?", "="} {
+		want(k+" (opens a dialog)", press(m, k), tea.DisableMouse())
+		if cmd := press(m, "down"); cmd != nil {
+			t.Errorf("%s: a key inside the dialog sent %T", k, cmd())
+		}
+		want(k+" then esc (closes it)", press(m, "esc"), tea.EnableMouseCellMotion())
+	}
+	m.logView.Open() // as autoOpenLog does on a tick
+	_, cmd := m.Update(tickMsg(time.Now()))
+	want("a tick under a log that opened by itself", cmd, tea.DisableMouse())
+	press(m, "esc")
+
+	m.SetMouse(false)
+	if cmd := press(m, "i"); cmd != nil {
+		t.Errorf("with -mouse=false, a dialog sent %T", cmd())
 	}
 }
 

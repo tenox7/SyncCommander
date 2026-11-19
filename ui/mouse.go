@@ -27,14 +27,14 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// wheel acts as the arrow key only where up/down scroll a list; in the open
-// dialog they switch fields.
+// wheel moves the cursor on the panels, as the arrow keys do. An open
+// dialog gives the mouse to the terminal (syncMouse): a wheel event that
+// comes while one is open was sent before it opened, and is dropped.
 func (m *Model) wheel(k tea.KeyType) (tea.Model, tea.Cmd) {
-	switch m.openModal().(type) {
-	case nil, *LogDialog, *DiffView, *SettingsDialog:
-		return m.handleKey(tea.KeyMsg{Type: k})
+	if m.openModal() != nil {
+		return m, nil
 	}
-	return m, nil
+	return m.handleKey(tea.KeyMsg{Type: k})
 }
 
 // click puts the cursor on the clicked row and activates its panel. A click on
