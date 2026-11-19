@@ -412,18 +412,25 @@ type StatusInfo struct {
 	Failed          int
 	ChecksumAlgo    string
 	ChecksumEnabled bool
+	ChecksumNamed   bool // a side's sums are its objects' names (restic, W-M3)
 	Spinner         string
 	Mem             MemUsage
 	Objects         int64 // tree nodes behind Mem.Live, for the per-object figure
 }
 
-func crcLabel(algo string, enabled bool) string {
-	switch algo {
-	case "":
+// crcLabel names the checksum compare. A compare with sums that are the
+// objects' names checks the names, not the content: NAME (W-M3).
+func crcLabel(algo string, enabled, named bool) string {
+	switch {
+	case algo == "":
 		if enabled {
 			return "WAIT"
 		}
 		return "NO"
+	case named:
+		return "NAME"
+	}
+	switch algo {
 	case "sha1", "sha256":
 		return "SHA"
 	default:
@@ -466,7 +473,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 	}
 
 	counters := fmt.Sprintf("  CRC:%s err:%d ret:%d rec:%d fail:%d  mem:%s/%s gc:%d",
-		crcLabel(info.ChecksumAlgo, info.ChecksumEnabled), info.Errors, info.Retries, info.Recovered, info.Failed,
+		crcLabel(info.ChecksumAlgo, info.ChecksumEnabled, info.ChecksumNamed), info.Errors, info.Retries, info.Recovered, info.Failed,
 		model.FormatSize(info.Mem.Live), model.FormatSize(info.Mem.Resident), info.Mem.GCCycles)
 
 	right := "?=help"

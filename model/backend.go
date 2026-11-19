@@ -164,6 +164,11 @@ type Caps struct {
 	// the files right in a folder too, but not for a few files of many
 	// (L20).
 	ListedSums bool
+	// NamedSums: the checksums are the objects' names, not read from their
+	// content. restic names each object by the SHA-256 of what it holds,
+	// so a compare with its sums checks the names: an object damaged on
+	// the server keeps its name and still shows as the same (W-M3).
+	NamedSums bool
 	// OwnsProgress: CopyFrom counts the bytes it sends against the context's
 	// progress counter itself (rsync), so the engine must not count them
 	// again (F21).

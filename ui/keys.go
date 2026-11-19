@@ -93,6 +93,7 @@ func (m *Model) handleTreeKey(k string) tea.Cmd {
 	case "<":
 		return m.startCopy(false)
 	case "=":
+		m.updateChecksumLabel()
 		m.settings.Open()
 	case "s", "S":
 		if !m.busy() {

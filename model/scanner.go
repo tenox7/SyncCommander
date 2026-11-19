@@ -71,6 +71,7 @@ type Scanner struct {
 	cksumProbed bool
 	cksumLeft   []string
 	cksumRight  []string
+	cksumNamed  [2]bool                     // by Side: its sums are its objects' names (Caps.NamedSums)
 	times       atomic.Pointer[timeOptions] // what compares use: the first scan's, then SetTimeOptions' (U16)
 }
 
@@ -993,6 +994,7 @@ func (s *Scanner) SwapSides() {
 	s.unlockTree()
 	s.cksumMu.Lock()
 	s.cksumLeft, s.cksumRight = s.cksumRight, s.cksumLeft
+	s.cksumNamed[SideLeft], s.cksumNamed[SideRight] = s.cksumNamed[SideRight], s.cksumNamed[SideLeft]
 	s.cksumMu.Unlock()
 }
 
@@ -1714,6 +1716,16 @@ func (s *Scanner) negotiateChecksum(ctx context.Context) (string, bool) {
 		logScanErr(fmt.Errorf("the right side's checksums: %w", err))
 		return "", false
 	}
+	leftCaps, err := left.Capabilities(ctx)
+	if err != nil {
+		logScanErr(fmt.Errorf("the left side's checksums: %w", err))
+		return "", false
+	}
+	rightCaps, err := right.Capabilities(ctx)
+	if err != nil {
+		logScanErr(fmt.Errorf("the right side's checksums: %w", err))
+		return "", false
+	}
 	leftSet, rightSet := toSet(leftAlgos), toSet(rightAlgos)
 	for _, a := range checksumPreference {
 		if leftSet[a] && rightSet[a] {
@@ -1724,9 +1736,19 @@ func (s *Scanner) negotiateChecksum(ctx context.Context) (string, bool) {
 	s.cksumMu.Lock()
 	s.cksumProbed = true
 	s.cksumLeft, s.cksumRight = leftAlgos, rightAlgos
+	s.cksumNamed = [2]bool{SideLeft: leftCaps.NamedSums, SideRight: rightCaps.NamedSums}
 	s.cksumAlgo, s.cksumOK = algo, ok
 	s.cksumMu.Unlock()
 	return algo, ok
+}
+
+// ChecksumNamed reports whether side's checksums are its objects' names,
+// not read from their content (Caps.NamedSums: restic). A compare with
+// such a side checks the names, and the UI says so (W-M3).
+func (s *Scanner) ChecksumNamed(side Side) bool {
+	s.cksumMu.RLock()
+	defer s.cksumMu.RUnlock()
+	return s.cksumNamed[side]
 }
 
 func (s *Scanner) ChecksumAlgo() string {

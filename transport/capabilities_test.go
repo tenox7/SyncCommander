@@ -64,7 +64,12 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		if caps.ListedSums && !caps.PrefetchSums {
 			t.Errorf("%s: ListedSums without PrefetchSums", name)
 		}
+		// W-M3: only restic gives its objects' names as their sums.
+		if named := name == "restic"; caps.NamedSums != named {
+			t.Errorf("%s: NamedSums = %v, want %v", name, caps.NamedSums, named)
+		}
 		caps.OwnsProgress, caps.RedialsItself, caps.Names, caps.ListedSums = false, false, model.NameRule{}, false
+		caps.NamedSums = false
 		if want := methodCaps(b); caps != want {
 			t.Errorf("%s: Caps %+v; its methods give %+v", name, caps, want)
 		}

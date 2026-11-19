@@ -148,6 +148,7 @@ func (m *Model) buildStatus(progress model.ScanProgress) StatusInfo {
 		Failed:          transport.Log.FailedCount(),
 		ChecksumAlgo:    m.scanner.ChecksumAlgo(),
 		ChecksumEnabled: m.cmpOpts.Checksum,
+		ChecksumNamed:   m.namedSums() != "",
 		Mem:             readMemUsage(),
 	}
 	if m.cachedStats != nil {

@@ -58,8 +58,10 @@ func (b *WebDAVBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
 }
 
+// restic names each object by the SHA-256 of its content and gives that
+// name as its checksum: its sums are names (NamedSums, W-M3).
 func (b *ResticBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true, NamedSums: true}, nil
 }
 
 // A remote whose sums come with its listings gives a folder's in one

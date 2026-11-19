@@ -186,9 +186,7 @@ func (m *Model) tick() tea.Cmd {
 	}
 	m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
 	m.tickCopy()
-	if algo := m.scanner.ChecksumAlgo(); algo != "" {
-		m.settings.UpdateChecksumLabel(algo)
-	}
+	m.updateChecksumLabel()
 	m.autoOpenLog()
 	m.refreshTree()
 	return m.tickCmd()

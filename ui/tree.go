@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"time"
 
 	"sc/model"
@@ -92,6 +93,33 @@ func (m *Model) openInfo() {
 	}
 	cl, cr := m.scanner.ChecksumInfo()
 	m.info.Open(*m.cachedStats, "L: "+m.left.backend.BasePath(), "R: "+m.right.backend.BasePath(), m.scanner.ChecksumAlgo(), cl, cr)
+	m.info.SetNamedSums(m.namedSums())
+}
+
+// namedSums names the sides whose checksums are their objects' names, not
+// read from their content (restic): "L", "R", "L, R", or "" (W-M3).
+func (m *Model) namedSums() string {
+	var sides []string
+	if m.scanner.ChecksumNamed(model.SideLeft) {
+		sides = append(sides, "L")
+	}
+	if m.scanner.ChecksumNamed(model.SideRight) {
+		sides = append(sides, "R")
+	}
+	return strings.Join(sides, ", ")
+}
+
+// updateChecksumLabel shows the agreed algorithm on the Settings line, and
+// the sides whose sums are names (W-M3).
+func (m *Model) updateChecksumLabel() {
+	algo := m.scanner.ChecksumAlgo()
+	if algo == "" {
+		return
+	}
+	if named := m.namedSums(); named != "" {
+		algo += ", " + named + ": names"
+	}
+	m.settings.UpdateChecksumLabel(algo)
 }
 
 // swapSides moves each pane, backend, open argument and panel, to the

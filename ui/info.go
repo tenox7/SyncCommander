@@ -21,6 +21,7 @@ type InfoDialog struct {
 	cksumAlgo  string
 	cksumLeft  string
 	cksumRight string
+	cksumNamed string // the sides whose sums are their objects' names (W-M3)
 }
 
 func NewInfoDialog() *InfoDialog {
@@ -33,6 +34,7 @@ func (d *InfoDialog) Open(stats TreeStats, left, right string, cksumAlgo string,
 	d.left = left
 	d.right = right
 	d.cksumAlgo = cksumAlgo
+	d.cksumNamed = ""
 	if len(cksumLeft) > 0 {
 		d.cksumLeft = strings.Join(cksumLeft, ",")
 	} else {
@@ -44,6 +46,11 @@ func (d *InfoDialog) Open(stats TreeStats, left, right string, cksumAlgo string,
 		d.cksumRight = "none"
 	}
 }
+
+// SetNamedSums names the sides whose checksums are their objects' names,
+// not read from their content (restic), so a compare of names does not
+// show as a check of the content (W-M3).
+func (d *InfoDialog) SetNamedSums(sides string) { d.cksumNamed = sides }
 
 func (d *InfoDialog) Close()       { d.visible = false }
 func (d *InfoDialog) IsOpen() bool { return d.visible }
@@ -101,6 +108,11 @@ func (d *InfoDialog) View(width, height int) string {
 	}
 	sb.WriteString(labelStyle.Render("Checksum"))
 	sb.WriteString(shown(fmt.Sprintf("%s  L:[%s]  R:[%s]", algo, d.cksumLeft, d.cksumRight)))
+	if d.cksumAlgo != "" && d.cksumNamed != "" {
+		sb.WriteString("\n")
+		sb.WriteString(labelStyle.Render(""))
+		sb.WriteString(shown(d.cksumNamed + ": the sums are the object names. The content is not read."))
+	}
 
 	sb.WriteString("\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(shown(d.left)))
