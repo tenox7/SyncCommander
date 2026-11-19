@@ -67,6 +67,21 @@ func newConnPool[T any](name string, primary T, maxExtras int, dial func(context
 // while ago) or the dial fails, and the pool does not wait or has none lent
 // out to wait for. ctx bounds a dial of a new extra and a wait.
 func (p *connPool[T]) acquire(ctx context.Context) (T, func()) {
+	return p.acquireWait(ctx, p.waits, DirErr)
+}
+
+// tryAcquire is acquire that never waits for an extra lent out: an idle
+// one, a new one while one may be dialed, or else the primary at once. A
+// listing takes it, never to wait behind a transfer (L15). A dial that
+// fails is a warning: the listing runs on the primary, and an error would
+// open the log on each scan of a server that takes few connections.
+func (p *connPool[T]) tryAcquire(ctx context.Context) (T, func()) {
+	return p.acquireWait(ctx, false, DirWarn)
+}
+
+// acquireWait is acquire, waiting for an extra lent out only with waits. A
+// dial that fails is logged as failed.
+func (p *connPool[T]) acquireWait(ctx context.Context, waits bool, failed Dir) (T, func()) {
 	if p == nil {
 		var zero T
 		return zero, func() {}
@@ -92,13 +107,13 @@ func (p *connPool[T]) acquire(ctx context.Context) (T, func()) {
 			break
 		}
 		if p.size < p.maxExtras && !time.Now().Before(p.next) {
-			if c, ok := p.dialLocked(ctx); ok {
+			if c, ok := p.dialLocked(ctx, failed); ok {
 				p.mu.Unlock()
 				return c, func() { p.release(c) }
 			}
 			continue
 		}
-		if !p.waits || p.size == 0 {
+		if !waits || p.size == 0 {
 			break
 		}
 		if p.freed == nil {
@@ -118,8 +133,9 @@ func (p *connPool[T]) acquire(ctx context.Context) (T, func()) {
 
 // dialLocked dials a new extra, mu let go meanwhile. A dial that fails
 // wakes the waiters, which may have waited for this one, and, unless ctx
-// ended it, starts the wait before the next dial, or doubles it.
-func (p *connPool[T]) dialLocked(ctx context.Context) (T, bool) {
+// ended it, starts the wait before the next dial, or doubles it, and is
+// logged as failed.
+func (p *connPool[T]) dialLocked(ctx context.Context, failed Dir) (T, bool) {
 	p.size++
 	p.mu.Unlock()
 	c, err := p.dial(ctx)
@@ -134,7 +150,7 @@ func (p *connPool[T]) dialLocked(ctx context.Context) (T, bool) {
 	if ctx.Err() == nil && !time.Now().Before(p.next) {
 		p.dialWait = min(max(2*p.dialWait, poolRedial), poolRedialMax)
 		p.next = time.Now().Add(p.dialWait)
-		Log.Add(p.name, DirErr, fmt.Sprintf("an extra connection: %v; no new one for %v", err, p.dialWait))
+		Log.Add(p.name, failed, fmt.Sprintf("an extra connection: %v; no new one for %v", err, p.dialWait))
 	}
 	var zero T
 	return zero, false

@@ -41,14 +41,15 @@ type FTPBackend struct {
 	pool    *connPool[*ftpConn]
 	// prim is held while the primary connection is in use: a call waits for
 	// it only as long as its ctx lets it, as a call stuck on the server
-	// holds it (L8). It guards conn and dashA.
+	// holds it (L8). It guards conn.
 	prim    chan struct{}
 	closed  atomic.Bool
 	dirs    sync.Map // directories known to exist, so uploads skip the MKD dance
 	capture *listCapture
 	// dashA is whether LIST takes -a on a server without MLSD: 0 not known
-	// yet, 1 yes, -1 no. See listLocked. Guarded by prim.
-	dashA int
+	// yet, 1 yes, -1 no. See listOn. The listings on every connection
+	// share it.
+	dashA atomic.Int32
 }
 
 // ftpIdle is the longest one read or one write on an FTP socket may wait for
@@ -218,15 +219,20 @@ func (d *ftpDataConn) Close() error {
 	return d.Conn.Close()
 }
 
-// ftpConn is one extra control+data connection used for a parallel transfer.
-// A single ftp.ServerConn is not safe for concurrent use (one data conn at a
-// time), so each parallel slot gets its own. lastUsed gates a liveness probe
-// on acquire; see acquireExtra.
+// ftpConn is one extra control+data connection, for a parallel transfer or
+// for a listing beside another (L15). A single ftp.ServerConn is not safe
+// for concurrent use (one data conn at a time), so each parallel slot gets
+// its own. lastUsed gates a liveness probe on acquire; see acquireExtra.
+// capture reads its listings, as the primary's does.
 type ftpConn struct {
 	conn     *ftp.ServerConn
 	socks    *ftpSockets
+	capture  *listCapture
 	lastUsed time.Time
 }
+
+// lister is the extra as a listing runs on it.
+func (c *ftpConn) lister() ftpLister { return ftpLister{c.conn, c.capture} }
 
 func (c *ftpConn) close() {
 	if c != nil && c.conn != nil {
@@ -409,12 +415,13 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 	// none: the server takes no connection beyond the primary and the
 	// checksum one.
 	dial := func(ctx context.Context) (*ftpConn, error) {
-		c, socks, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, nil)
+		lc := new(listCapture)
+		c, socks, derr := dialFTPConn(ctx, addr, scheme, user, pass, tlsCfg, lc)
 		if derr != nil {
 			return nil, derr
 		}
 		Log.Add("ftp", DirIn, "extra connection dialed")
-		return &ftpConn{conn: c, socks: socks, lastUsed: time.Now()}, nil
+		return &ftpConn{conn: c, socks: socks, capture: lc, lastUsed: time.Now()}, nil
 	}
 	b.pool = newConnPool[*ftpConn]("ftp", nil, parallel, dial, func(c *ftpConn) { c.close() })
 	b.pool.waits = true
@@ -482,18 +489,22 @@ func (b *FTPBackend) Close() error {
 	return nil
 }
 
-// acquireExtra returns a transfer connection and its release, which takes
-// the transfer's error, or ok=false when there is none to have: the server
-// takes no extra connection, the pool is closed or ctx ended. The caller
-// then runs the transfer on the primary, under prim. Extras sit idle while
-// the UI scans (which uses the primary only), so one idle for a minute may
-// have been dropped by the server, and one a transfer failed on may be
-// dead: such an extra is asked (NOOP) before it is lent out. One found dead
-// is dropped, and the pool dials the next, its wait and all: it was dialed
-// again here, outside that wait, once per transfer (L16).
-func (b *FTPBackend) acquireExtra(ctx context.Context) (*ftpConn, func(error), bool) {
+// acquireExtra returns an extra connection and its release, which takes
+// the error of the call on it, or ok=false when there is none to have: the
+// server takes no extra connection, the pool is closed or ctx ended, or,
+// with wait false, each extra is lent out. The caller then runs on the
+// primary, under prim. An extra may sit idle a long while, so one idle for
+// a minute may have been dropped by the server, and one a call failed on
+// may be dead: such an extra is asked (NOOP) before it is lent out. One
+// found dead is dropped, and the pool dials the next, its wait and all: it
+// was dialed again here, outside that wait, once per transfer (L16).
+func (b *FTPBackend) acquireExtra(ctx context.Context, wait bool) (*ftpConn, func(error), bool) {
+	acquire := b.pool.acquire
+	if !wait {
+		acquire = b.pool.tryAcquire
+	}
 	for {
-		c, poolRelease := b.pool.acquire(ctx)
+		c, poolRelease := acquire(ctx)
 		if c == nil {
 			poolRelease()
 			return nil, nil, false
@@ -547,6 +558,11 @@ func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
 		return err
 	}
 	defer b.unlockPrimary()
+	return b.onPrimaryLocked(ctx, op)
+}
+
+// onPrimaryLocked is withPrimary once prim is held.
+func (b *FTPBackend) onPrimaryLocked(ctx context.Context, op func() error) error {
 	defer b.abortOnCancel(ctx)()
 	err := op()
 	if err == nil || ctx.Err() != nil || b.conn.NoOp() == nil {
@@ -563,17 +579,74 @@ func (b *FTPBackend) withPrimary(ctx context.Context, op func() error) error {
 	return op()
 }
 
+// List lists relDir on the primary when it is free, else on an extra, so
+// listings run side by side: on the primary alone a scan of 8 folders at
+// once listed them in turn (L15). A listing waits for no extra a transfer
+// holds. Only with no extra to have does it wait for the primary; that
+// wait is not the listing's time, which starts once it has the primary
+// (ListWait). A listing on an extra that died under it runs on the
+// primary.
 func (b *FTPBackend) List(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	var result []model.FileEntry
-	err := b.withPrimary(ctx, func() (err error) {
-		result, err = b.listDirLocked(ctx, relDir)
-		return err
-	})
+	onPrimary := func(ctx context.Context) error {
+		defer b.unlockPrimary()
+		return b.onPrimaryLocked(ctx, func() (err error) {
+			result, err = b.listDir(ctx, b.lister(), relDir)
+			return err
+		})
+	}
+	if b.tryLockPrimary() {
+		err := onPrimary(ctx)
+		return result, err
+	}
+	if c, release, ok := b.acquireExtra(ctx, false); ok {
+		stop := CancelCloser(ctx, c.socks)
+		entries, err := b.listDir(ctx, c.lister(), relDir)
+		stop()
+		if err == nil || ctx.Err() != nil || c.probe(ctx) == nil {
+			release(err)
+			return entries, err
+		}
+		Log.Add("ftp", DirIn, "an extra connection is gone: dropped")
+		b.pool.discard(c)
+	}
+	wait, d, stopWait := model.ListWait(ctx)
+	defer stopWait()
+	if err := b.lockPrimary(wait); err != nil {
+		return nil, err
+	}
+	if d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(wait, d)
+		defer cancel()
+	}
+	err := onPrimary(ctx)
 	return result, err
 }
 
-func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.FileEntry, error) {
-	dir, entries, err := b.rawListLocked(ctx, relDir)
+// tryLockPrimary takes prim if it is free now.
+func (b *FTPBackend) tryLockPrimary() bool {
+	select {
+	case b.prim <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// ftpLister is a control connection a listing runs on, with the capture
+// that reads its listing streams: the primary, or an extra (L15).
+type ftpLister struct {
+	conn    *ftp.ServerConn
+	capture *listCapture
+}
+
+// lister is the primary as a listing runs on it; prim is held.
+func (b *FTPBackend) lister() ftpLister { return ftpLister{b.conn, b.capture} }
+
+// listDir lists relDir on l: the primary, under prim, or an extra.
+func (b *FTPBackend) listDir(ctx context.Context, l ftpLister, relDir string) ([]model.FileEntry, error) {
+	dir, entries, err := b.rawList(ctx, l, relDir)
 	if err != nil {
 		return nil, err
 	}
@@ -585,21 +658,21 @@ func (b *FTPBackend) listDirLocked(ctx context.Context, relDir string) ([]model.
 		if e.Name == "." || e.Name == ".." {
 			continue
 		}
-		result = append(result, b.entryLocked(path.Join(relDir, e.Name), path.Join(dir, e.Name), e, false))
+		result = append(result, b.entry(l, path.Join(relDir, e.Name), path.Join(dir, e.Name), e, false))
 	}
 	return result, nil
 }
 
-// rawListLocked lists relDir, at dir on the server, as the library reads it.
-func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir string, entries []*ftp.Entry, err error) {
+// rawList lists relDir, at dir on the server, on l, as the library reads it.
+func (b *FTPBackend) rawList(ctx context.Context, l ftpLister, relDir string) (dir string, entries []*ftp.Entry, err error) {
 	if ctx.Err() != nil {
 		return "", nil, ctx.Err()
 	}
 	dir = b.abs(relDir)
-	entries, err = b.listLocked(dir)
+	entries, err = b.listOn(l, dir)
 	if err == nil && len(entries) == 0 {
 		// Some servers answer an empty 226 for a missing dir; CWD tells them apart.
-		err = b.conn.ChangeDir(dir)
+		err = l.conn.ChangeDir(dir)
 	}
 	if err != nil {
 		Log.Add("ftp", DirErr, err.Error())
@@ -609,14 +682,14 @@ func (b *FTPBackend) rawListLocked(ctx context.Context, relDir string) (dir stri
 	return dir, entries, nil
 }
 
-// entryLocked is the row of relPath, at p on the server, which a listing or
-// MLST described as e. MLSD and MLST carry times to the second. A LIST
+// entry is the row of relPath, at p on the server, which a listing or MLST
+// on l described as e. MLSD and MLST carry times to the second. A LIST
 // time is kept to the minute, or the day (listTimeRes), which the compare
 // takes as exactly as that (L17); with exact, as for a Stat, MDTM reads it
 // to the second. A listing asked MDTM for every entry: a round trip a
 // file, which the time for a listing ran out on, and 14 hours for 1M
 // files at 50 ms (L15).
-func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry, exact bool) model.FileEntry {
+func (b *FTPBackend) entry(l ftpLister, relPath, p string, e *ftp.Entry, exact bool) model.FileEntry {
 	mode := os.FileMode(0644)
 	switch e.Type {
 	case ftp.EntryTypeFolder:
@@ -627,10 +700,10 @@ func (b *FTPBackend) entryLocked(relPath, p string, e *ftp.Entry, exact bool) mo
 		mode = os.ModeIrregular | 0644
 	}
 	modTime, res := e.Time, model.TimeSecond
-	if !b.conn.IsTimePreciseInList() {
+	if !l.conn.IsTimePreciseInList() {
 		res = listTimeRes(e.Time)
-		if exact && b.conn.IsGetTimeSupported() {
-			if t, err := b.conn.GetTime(p); err == nil {
+		if exact && l.conn.IsGetTimeSupported() {
+			if t, err := l.conn.GetTime(p); err == nil {
 				modTime, res = t, model.TimeSecond
 			}
 		}
@@ -695,7 +768,7 @@ func (b *FTPBackend) statLocked(ctx context.Context, relPath string) (model.File
 	if raw != nil {
 		markMLSDTypes(raw.Bytes(), []*ftp.Entry{e})
 	}
-	return b.entryLocked(relPath, p, e, true), nil
+	return b.entry(b.lister(), relPath, p, e, true), nil
 }
 
 func (b *FTPBackend) statByListingLocked(ctx context.Context, relPath, p string) (model.FileEntry, error) {
@@ -705,14 +778,14 @@ func (b *FTPBackend) statByListingLocked(ctx context.Context, relPath, p string)
 		}
 		return model.FileEntry{IsDir: true, Mode: os.ModeDir | 0755}, nil
 	}
-	dir, entries, err := b.rawListLocked(ctx, model.DirOf(relPath))
+	dir, entries, err := b.rawList(ctx, b.lister(), model.DirOf(relPath))
 	if err != nil {
 		return model.FileEntry{}, ftpStatErr(relPath, err)
 	}
 	name := path.Base(relPath)
 	for _, e := range entries {
 		if e.Name == name {
-			return b.entryLocked(relPath, path.Join(dir, name), e, true), nil
+			return b.entry(b.lister(), relPath, path.Join(dir, name), e, true), nil
 		}
 	}
 	return model.FileEntry{}, fmt.Errorf("ftp: %s: %w", relPath, fs.ErrNotExist)
@@ -727,36 +800,36 @@ func ftpStatErr(relPath string, err error) error {
 	return err
 }
 
-// listLocked lists dir on the primary connection; b.mu is held. A server
+// listOn lists dir on l: the primary, under prim, or an extra. A server
 // without MLSD gets LIST, and servers that work like ls, vsftpd by default,
 // then leave out names starting with "." unless asked with LIST -a. A server
 // that takes no options could read "-a" as a name and answer with nothing.
 // So the first listing that has entries runs both forms, and -a is kept
 // only when its listing is the plain one plus names starting with ".".
-func (b *FTPBackend) listLocked(dir string) ([]*ftp.Entry, error) {
-	if b.conn.IsTimePreciseInList() || b.dashA < 0 {
-		return b.listChecked(dir)
+func (b *FTPBackend) listOn(l ftpLister, dir string) ([]*ftp.Entry, error) {
+	if l.conn.IsTimePreciseInList() || b.dashA.Load() < 0 {
+		return l.listChecked(dir)
 	}
-	if b.dashA > 0 {
-		return b.listChecked("-a " + dir)
+	if b.dashA.Load() > 0 {
+		return l.listChecked("-a " + dir)
 	}
-	plain, err := b.listChecked(dir)
+	plain, err := l.listChecked(dir)
 	if err != nil {
 		return nil, err
 	}
-	all, err := b.listChecked("-a " + dir)
+	all, err := l.listChecked("-a " + dir)
 	var reply *textproto.Error
 	switch {
 	case err != nil && !errors.As(err, &reply):
 		return nil, err // the connection failed, not the -a
 	case err != nil || !onlyAddsDotNames(plain, all):
-		b.dashA = -1
+		b.dashA.Store(-1)
 		if !hasDotName(plain) {
 			Log.Add("ftp", DirWarn, `this server has no MLSD and does not take LIST -a: names starting with "." may be left out of its listings`)
 		}
 		return plain, nil
 	case len(realEntries(plain)) > 0:
-		b.dashA = 1
+		b.dashA.Store(1)
 	}
 	return all, nil
 }
@@ -764,11 +837,11 @@ func (b *FTPBackend) listLocked(dir string) ([]*ftp.Entry, error) {
 // listChecked runs one LIST or MLSD. The library drops a line it cannot
 // parse; such a line is an entry the listing would lack, so it fails the
 // listing here.
-func (b *FTPBackend) listChecked(arg string) ([]*ftp.Entry, error) {
+func (l ftpLister) listChecked(arg string) ([]*ftp.Entry, error) {
 	Log.Add("ftp", DirOut, "LIST "+arg)
-	b.capture.start()
-	entries, err := b.conn.List(arg)
-	raw := b.capture.stop()
+	l.capture.start()
+	entries, err := l.conn.List(arg)
+	raw := l.capture.stop()
 	if err != nil {
 		return nil, err
 	}
@@ -896,8 +969,9 @@ func mlsdType(v string) ftp.EntryType {
 }
 
 // listCapture records what a listing's data connection reads while a List
-// runs on the primary connection. The library reads it on the List
-// caller's goroutine, so no lock is needed around the buffer.
+// runs on its connection, the primary or an extra: each has its own. The
+// library reads it on the List caller's goroutine, so no lock is needed
+// around the buffer.
 type listCapture struct {
 	buf  atomic.Pointer[bytes.Buffer]
 	ctrl atomic.Pointer[bytes.Buffer] // the control connection, while a Stat runs
@@ -995,7 +1069,7 @@ func (b *FTPBackend) SetTimes(ctx context.Context, relPath string, mtime, _, _ t
 // have (acquireExtra). No retry: src is consumed.
 func (b *FTPBackend) store(ctx context.Context, relPath string, src io.Reader, offset int64) (err error) {
 	fullPath := b.abs(relPath)
-	if ex, release, ok := b.acquireExtra(ctx); ok {
+	if ex, release, ok := b.acquireExtra(ctx, true); ok {
 		defer func() { release(err) }()
 		return b.storeOn(ctx, ex.conn, ex.socks, fullPath, src, offset)
 	}
@@ -1182,7 +1256,7 @@ func (b *FTPBackend) RemoveAll(ctx context.Context, relPath string) error {
 // through the link, out of the base too. Only the link's own folder lists
 // it as a link.
 func (b *FTPBackend) entryInFolderLocked(fullPath string) (*ftp.Entry, error) {
-	entries, err := b.listLocked(path.Dir(fullPath))
+	entries, err := b.listOn(b.lister(), path.Dir(fullPath))
 	if err != nil {
 		return nil, err
 	}
@@ -1195,7 +1269,7 @@ func (b *FTPBackend) entryInFolderLocked(fullPath string) (*ftp.Entry, error) {
 }
 
 func (b *FTPBackend) removeAllLocked(fullPath string) error {
-	entries, err := b.listLocked(fullPath)
+	entries, err := b.listOn(b.lister(), fullPath)
 	if err != nil {
 		return b.conn.Delete(fullPath)
 	}
@@ -1237,7 +1311,7 @@ func (b *FTPBackend) OpenAt(ctx context.Context, relPath string, offset int64) (
 func (b *FTPBackend) retr(ctx context.Context, relPath string, offset int64) (io.ReadCloser, error) {
 	Log.Add("ftp", DirOut, fmt.Sprintf("RETR %s @%d", relPath, offset))
 	fullPath := b.abs(relPath)
-	if ex, release, ok := b.acquireExtra(ctx); ok {
+	if ex, release, ok := b.acquireExtra(ctx, true); ok {
 		stop := CancelCloser(ctx, ex.socks)
 		resp, err := retrFrom(ex.conn, fullPath, offset)
 		if err != nil {

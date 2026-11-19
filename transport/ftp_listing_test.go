@@ -103,6 +103,8 @@ type fakeFTPD struct {
 	mu          sync.Mutex
 	lists       []string // LIST arguments, in order
 	listConns   []int    // the connection each LIST came on
+	listing     int      // listings being sent now
+	mostListing int      // the most sent at once
 	logins      int      // PASS commands answered
 	quits       []int    // the connections that said QUIT
 	conns       []net.Conn
@@ -477,6 +479,10 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 				dc.Close()
 				return
 			}
+			f.mu.Lock()
+			f.listing++
+			f.mostListing = max(f.mostListing, f.listing)
+			f.mu.Unlock()
 			for i, l := range f.list(arg) {
 				if i > 0 && f.listPace > 0 {
 					time.Sleep(f.listPace)
@@ -484,6 +490,9 @@ func (f *fakeFTPD) serve(c net.Conn, n int, tlsCfg *tls.Config) {
 				io.WriteString(dc, l+"\r\n")
 			}
 			dc.Close()
+			f.mu.Lock()
+			f.listing--
+			f.mu.Unlock()
 			reply("226 Directory send OK.")
 		case "MLST":
 			p := path.Clean(arg)
