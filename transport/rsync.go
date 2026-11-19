@@ -45,12 +45,13 @@ func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
 		port = "873"
 	}
 	module, base, _ := strings.Cut(strings.TrimPrefix(remotePath, "/"), "/")
+	// A URL no try can use is final (R18).
 	if module == "" {
-		return nil, errors.New("rsync: module name required in URL")
+		return nil, model.WithKind(fs.ErrInvalid, errors.New("rsync: module name required in URL"))
 	}
 	base = strings.Trim(base, "/")
 	if strings.ContainsAny(remotePath, "\r\n") {
-		return nil, errors.New("rsync: a daemon takes no module or folder name with a line break")
+		return nil, model.WithKind(fs.ErrInvalid, errors.New("rsync: a daemon takes no module or folder name with a line break"))
 	}
 
 	displayHost := host
@@ -210,13 +211,15 @@ func (b *RsyncBackend) transfer(ctx context.Context, flags []string, remote stri
 	if err == nil {
 		return nil
 	}
+	// A download of what is not there: stock rsyncd says so, then resets
+	// the connection, which read as a lost one (R18).
+	if !send && notThere(peer.problems()) {
+		return fmt.Errorf("RECV %s: %w", remote, fs.ErrNotExist)
+	}
 	msgs := peer.all()
-	for _, m := range msgs {
-		if strings.Contains(m, "module is read only") {
-			Log.Add("rsync", DirFatal, "module is read only, aborting operation")
-			TriggerFatalAbort(ctx)
-			break
-		}
+	if readOnly(msgs) {
+		Log.Add("rsync", DirFatal, "module is read only, aborting operation")
+		TriggerFatalAbort(ctx)
 	}
 	if len(msgs) > 0 {
 		err = fmt.Errorf("%w: %s", err, strings.Join(msgs[:min(len(msgs), 3)], "; "))
@@ -444,14 +447,34 @@ func statEntry(label, relPath string, result *rsyncclient.Result, peer *peerMsgs
 	return model.FileEntry{}, incompleteListing(label, probs)
 }
 
+// readOnly reports the daemon's word that the module takes no writes:
+// "ERROR: module is read only", from stock rsyncd and gorsyncd alike. It
+// is a message's whole reason (reasons), never words in a name a message
+// gives: an upload of a file named "module is read only" that the daemon
+// could not write aborted the whole operation (R18).
+func readOnly(msgs []string) bool {
+	for _, m := range msgs {
+		for _, r := range reasons(m) {
+			if strings.TrimSpace(r) == "module is read only" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // notThere reports whether the messages of a one-path run say only that
 // the path is missing: `link_stat "..." failed: No such file or directory
 // (2)` from rsync, the same in Go's lower case from gorsyncd since gorsync
 // cf119b2. An older gorsyncd says nothing and only sets io_error, as for a
-// path it cannot read; that stays an error, never "not there".
+// path it cannot read; that stays an error, never "not there". The words
+// are read at the end of a message, where the reason is, never in the
+// path it names: a file named "no such file or directory" that could not
+// be read was "not there" (R18).
 func notThere(msgs []string) bool {
 	for _, m := range msgs {
-		if !strings.Contains(strings.ToLower(m), "no such file or directory") {
+		m = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(m)), " (2)")
+		if !strings.HasSuffix(m, "no such file or directory") {
 			return false
 		}
 	}
@@ -514,8 +537,14 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 	if err != nil {
 		return nil, err
 	}
-	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), remote)
+	peer := &peerMsgs{}
+	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), remote, rsyncclient.WithStderr(peer))
 	if err != nil {
+		// Stock rsyncd says a path is not there, then resets the
+		// connection, which read as a passing failure (R18).
+		if notThere(peer.problems()) {
+			return nil, fmt.Errorf("MD4 %s: %w", remote, fs.ErrNotExist)
+		}
 		return nil, err
 	}
 	got := md4Sums(scope, recursive, result.FileList)
@@ -952,7 +981,11 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 	}
 	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
 		if offset > 0 {
-			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, rsyncclient.WithUnverifiedAppend())
+			peer := &peerMsgs{}
+			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, rsyncclient.WithUnverifiedAppend(), rsyncclient.WithStderr(peer))
+			if (err != nil || res.XferErrors > 0 || res.IOErrors != 0) && notThere(peer.problems()) {
+				return fmt.Errorf("RECV %s: %w", remote, fs.ErrNotExist)
+			}
 			if err != nil {
 				return err
 			}

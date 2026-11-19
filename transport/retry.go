@@ -183,13 +183,13 @@ func SizeMismatch(got, want int64) error {
 
 // isPermanentError reports an error another try cannot fix. The kinds are
 // read by type (D3): a refused login, a full disk, a backend that stopped
-// connecting (F7). The words below are what servers send as text, kept
-// for the backends that do not mark their errors yet.
+// connecting (F7). The words (finalWords) are what servers send as text,
+// kept for the backends that do not mark their errors yet.
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) || errors.Is(err, ErrTempRoom) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, fs.ErrInvalid) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) || errors.Is(err, ErrTempRoom) {
 		return true
 	}
 	if GivesUp(err) {
@@ -214,13 +214,70 @@ func isPermanentError(err error) bool {
 	if errors.As(err, &pe) && pe.Err != nil {
 		return isPermanentError(pe.Err)
 	}
-	msg := strings.ToLower(err.Error())
-	for _, sub := range []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported", "unknown module"} {
-		if strings.Contains(msg, sub) {
-			return true
+	return saysFinal(err)
+}
+
+// finalWords are what a server says, as text, of an answer another try
+// cannot change.
+var finalWords = []string{"permission denied", "operation not permitted", "does not exist", "no such file", "not supported", "unknown module"}
+
+// saysFinal reports finalWords in a reason err gives (reasons), or one an
+// error it wraps gives: a wrapper may put more after it, as the rsync
+// backend puts the daemon's messages after the run's error.
+func saysFinal(err error) bool {
+	for _, r := range reasons(strings.ToLower(err.Error())) {
+		for _, w := range finalWords {
+			if strings.Contains(r, w) {
+				return true
+			}
+		}
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		if in := e.Unwrap(); in != nil {
+			return saysFinal(in)
+		}
+	case interface{ Unwrap() []error }:
+		for _, in := range e.Unwrap() {
+			if in != nil && saysFinal(in) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// reasons gives what each message in text says went wrong: the words after
+// its last ": " outside double quotes. Go, rsync, scp and SFTP put the
+// reason after the path or command it is about, and rsync quotes the names
+// it gives, so a name is not read as a reason. The words were read in all
+// of the text: a file or folder named "no such file" made a passing
+// failure final, and an upload of one named "module is read only" aborted
+// the operation (R18). A message ends at a line break, as errors.Join puts
+// them, and at "; " outside quotes, as the rsync backend puts the daemon's.
+func reasons(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		from, quoted := 0, false
+		for i := 0; i < len(line); i++ {
+			if line[i] == '"' {
+				quoted = !quoted
+				continue
+			}
+			if quoted || !strings.HasPrefix(line[i+1:], " ") {
+				continue
+			}
+			switch line[i] {
+			case ':':
+				from = i + 2
+			case ';':
+				out = append(out, line[from:i])
+				from = i + 2
+			}
+		}
+		out = append(out, line[from:])
+	}
+	return out
 }
 
 func backoffDelay(attempt int) time.Duration {

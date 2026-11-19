@@ -53,7 +53,7 @@ func (b *RsyncBackend) daemonHandshake(ctx context.Context, conn io.ReadWriter, 
 		case strings.HasPrefix(line, "@RSYNCD: AUTHREQD "):
 			pass := b.password()
 			if pass == "" {
-				return false, errors.New("daemon requires a password: use rsync://user:pass@host/module, or set RSYNC_PASSWORD")
+				return false, model.WithKind(model.ErrAuth, errors.New("daemon requires a password: use rsync://user:pass@host/module, or set RSYNC_PASSWORD"))
 			}
 			challenge := strings.TrimPrefix(line, "@RSYNCD: AUTHREQD ")
 			if _, err := fmt.Fprintf(conn, "%s %s\n", b.authUser(), rsyncAuthHash(pass, challenge)); err != nil {
@@ -70,10 +70,18 @@ func (b *RsyncBackend) daemonHandshake(ctx context.Context, conn io.ReadWriter, 
 		case line == "@RSYNCD: EXIT":
 			return true, nil
 		case strings.HasPrefix(line, "@ERROR"):
-			if strings.Contains(line, "auth failed") {
-				return false, model.WithKind(model.ErrAuth, errors.New(line))
+			// A refusal at login is final, whatever its reason: a module
+			// the daemon does not have, a host it does not allow, a
+			// password it refused, a module folder it cannot enter.
+			// Another connect is refused the same way, and refused
+			// connects can get an address banned; each read as a passing
+			// failure, six connects a call (R18). A full server is the
+			// one that may let a later connect in, read where the daemon
+			// puts its reason, never in a module name it gives back.
+			if strings.HasPrefix(line, "@ERROR: max connections") {
+				return false, model.WithKind(model.ErrUnreachable, errors.New(line))
 			}
-			return false, errors.New(line)
+			return false, model.WithKind(model.ErrAuth, errors.New(line))
 		}
 		// Anything else is the message of the day.
 	}
