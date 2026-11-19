@@ -123,6 +123,21 @@ func TestPanelTopBarDeltasFollowTheSide(t *testing.T) {
 	wantAll(t, "right top bar", ansi.Strip(RenderPanelTopBar(stats, false, true, "", 60)), "-2d +2f -2.0K")
 }
 
+// Counts over 999 are short as the size is: +943545d +5345645f read as
+// digits to count.
+func TestPanelTopBarShortensLargeCounts(t *testing.T) {
+	stats := &TreeStats{LeftDirs: 943545 + 12, RightDirs: 12, LeftFiles: 5345645 + 999, RightFiles: 999, LeftSize: 80 << 30}
+	wantAll(t, "relative", ansi.Strip(RenderPanelTopBar(stats, true, true, "", 60)), "+943.5kd +5.3Mf +80.0G")
+	wantAll(t, "relative right", ansi.Strip(RenderPanelTopBar(stats, false, true, "", 60)), "-943.5kd -5.3Mf -80.0G")
+	wantAll(t, "absolute", ansi.Strip(RenderPanelTopBar(stats, true, false, "", 60)), "943.6kd 5.3Mf 80.0G")
+	wantAll(t, "absolute right", ansi.Strip(RenderPanelTopBar(stats, false, false, "", 60)), "12d 999f 0B")
+}
+
+func TestStatusBarIdleTotalsAreShort(t *testing.T) {
+	s := ansi.Strip(RenderStatusBar(StatusInfo{State: "IDLE", DirsListed: 943545, FilesScanned: 5345645, TotalSize: 80 << 30}, 200))
+	wantAll(t, "status bar", s, "Totals: 943.5kd, 5.3Mf, ")
+}
+
 // Absolute, each top bar shows what its own side holds, with no sign.
 func TestPanelTopBarTotalsFollowTheSide(t *testing.T) {
 	stats := &TreeStats{LeftDirs: 3, RightDirs: 1, LeftFiles: 10, RightFiles: 12, LeftSize: 3 << 10, RightSize: 1 << 10}

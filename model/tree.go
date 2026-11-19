@@ -1365,6 +1365,22 @@ func FormatSize(b int64) string {
 	}
 }
 
+// FormatCount is a count of folders or files, short as FormatSize makes a
+// size: as it is up to 999, then in thousands (k), millions (M), billions
+// (G) and up, as 943.5k or 5.3M. A count goes up in thousands, not in 1024s;
+// G and not B for billions, as B is bytes.
+func FormatCount(n int64) string {
+	if n > -1000 && n < 1000 {
+		return fmt.Sprint(n)
+	}
+	// From 999.95 up, %.1f shows 1000.0: that is 1.0 of the next unit.
+	v, units := float64(n)/1000, "kMGTPE"
+	for (v >= 999.95 || v <= -999.95) && len(units) > 1 {
+		v, units = v/1000, units[1:]
+	}
+	return fmt.Sprintf("%.1f%c", v, units[0])
+}
+
 func FormatRate(bytesPerSec float64) string {
 	switch {
 	case bytesPerSec >= 1<<50:

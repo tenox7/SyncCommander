@@ -367,7 +367,7 @@ func RenderPanelTopBar(stats *TreeStats, isLeft, relative bool, prefix string, w
 			sb.WriteString(fmt.Sprintf("%sd %sf %s",
 				formatDelta(dirs-oDirs), formatDelta(files-oFiles), formatSizeDelta(size-oSize)))
 		} else {
-			sb.WriteString(fmt.Sprintf("%dd %df %s", dirs, files, model.FormatSize(size)))
+			sb.WriteString(fmt.Sprintf("%sd %sf %s", model.FormatCount(int64(dirs)), model.FormatCount(int64(files)), model.FormatSize(size)))
 		}
 	}
 	// One line: a longer text wrapped onto a second, and the two halves,
@@ -376,11 +376,13 @@ func RenderPanelTopBar(stats *TreeStats, isLeft, relative bool, prefix string, w
 	return styleBar.Width(width).Render(ansi.Truncate(sb.String(), max(width-2, 0), "…"))
 }
 
+// formatDelta is how many more (+) or fewer (-) folders or files a side
+// holds, short as FormatCount makes it.
 func formatDelta(d int) string {
-	if d == 0 {
-		return "0"
+	if d > 0 {
+		return "+" + model.FormatCount(int64(d))
 	}
-	return fmt.Sprintf("%+d", d)
+	return model.FormatCount(int64(d))
 }
 
 func formatSizeDelta(d int64) string {
@@ -458,7 +460,7 @@ func RenderStatusBar(info StatusInfo, width int) string {
 		details = fmt.Sprintf("DELETE: %d/%d items", info.FilesDone, info.FilesTotal)
 	case "IDLE":
 		if info.DirsListed > 0 || info.FilesScanned > 0 {
-			details = fmt.Sprintf("IDLE  Totals: %dd, %df, %s", info.DirsListed, info.FilesScanned, strings.ReplaceAll(formatSizeLong(info.TotalSize), " ", ""))
+			details = fmt.Sprintf("IDLE  Totals: %sd, %sf, %s", model.FormatCount(info.DirsListed), model.FormatCount(info.FilesScanned), strings.ReplaceAll(formatSizeLong(info.TotalSize), " ", ""))
 		}
 	}
 

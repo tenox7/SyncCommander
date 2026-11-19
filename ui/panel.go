@@ -417,6 +417,7 @@ func (p *Panel) renderAttrRow(a *model.AttrRow) string {
 // folder's dirs, files and size. Relative (\), a size or count is this
 // side's less the other side's, and the age stays as it is. A row whose
 // differences are all zero shows none, so the rows that differ stand out.
+// A count over 999 is short, as 49.2k (FormatCount).
 func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	entry := node.Sides[p.side].Entry
 	if entry == nil {
@@ -451,7 +452,7 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	if t.Dirs == 0 && t.Files == 0 {
 		return ""
 	}
-	return styleChrome.Render(fmt.Sprintf("%4dd %5df %7s", t.Dirs, t.Files, model.FormatSize(t.Size)))
+	return styleChrome.Render(fmt.Sprintf("%4sd %5sf %7s", model.FormatCount(int64(t.Dirs)), model.FormatCount(int64(t.Files)), model.FormatSize(t.Size)))
 }
 
 // specialMark follows a link, pipe or socket's name, as in ls -F. sc lists
