@@ -199,9 +199,9 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		name := truncateName(d.BatchFile, nameW)
 		rows = append(rows,
 			progressMark+" "+name,
-			fmt.Sprintf("File:  %s/%s  %s  ETA %s",
+			rateRow(fmt.Sprintf("File:  %s/%s  ETA %s",
 				model.FormatSize(fileBytes), model.FormatSize(fileSize),
-				formatRateOrDash(fileRate), formatETA(fileSize-fileBytes, fileRate)),
+				formatETA(fileSize-fileBytes, fileRate)), formatRateOrDash(fileRate), inner),
 			fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(fileBytes, fileSize, totalBarWidth), filePct),
 		)
 	} else {
@@ -242,15 +242,25 @@ func RenderCopyPopup(d CopyPopupData, width int) string {
 		keys += "  +/-=more/fewer in flight"
 	}
 	rows = append(rows,
-		fmt.Sprintf("Total: %s/%s  %s  ETA %s",
+		rateRow(fmt.Sprintf("Total: %s/%s  ETA %s",
 			model.FormatSize(d.BytesCopied), model.FormatSize(d.TotalBytes),
-			formatRateOrDash(totalRate), formatETA(d.TotalBytes-d.BytesCopied, totalRate)),
+			formatETA(d.TotalBytes-d.BytesCopied, totalRate)), formatRateOrDash(totalRate), inner),
 		fmt.Sprintf("%s%s %3d%%", barIndent, progressBar(d.BytesCopied, d.TotalBytes, totalBarWidth), totalPct),
 		speedRow(d.Speed, d.SpeedPeak, inner),
 		keys,
 	)
 
 	return styleCopyPopup.Width(width).Render(padRows(rows, inner))
+}
+
+// rateRow puts rate at the right edge of a row w wide, in the column of the
+// rates of the files in flight. When the two do not fit, left is cut, as a
+// file's name is: the rate stays.
+func rateRow(left, rate string, w int) string {
+	if room := max(w-lipgloss.Width(rate)-2, 0); lipgloss.Width(left) > room {
+		left = ansi.Truncate(left, room, "…")
+	}
+	return left + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(rate), 2)) + rate
 }
 
 func truncateName(s string, w int) string {

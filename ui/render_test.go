@@ -59,6 +59,43 @@ func TestCopyPopupShowsFilesAndPercent(t *testing.T) {
 	}
 }
 
+// The total's rate is at the right edge, under the rates of the files in
+// flight: it stood after the sizes, out of their column. A batch's file
+// rate is above it the same way. A narrow popup cuts the sizes, not the
+// rate.
+func TestCopyPopupLinesTheRatesUp(t *testing.T) {
+	d := CopyPopupData{LeftToRight: true, DoneFiles: 1, TotalFiles: 4, InFlight: 1, Parallel: 2,
+		BytesCopied: 3 << 20, TotalBytes: 200 << 30, TotalElapsed: 2 * time.Second,
+		Slots: []CopySlotView{{File: "IMG_2268 1.JPG", Size: 4 << 20, Bytes: 2 << 20, Elapsed: time.Second}}}
+	// end is the column where rate ends on the line that holds row.
+	end := func(s, row, rate string) int {
+		t.Helper()
+		for _, l := range strings.Split(s, "\n") {
+			if !strings.Contains(l, row) {
+				continue
+			}
+			i := strings.LastIndex(l, rate)
+			if i < 0 {
+				t.Fatalf("the %s line lacks %q: %q", row, rate, l)
+			}
+			return ansi.StringWidth(l[:i+len(rate)])
+		}
+		t.Fatalf("no %s line:\n%s", row, s)
+		return 0
+	}
+	s := ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
+	if file, total := end(s, "IMG_2268", "2.0 MB/s"), end(s, "Total:", "1.5 MB/s"); file != total {
+		t.Errorf("the total rate ends at column %d, the file's at %d:\n%s", total, file, s)
+	}
+	d.Batched, d.BatchFile, d.BatchFileBytes, d.BatchFileSize, d.BatchFileElapsed = true, "big.iso", 1<<20, 4<<20, time.Second
+	s = ansi.Strip(RenderCopyPopup(d, popupWidth(80)))
+	if file, total := end(s, "File:", "1.0 MB/s"), end(s, "Total:", "1.5 MB/s"); file != total {
+		t.Errorf("batch: the total rate ends at column %d, the file's at %d:\n%s", total, file, s)
+	}
+	d.Batched = false
+	end(ansi.Strip(RenderCopyPopup(d, popupWidth(30))), "Total", "1.5 MB/s")
+}
+
 func TestProgressBarFillsInEighths(t *testing.T) {
 	for _, tc := range []struct {
 		done int64
