@@ -19,7 +19,8 @@ import (
 
 type RsyncSSHBackend struct {
 	sshShell
-	pool *connPool[*ssh.Client]
+	pool  *connPool[*ssh.Client]
+	noSum sumNote // says the first file rsync gives no md4 sum
 }
 
 // NewRsyncSSHBackend dials rawURL; a cancel of ctx stops the connect. Up to
@@ -225,7 +226,7 @@ func (s *sessionRW) Close() error                { return s.w.Close() }
 // shell's commands.
 func (b *RsyncSSHBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
 	if algo == "md4" {
-		return md4Of(ctx, relPath, b.fetchMD4)
+		return md4Of(ctx, b.proto, relPath, b.fetchMD4, &b.noSum)
 	}
 	return b.sshShell.Checksum(ctx, relPath, algo)
 }

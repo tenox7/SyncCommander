@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/pkg/sftp"
 
@@ -133,4 +134,30 @@ func certFailure(err error) bool {
 	var invalid x509.CertificateInvalidError
 	var verify *tls.CertificateVerificationError
 	return errors.As(err, &unknown) || errors.As(err, &host) || errors.As(err, &invalid) || errors.As(err, &verify)
+}
+
+// noSumError is a file the server gives no algo sum of: one it has none
+// for, or cannot read. Another try gets none either, and it is no fault of
+// the server's: ErrUnsupported, which Retry gives back at once, with no
+// line in the log. Each such file was tried six times, with some 15 s of
+// waits (W-M8, L12).
+type noSumError struct{ algo, path string }
+
+func (e noSumError) Error() string {
+	return fmt.Sprintf("the server gives no %s checksum for %s", e.algo, e.path)
+}
+
+func (noSumError) Is(target error) bool { return target == ErrUnsupported }
+
+// sumNote says once, for a backend, why a file shows as unknown by
+// checksum: the other files the same answer is for show so too, with no
+// line of their own.
+type sumNote struct{ once sync.Once }
+
+// say logs err the first time, and returns it.
+func (n *sumNote) say(proto string, err error) error {
+	n.once.Do(func() {
+		Log.Add(proto, DirWarn, fmt.Sprintf("%v; it and other files without one show as unknown by checksum", err))
+	})
+	return err
 }

@@ -56,6 +56,7 @@ type RcloneBackend struct {
 	putMtime  sync.Map // mtime stamped at Put, so SetTimes can skip a redundant round trip
 	closeOnce sync.Once
 	timeRes   model.TimeRes // how exact the listed mtimes are (rcloneTimeRes)
+	noSum     sumNote       // says the first object with no sum
 }
 
 var rcloneInit sync.Once
@@ -296,7 +297,7 @@ func (b *RcloneBackend) hashType(algo string) (hash.Type, error) {
 			return h.t, nil
 		}
 	}
-	return hash.None, fmt.Errorf("rclone: %s has no %q checksum", b.f.Name(), algo)
+	return hash.None, model.WithKind(ErrUnsupported, fmt.Errorf("rclone: %s has no %q checksum", b.f.Name(), algo))
 }
 
 // object resolves relPath to an fs.Object, preferring the listing cache so
@@ -388,6 +389,10 @@ func (b *RcloneBackend) convert(ctx context.Context, dirEntries fs.DirEntries) [
 	return entries
 }
 
+// Checksum is the object's algo sum. An object with none, as one an S3
+// multipart upload made with no sum given, has none on the next try
+// either, nor does one whose remote has none of the kind: the answer is
+// final (L12). Each was tried six times, with some 15 s of waits.
 func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
 	relPath = cleanRel(relPath)
 	ht, err := b.hashType(algo)
@@ -399,11 +404,11 @@ func (b *RcloneBackend) Checksum(ctx context.Context, relPath, algo string) (str
 		return "", err
 	}
 	sum, err := o.Hash(ctx, ht)
+	if errors.Is(err, hash.ErrUnsupported) || err == nil && sum == "" {
+		return "", b.noSum.say("rclone", noSumError{algo: algo, path: relPath})
+	}
 	if err != nil {
 		return "", err
-	}
-	if sum == "" {
-		return "", fmt.Errorf("rclone: no %s for %s", ht, relPath)
 	}
 	return sum, nil
 }

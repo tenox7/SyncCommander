@@ -36,6 +36,7 @@ type RsyncBackend struct {
 	listCache *listCache
 	sentMtime sync.Map // mtime each upload sent with -t, see SetTimes
 	dirs      sync.Map // folders seen on the daemon, by path: see checkDirs
+	noSum     sumNote  // says the first file the daemon gives no sum
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -496,9 +497,9 @@ func (b *RsyncBackend) ChecksumAlgos(context.Context) ([]string, error) { return
 
 func (b *RsyncBackend) Checksum(ctx context.Context, relPath, algo string) (string, error) {
 	if algo != "md4" {
-		return "", fmt.Errorf("rsync: no %q checksum, only md4", algo)
+		return "", model.WithKind(ErrUnsupported, fmt.Errorf("rsync: no %q checksum, only md4", algo))
 	}
-	return md4Of(ctx, relPath, b.fetchMD4)
+	return md4Of(ctx, "rsync", relPath, b.fetchMD4, &b.noSum)
 }
 
 func (b *RsyncBackend) PrefetchChecksums(ctx context.Context, scope, algo string, recursive bool) (map[string]string, error) {

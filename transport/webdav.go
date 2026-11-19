@@ -82,7 +82,7 @@ type WebDAVBackend struct {
 	headerSets atomic.Bool
 	noMtime    atomic.Bool
 	mtimeProbe atomic.Int32
-	noSum      sync.Once // the first file the server gives no sum of the algo asked
+	noSum      sumNote // says the first file the server gives no sum of the algo asked
 }
 
 // NewWebDAVBackend connects to rawURL and checks its base is a folder; a
@@ -634,25 +634,10 @@ func (b *WebDAVBackend) Checksum(ctx context.Context, relPath, algo string) (str
 		h, ok, _ = b.sums.get(relPath, algo)
 	}
 	if !ok {
-		err := noSumError{algo: algo, path: relPath}
-		b.noSum.Do(func() {
-			Log.Add("webdav", DirWarn, fmt.Sprintf("%v; it and other files without one show as unknown by checksum", err))
-		})
-		return "", err
+		return "", b.noSum.say("webdav", noSumError{algo: algo, path: relPath})
 	}
 	return h, nil
 }
-
-// noSumError is a file the server gives no sum of algo. Another try gets
-// none either, and it is no fault of the server's: ErrUnsupported, which
-// Retry gives back at once, with no line in the log.
-type noSumError struct{ algo, path string }
-
-func (e noSumError) Error() string {
-	return fmt.Sprintf("the server gives no %s checksum for %s", e.algo, e.path)
-}
-
-func (noSumError) Is(target error) bool { return target == ErrUnsupported }
 
 func (b *WebDAVBackend) statInto(ctx context.Context, relPath string) error {
 	ms, err := b.propfind(ctx, relPath, "0")

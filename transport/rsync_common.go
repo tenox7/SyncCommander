@@ -104,15 +104,18 @@ func transferErr(xferErrors, ioErrors int) error {
 // kept from one ask to the next. A cache of the sums bulk fetches gave,
 // with no size or time to tell a file someone else changed since, served
 // the old sum as current, "equal" to the other side (R11); the scanner
-// keeps each sum with the size and time it is for.
-func md4Of(ctx context.Context, relPath string, fetch func(context.Context, string, bool) (map[string]string, error)) (string, error) {
+// keeps each sum with the size and time it is for. A file the list has no
+// sum for, as one the server cannot read (rsync sends a sum of zeros), has
+// none on the next try either: the answer is final, and note says the
+// first (L12).
+func md4Of(ctx context.Context, proto, relPath string, fetch func(context.Context, string, bool) (map[string]string, error), note *sumNote) (string, error) {
 	got, err := fetch(ctx, relPath, false)
 	if err != nil {
 		return "", err
 	}
 	sum, ok := got[relPath]
 	if !ok {
-		return "", fmt.Errorf("md4: no checksum for %s", relPath)
+		return "", note.say(proto, noSumError{algo: "md4", path: relPath})
 	}
 	return sum, nil
 }

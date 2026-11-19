@@ -50,6 +50,7 @@ type FTPBackend struct {
 	// yet, 1 yes, -1 no. See listOn. The listings on every connection
 	// share it.
 	dashA atomic.Int32
+	noSum sumNote // says the first file the server's sum answer holds none for
 }
 
 // ftpIdle is the longest one read or one write on an FTP socket may wait for
@@ -1022,9 +1023,12 @@ func (b *FTPBackend) Checksum(ctx context.Context, relPath, algo string) (string
 			return "", err
 		}
 		if h == nil {
-			return "", errors.New("no checksum support on this FTP server")
+			return "", b.noSum.say("ftp", model.WithKind(ErrUnsupported, errors.New("no checksum support on this FTP server")))
 		}
 		sum, err := h.sum(ctx, full, algo)
+		if errors.Is(err, ErrUnsupported) {
+			return "", b.noSum.say("ftp", err)
+		}
 		if !errors.Is(err, errHashConnGone) {
 			return sum, err
 		}
@@ -1742,11 +1746,12 @@ func (h *ftpHasher) parseFeat(msg string) {
 // hash asks for the algo sum of fullPath. A sum is taken only when it is
 // one of algo: before, a HASH of the server's own choice, after a refused
 // OPTS HASH, and any text a 213 reply held were taken for one, and the
-// file compared as different from its copy (L25).
+// file compared as different from its copy (L25). An answer with no sum of
+// algo is final (ErrUnsupported): another try gets the same (L12).
 func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 	cmd := h.cmds[algo]
 	if cmd == "" {
-		return "", fmt.Errorf("no hash command for %q", algo)
+		return "", model.WithKind(ErrUnsupported, fmt.Errorf("no hash command for %q", algo))
 	}
 	if cmd != "HASH" {
 		code, msg, err := h.cmd("%s %s", cmd, fullPath)
@@ -1782,10 +1787,10 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 	// 213 SHA-256 0-49 <sum> <name>
 	fields := strings.Fields(msg)
 	if len(fields) < 3 {
-		return "", fmt.Errorf("invalid HASH response: %s", msg)
+		return "", model.WithKind(ErrUnsupported, fmt.Errorf("invalid HASH response: %s", msg))
 	}
 	if !strings.EqualFold(fields[0], name) {
-		return "", fmt.Errorf("HASH answered with a %s sum, %s was asked for: %s", fields[0], name, msg)
+		return "", model.WithKind(ErrUnsupported, fmt.Errorf("HASH answered with a %s sum, %s was asked for: %s", fields[0], name, msg))
 	}
 	return ftpSum("HASH", algo, fields[2])
 }
@@ -1795,7 +1800,7 @@ func (h *ftpHasher) hash(fullPath, algo string) (string, error) {
 func ftpSum(cmd, algo, sum string) (string, error) {
 	sum = strings.ToLower(sum)
 	if _, err := hex.DecodeString(sum); err != nil || len(sum) != ftpSumLen[algo] {
-		return "", fmt.Errorf("%s answered %q, which is no %s sum", cmd, sum, algo)
+		return "", model.WithKind(ErrUnsupported, fmt.Errorf("%s answered %q, which is no %s sum", cmd, sum, algo))
 	}
 	return sum, nil
 }
