@@ -454,6 +454,16 @@ func rsyncOpenViaTemp(ctx context.Context, relPath string, offset int64, recv fu
 	if err != nil {
 		return nil, err
 	}
+	// A file the temp folder has no room for fails before a byte comes: it
+	// filled the disk first, then failed (R16). The size is the one the
+	// copy listed, its progress budget; a resume's placeholder is sparse,
+	// so the tail is what comes. A caller that gives no size is let through.
+	if size, ok := progressBudgetFromContext(ctx); ok {
+		if err := roomFor(tmpDir, size-offset); err != nil {
+			os.RemoveAll(tmpDir)
+			return nil, err
+		}
+	}
 	target := filepath.Join(tmpDir, filepath.Base(relPath))
 	if offset > 0 {
 		err = os.Truncate(target, offset)
