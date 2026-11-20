@@ -28,6 +28,7 @@ var helpNavigation = []helpEntry{
 	{"Tab", "Switch panel"},
 	{"PgUp/Dn", "Page up / down"},
 	{"Home/End", "First / last row"},
+	{"^Home/End", "Same, in Terminal.app"},
 	{"n", "Next difference"},
 	{"/", "Search (regex)"},
 	{"i", "Info / statistics"},
