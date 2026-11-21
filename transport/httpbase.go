@@ -260,11 +260,15 @@ func (h *httpBase) doReq(req *http.Request) (*http.Response, error) {
 	if resp.StatusCode/100 == 3 {
 		drainClose(resp.Body)
 		msg := fmt.Sprintf("%s %s: %s to %s: sc follows no redirect", req.Method, req.URL.Redacted(), resp.Status, resp.Header.Get("Location"))
+		level := DirErr
 		if folder {
 			msg = fmt.Sprintf("%s %s: the server says it is a folder (%s)", req.Method, req.URL.Redacted(), resp.Status)
+			if req.Method == http.MethodHead {
+				level = DirIn // a question, which http:// asks of each link without a slash
+			}
 		}
-		err := &statusError{code: resp.StatusCode, msg: msg}
-		Log.Add(h.proto, DirErr, err.Error())
+		err := &statusError{code: resp.StatusCode, msg: msg, folder: folder}
+		Log.Add(h.proto, level, err.Error())
 		return nil, err
 	}
 	// The answers no backend reads for itself, of the kind their code says
@@ -351,6 +355,9 @@ func splitUnquoted(s string, sep byte) []string {
 type statusError struct {
 	code int
 	msg  string
+	// folder: a redirect to the request's own path with a slash at its
+	// end, the server's word that the path is a folder (folderSlash).
+	folder bool
 }
 
 func (e *statusError) Error() string { return e.msg }

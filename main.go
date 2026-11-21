@@ -39,6 +39,7 @@ func main() {
 	listTimeout := flag.Duration("list-timeout", 120*time.Second, "abort one directory listing after this long (0 = never)")
 	webdavTimeout := flag.Duration("webdav-timeout", 5*time.Minute, "webdav idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
 	resticTimeout := flag.Duration("restic-timeout", 5*time.Minute, "restic idle timeout: abort a listing/transfer only after this long with no bytes (0 = never)")
+	httpTimeout := flag.Duration("http-timeout", 5*time.Minute, "http:// and https:// idle timeout: abort a listing/download only after this long with no bytes (0 = never)")
 	rsyncTimeout := flag.Duration("rsync-timeout", 5*time.Minute, "rsync:// idle timeout: fail a listing, mkdir, delete or checksum run when the daemon sends nothing this long, after the time its hashing takes (0 = never); a transfer has -stall-timeout")
 	ftpTimeout := flag.Duration("ftp-timeout", 5*time.Minute, "ftp timeout: fail a call when one read or write on its connection waits this long (0 = never)")
 	resticDelete := flag.Bool("restic-delete", false, "allow deletes in a restic:// repository, a mirror's included (off: refused)")
@@ -57,7 +58,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sc [flags] [<left-path> <right-path>]\n")
-		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs,restic,restics}://[user[:pass]@]host/path\n")
+		fmt.Fprintf(os.Stderr, "  paths: /local/dir or {sftp,ssh,scp,ftp,ftps,ftpes,rsync,rsync+ssh,webdav,webdavs,restic,restics,http,https}://[user[:pass]@]host/path\n")
+		fmt.Fprintf(os.Stderr, "  http://, https://: read only, a folder the web server lists (Apache, nginx, lighttpd, IIS, Caddy autoindex)\n")
 		fmt.Fprintf(os.Stderr, "  fake://{tiny,small,medium,large,huge,insane}[?dirs=8&files=25&depth=5&seed=1&diff=0.1&drop=0.02&latency=2ms] synthetic tree\n")
 		fmt.Fprintf(os.Stderr, "compare flags (use --flag=false to disable defaults):\n")
 		flag.PrintDefaults()
@@ -102,6 +104,7 @@ func main() {
 	model.LogErr = func(proto, msg string) { transport.Log.Add(proto, transport.DirErr, msg) }
 	transport.SetWebDAVIdleTimeout(*webdavTimeout)
 	transport.SetResticIdleTimeout(*resticTimeout)
+	transport.SetHTTPIdleTimeout(*httpTimeout)
 	transport.SetFTPIdleTimeout(*ftpTimeout)
 	transport.SetRsyncIdleTimeout(*rsyncTimeout)
 	transport.SetResticDeletes(*resticDelete)

@@ -21,6 +21,10 @@ var (
 	// ErrNoSpace: the destination is full or over its quota. Never tried
 	// again: the next try fails the same way.
 	ErrNoSpace = errors.New("no space left on the destination")
+	// ErrReadOnly: the location takes no writes at all, as a web server's
+	// folders over http:// take none. Never tried again, and a copy to it
+	// stops at its first file.
+	ErrReadOnly = errors.New("the location takes no writes")
 )
 
 // kindError gives an error a kind without changing its message.

@@ -42,6 +42,7 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		"ftp":       (*FTPBackend)(nil),
 		"webdav":    (*WebDAVBackend)(nil),
 		"restic":    (*ResticBackend)(nil),
+		"http":      (*HTTPBackend)(nil),
 		"rclone":    (*RcloneBackend)(nil),
 		"fake":      (*FakeBackend)(nil),
 	} {
@@ -56,7 +57,7 @@ func TestCapsMatchTheMethods(t *testing.T) {
 		// L19, R8: the HTTP backends, rclone's and the rsync daemon's make
 		// their own connections again; those with a connection to lose do
 		// not.
-		if redials := name == "webdav" || name == "restic" || name == "rclone" || name == "rsync"; caps.RedialsItself != redials {
+		if redials := name == "webdav" || name == "restic" || name == "http" || name == "rclone" || name == "rsync"; caps.RedialsItself != redials {
 			t.Errorf("%s: RedialsItself = %v, want %v", name, caps.RedialsItself, redials)
 		}
 		if known := name == "local"; (caps.Names.Case != model.FoldUnknown) != known {

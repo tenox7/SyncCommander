@@ -34,9 +34,9 @@ func GivesUp(err error) bool {
 }
 
 // cannotWrite reports a destination that takes no more data: full, over its
-// quota, or mounted read-only.
+// quota, mounted read-only, or one that takes no writes at all (http://).
 func cannotWrite(err error) bool {
-	if errors.Is(err, model.ErrNoSpace) {
+	if errors.Is(err, model.ErrNoSpace) || errors.Is(err, model.ErrReadOnly) {
 		return true
 	}
 	for _, e := range noSpaceErrnos {

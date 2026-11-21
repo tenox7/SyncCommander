@@ -37,6 +37,8 @@ var schemes = []struct {
 	{"webdavs://", openWebDAV},
 	{"restic://", openRestic},
 	{"restics://", openRestic},
+	{"http://", openHTTP},
+	{"https://", openHTTP},
 	{rcloneScheme, openRclone},
 	{fakeScheme, openFake},
 }
@@ -61,6 +63,9 @@ func openWebDAV(ctx context.Context, a string, i bool, p int) (model.Backend, er
 }
 func openRestic(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
 	return NewResticBackend(ctx, a, i, p)
+}
+func openHTTP(ctx context.Context, a string, i bool, p int) (model.Backend, error) {
+	return NewHTTPBackend(ctx, a, i, p)
 }
 func openRclone(ctx context.Context, a string, i bool, _ int) (model.Backend, error) {
 	return NewRcloneBackend(ctx, a, i)

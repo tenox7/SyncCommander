@@ -81,7 +81,7 @@ func (d *OpenDialog) View(width, height int) string {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(shown(d.errMsg)))
 	}
 	sb.WriteString("\n\n")
-	const schemes = "/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://  restic[s]://  rclone://"
+	const schemes = "/local/path  sftp://  ssh://  ftp[s|es]://  rsync[+ssh]://  webdav[s]://  restic[s]://  http[s]://  rclone://"
 	sb.WriteString(hintStyle.Render(schemes))
 	sb.WriteString("\n\n")
 	sb.WriteString(hintStyle.Render("Enter=open  Esc=cancel"))

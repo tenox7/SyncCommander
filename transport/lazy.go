@@ -27,7 +27,7 @@ var ErrUnsupported = errors.New("operation not supported by this backend")
 // -ftp-timeout 0 nothing else ends a listing that stops, and the cap stays.
 func protoManagesLiveness(proto string) bool {
 	switch proto {
-	case "webdav", "webdavs", "restic", "restics", "rclone":
+	case "webdav", "webdavs", "restic", "restics", "http", "https", "rclone":
 		return true
 	case "ftp", "ftps", "ftpes":
 		return ftpIdle.get() > 0

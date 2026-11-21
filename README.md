@@ -83,6 +83,7 @@ for name.
 | rsync://, rsync+ssh:// | Rsync MD4 (internal), SHA/MD5 (over ssh) |
 | webdav://, webdavs:// | MD5/SHA1 (`rclone --etag-hash`) |
 | restic://, restics:// | SHA256 |
+| http://, https:// web server folder listings, read only | none: size and mtime |
 | rclone:// any rclone remote (S3, B2, Swift, SMB, Dropbox, ...) | whatever the remote offers: MD5, SHA1, SHA256, XXH3 |
 | fake:// synthetic tree (testing) | XXH3, SHA256, SHA1, MD5, MD4 |
 
@@ -100,10 +101,43 @@ A NAS may give sftp a root of its own: sftp's `/photo` is the shell's
 `/volume1/photo`. There sc uses sftp requests alone, and the server sums
 no files. The log says why. The shell needs GNU find or perl for this.
 
+### Web server folders over http
+
+`http://` and `https://` read a folder that a web server lists: the
+"Index of" page of Apache, nginx, lighttpd, IIS, Caddy, Python's
+`http.server` or Go's file server. They only download: sc writes, deletes
+and renames nothing there, and a copy to such a side stops at its first
+file. A mirror from it deletes, on the other side, what the server does
+not list.
+
+```
+sc http://example.com/pub/files/ /local/files
+sc 'https://user:pass@example.com/private%20files/' /local/private
+```
+
+sc reads the links of each folder's page and nothing else of it. The
+sizes a page shows are rounded and its times are to the minute, in the
+server's time zone, so sc asks each file's exact size and time with a
+HEAD request. A folder costs one request, a file one more: up to 8 run at
+once. A scan walks the whole tree like this in the background and shows
+each folder as soon as it is listed. nginx with `autoindex_format json`
+and Caddy give exact sizes and times in their listings, and then sc sends
+no HEAD. A server gives no checksums.
+
+A link on the server back to a folder above, such as `ubuntu -> .` on
+Ubuntu's mirrors, shows the same listing as that folder. To find such
+links, the listing of a folder also reads the page of each folder in it,
+and keeps it for that folder's own listing: a scan reads each page once.
+sc shows such a folder as a link (`ubuntu@`), does not go into it, and a
+copy makes it a link again. Redirects are not followed, other than a
+folder's to its own path with a slash: type the URL the server redirects
+to.
+
 ## Server examples
 
 - `rclone serve webdav --etag-hash md5`
 - `rclone serve restic`
+- `python3 -m http.server` (http://, read only)
 
 ## rclone remotes
 

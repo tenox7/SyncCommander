@@ -68,6 +68,12 @@ func (b *ResticBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true, NamedSums: true}, nil
 }
 
+// A web server's folders over http:// are read only: listed, side by side
+// for a scan (Preload), and downloaded, from an offset too.
+func (b *HTTPBackend) Capabilities(context.Context) (model.Caps, error) {
+	return model.Caps{OpenAt: true, Preload: true, RedialsItself: true}, nil
+}
+
 // A remote whose sums come with its listings gives a folder's in one
 // listing (L20); on one whose sums read the file, a fetch gives none.
 func (b *RcloneBackend) Capabilities(context.Context) (model.Caps, error) {
@@ -142,6 +148,9 @@ var (
 	_ model.Backend            = (*ResticBackend)(nil)
 	_ model.SeekableOpener     = (*ResticBackend)(nil)
 	_ model.RecursivePreloader = (*ResticBackend)(nil)
+	_ model.Backend            = (*HTTPBackend)(nil)
+	_ model.SeekableOpener     = (*HTTPBackend)(nil)
+	_ model.RecursivePreloader = (*HTTPBackend)(nil)
 	_ model.Backend            = (*RcloneBackend)(nil)
 	_ model.SeekableOpener     = (*RcloneBackend)(nil)
 	_ model.RecursivePreloader = (*RcloneBackend)(nil)
