@@ -410,6 +410,10 @@ func (b *lazyBackend) RemoveIn(ctx context.Context, dir string, items []model.Re
 	return doAs(b, ctx, fmt.Sprintf("remove %d in %s", len(items), dir), func(r model.BatchRemover) error { return r.RemoveIn(ctx, dir, items) })
 }
 
+func (b *lazyBackend) Symlink(ctx context.Context, target, relPath string) error {
+	return doAs(b, ctx, "link "+relPath, func(l model.Linker) error { return l.Symlink(ctx, target, relPath) })
+}
+
 func (b *lazyBackend) Open(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	return doVal(b, ctx, "open "+relPath, func(in model.Backend) (io.ReadCloser, error) { return in.Open(ctx, relPath) })
 }

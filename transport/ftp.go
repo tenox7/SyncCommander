@@ -721,6 +721,11 @@ func (b *FTPBackend) entry(l ftpLister, relPath, p string, e *ftp.Entry, exact b
 	if relPath == "" {
 		fe.Name = ""
 	}
+	if e.Type == ftp.EntryTypeLink {
+		// LIST shows a link as "name -> target", MLSD as the fact
+		// OS.unix=slink:target (markMLSDTypes); a server may give none.
+		fe.Link = model.LinkTo(e.Target)
+	}
 	return fe
 }
 
@@ -924,9 +929,11 @@ const ftpEntrySpecial ftp.EntryType = -1
 // only file and dir, and lists any other type as a file: a link
 // (OS.unix=symlink, OS.unix=slink:target) would be read and written
 // through, and a device opened (L2, L9). The name is what follows the
-// first space, as the library takes it.
+// first space, as the library takes it. A link's target is the text after
+// slink:, where the server gives it.
 func markMLSDTypes(raw []byte, entries []*ftp.Entry) {
 	var special map[string]ftp.EntryType
+	var targets map[string]string
 	s := bufio.NewScanner(bytes.NewReader(raw))
 	for s.Scan() {
 		// An MLST answer indents its fact line by a space.
@@ -948,14 +955,24 @@ func markMLSDTypes(raw []byte, entries []*ftp.Entry) {
 				special = make(map[string]ftp.EntryType)
 			}
 			special[line[space+1:]] = t
+			if len(v) > len(slinkFact) && strings.EqualFold(v[:len(slinkFact)], slinkFact) {
+				if targets == nil {
+					targets = make(map[string]string)
+				}
+				targets[line[space+1:]] = v[len(slinkFact):]
+			}
 		}
 	}
 	for _, e := range entries {
 		if t, ok := special[e.Name]; ok {
 			e.Type = t
+			e.Target = targets[e.Name]
 		}
 	}
 }
+
+// slinkFact starts the value of a type fact that gives a link's target.
+const slinkFact = "OS.unix=slink:"
 
 func mlsdType(v string) ftp.EntryType {
 	switch v = strings.ToLower(v); {

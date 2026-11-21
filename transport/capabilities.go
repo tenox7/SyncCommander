@@ -14,28 +14,31 @@ import (
 // back as on any failure.
 
 // A local root says how its file system matches names. A remote cannot
-// tell yet: its Names stay unknown.
+// tell yet: its Names stay unknown. It makes links, but not on Windows
+// (localLinks).
 func (b *LocalBackend) Capabilities(context.Context) (model.Caps, error) {
-	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Names: b.nameRule()}, nil
+	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Names: b.nameRule(), Links: localLinks}, nil
 }
 
 // The ssh shell sums many files with one command (S19).
 // The ssh shells remove a folder's entries with one script (R16).
+// SFTP makes links with its SYMLINK request.
 func (b *SFTPBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true,
-		BatchRemove: true}, nil
+		BatchRemove: true, Links: true}, nil
 }
 
+// The ssh shells make links with ln -s.
 func (b *SCPBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, Parts: true, RegionSums: true, OpenAt: true, Preload: true, BatchSums: true,
-		BatchRemove: true}, nil
+		BatchRemove: true, Links: true}, nil
 }
 
 // An rsync destination counts its own upload progress (OwnsProgress). The
-// region checksums of rsync+ssh are its shell's.
+// region checksums of rsync+ssh are its shell's, and so are its links.
 func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, RegionSums: true, OpenAt: true, SendLocal: true, RecvLocal: true, Batch: true,
-		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true, BatchRemove: true}, nil
+		Preload: true, PrefetchSums: true, BatchSums: true, OwnsProgress: true, BatchRemove: true, Links: true}, nil
 }
 
 // A daemon deletes a folder's entries in one run (R16). Each call dials
@@ -43,9 +46,10 @@ func (b *RsyncSSHBackend) Capabilities(context.Context) (model.Caps, error) {
 // the backend (RedialsItself): stock rsyncd resets the connection when a
 // path is not there, and the backend was dropped with its listing cache,
 // its running listing left to fill it, and the mtimes uploads sent (R8).
+// A link is sent to it from one made here (localLinks).
 func (b *RsyncBackend) Capabilities(context.Context) (model.Caps, error) {
 	return model.Caps{Resume: true, OpenAt: true, SendLocal: true, RecvLocal: true, Preload: true,
-		PrefetchSums: true, BatchRemove: true, OwnsProgress: true, RedialsItself: true}, nil
+		PrefetchSums: true, BatchRemove: true, OwnsProgress: true, RedialsItself: true, Links: localLinks}, nil
 }
 
 func (b *FTPBackend) Capabilities(context.Context) (model.Caps, error) {
@@ -123,7 +127,10 @@ var (
 	_ model.BatchRemover       = (*RsyncBackend)(nil)
 	_ model.BatchRemover       = (*RsyncSSHBackend)(nil)
 	_ model.BatchRemover       = (*SCPBackend)(nil)
+	_ model.Linker             = (*SCPBackend)(nil)
+	_ model.Linker             = (*RsyncSSHBackend)(nil)
 	_ model.BatchRemover       = (*SFTPBackend)(nil)
+	_ model.Linker             = (*SFTPBackend)(nil)
 	_ model.Backend            = (*FTPBackend)(nil)
 	_ model.Resumer            = (*FTPBackend)(nil)
 	_ model.SeekableOpener     = (*FTPBackend)(nil)
@@ -149,6 +156,7 @@ var (
 	_ model.Resumer            = (*lazyBackend)(nil)
 	_ model.BatchSender        = (*lazyBackend)(nil)
 	_ model.BatchRemover       = (*lazyBackend)(nil)
+	_ model.Linker             = (*lazyBackend)(nil)
 	_ ParallelSetter           = (*lazyBackend)(nil)
 	_ model.PartWriter         = (*lazyBackend)(nil)
 	_ model.RegionChecksummer  = (*lazyBackend)(nil)

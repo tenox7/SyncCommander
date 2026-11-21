@@ -164,13 +164,14 @@ func rsyncModeToFileMode(m int32) os.FileMode {
 // fileInfoEntry converts one dry-run file list item to an entry under scope;
 // false for the "." self entry. Stock rsync lists no links, pipes or devices
 // without -l and -D; gorsyncd lists them, and they keep their type here: a
-// pipe taken for a file would be opened by a download (L2, L9).
+// pipe taken for a file would be opened by a download (L2, L9). A link's
+// target comes with -l (linkEntry).
 func fileInfoEntry(scope string, fi rsyncpkg.FileInfo) (model.FileEntry, bool) {
 	if fi.Name == "" || fi.Name == "." {
 		return model.FileEntry{}, false
 	}
 	mode := rsyncModeToFileMode(fi.Mode)
-	return model.FileEntry{
+	return linkEntry(model.FileEntry{
 		RelPath: path.Join(scope, fi.Name),
 		Name:    path.Base(fi.Name),
 		Size:    fi.Length,
@@ -178,7 +179,17 @@ func fileInfoEntry(scope string, fi rsyncpkg.FileInfo) (model.FileEntry, bool) {
 		TimeRes: model.TimeSecond, // the file list has whole seconds
 		IsDir:   mode.IsDir(),
 		Mode:    mode,
-	}, true
+	}, fi), true
+}
+
+// linkEntry gives e, if it is a link, the target fi sends: the sender sends
+// it with -l, which every listing asks for, and gorsyncd lists links
+// without -l but sends no target then.
+func linkEntry(e model.FileEntry, fi rsyncpkg.FileInfo) model.FileEntry {
+	if e.IsLink() {
+		e.Link = model.LinkTo(fi.LinkTarget)
+	}
+	return e
 }
 
 // fileListEntries converts a one-level dry-run file list into relDir's children.

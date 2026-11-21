@@ -73,6 +73,7 @@ type copier struct {
 	mu         sync.Mutex
 	dstChanged map[string]bool
 	twins      map[string]*twin // by destination path
+	linker     model.Linker     // the destination's, when it makes links; else nil
 }
 
 // twin is a destination entry of the other type (a folder where a file is
@@ -91,13 +92,19 @@ type locator interface{ Location() string }
 // sameObject reports whether relPath is one object on both sides: one folder
 // opened on both sides (sc with no arguments), a symlinked or bind-mounted
 // base, a hard link, or one remote URL on both sides. Writing the destination
-// would truncate the source it reads from.
-func sameObject(src, dst model.Backend, relPath string) bool {
+// would truncate the source it reads from. A link is written by its name and
+// what it leads to is never read: link asks about the links themselves, and
+// two links to one file are two objects.
+func sameObject(src, dst model.Backend, relPath string, link bool) bool {
 	sl, sok := src.(model.LocalFS)
 	dl, dok := dst.(model.LocalFS)
 	if sok && dok {
-		si, serr := os.Stat(sl.LocalPath(relPath))
-		di, derr := os.Stat(dl.LocalPath(relPath))
+		stat := os.Stat
+		if link {
+			stat = os.Lstat
+		}
+		si, serr := stat(sl.LocalPath(relPath))
+		di, derr := stat(dl.LocalPath(relPath))
 		return serr == nil && derr == nil && os.SameFile(si, di)
 	}
 	sloc, sok := src.(locator)
@@ -120,7 +127,7 @@ func Copy(ctx context.Context, req Request) Result {
 	ctx = transport.ContextWithBaseProgress(ctx, &p.BaseBytes)
 	isDir := req.Node.IsDir
 
-	if sameObject(req.Src, req.Dst, req.RelPath) {
+	if sameObject(req.Src, req.Dst, req.RelPath, req.Node.IsLink) {
 		p.Failed.Add(1)
 		transport.Log.Add("copy", transport.DirErr, "COPY "+displayPath(req.RelPath)+": refused, source and destination are the same "+map[bool]string{true: "folder", false: "file"}[isDir])
 		return Result{}
@@ -153,7 +160,9 @@ func Copy(ctx context.Context, req Request) Result {
 	if caps, err := req.Dst.Capabilities(ctx); err == nil {
 		names = caps.Names
 	}
-	collisions, files, totalBytes, leftOut, keptNewer := req.enumerate(names)
+	// Asked first: a remote's wrapper has every optional method (D2).
+	c.linker, _ = capable[model.Linker](ctx, req.Dst, func(caps model.Caps) bool { return caps.Links })
+	collisions, files, totalBytes, leftOut, keptNewer := req.enumerate(names, c.linker != nil)
 	c.twins = req.twinSet(collisions)
 	p.Total.Store(int64(len(files)))
 	p.TotalBytes.Store(totalBytes)
@@ -217,13 +226,13 @@ func Copy(ctx context.Context, req Request) Result {
 // files not compared yet that a folder copy leaves out (not in Plan.Unknown),
 // and keptNewer the files newer or larger on the destination it leaves as
 // they are (Plan.KeepNewer). names is how the destination matches names, for
-// the clashes it would make.
-func (req Request) enumerate(names model.NameRule) (collisions []entry, files []item, totalBytes int64, leftOut, keptNewer int) {
+// the clashes it would make; links, whether it makes links.
+func (req Request) enumerate(names model.NameRule, links bool) (collisions []entry, files []item, totalBytes int64, leftOut, keptNewer int) {
 	src, dst := model.CopySides(req.LeftToRight)
 	unknown := pathSet(req.Plan.Unknown, func(p string) string { return p })
 	overwrite := pathSet(req.Plan.Newer, func(n Newer) string { return n.RelPath })
 	req.Scanner.ReadTree(func(*model.TreeNode) {
-		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight) {
+		for _, c := range model.CollectTypeCollisions(req.Node, req.LeftToRight, links) {
 			if dstEntry := c.Sides[dst].Entry; dstEntry != nil {
 				collisions = append(collisions, entry{relPath: c.RelPath, isDir: dstEntry.IsDir, kind: dstEntry.Kind()})
 			}
@@ -243,7 +252,8 @@ func (req Request) enumerate(names model.NameRule) (collisions []entry, files []
 		}
 		files = make([]item, 0, len(nodes))
 		parts := partsListed(dst)
-		clash := nameClashes(src, names)
+		clash := nameClashes(src, names, links)
+		twinned := sourceTwins(src)
 		for _, f := range nodes {
 			newer := model.OverwritesNewer(f, req.LeftToRight, req.Opts)
 			switch {
@@ -254,6 +264,9 @@ func (req Request) enumerate(names model.NameRule) (collisions []entry, files []
 				continue
 			}
 			it := item{relPath: f.RelPath, src: f.Sides[src].Entry, dst: f.Sides[dst].Entry, part: parts(f), clash: clash(f), newer: newer}
+			if it.clash == "" && links && f.IsLink {
+				it.clash = twinned(f)
+			}
 			if it.src != nil && !it.src.IsSpecial() {
 				totalBytes += it.src.Size
 			}
@@ -289,7 +302,10 @@ func dstSideName(leftToRight bool) string {
 // A name the destination cannot hold as it is (NameRule.Refuses) is
 // refused too: on Windows, a\b landed on the file b in a folder a, and
 // NUL on the device, and the copy said OK (L25).
-func nameClashes(src model.Side, rule model.NameRule) func(*model.TreeNode) string {
+//
+// A link takes a name where the destination makes links: a link D to /etc
+// and a folder d, written on a Mac, put the folder's files in /etc.
+func nameClashes(src model.Side, rule model.NameRule, links bool) func(*model.TreeNode) string {
 	guard := rule
 	if guard.Forms == model.FoldUnknown {
 		guard.Forms = model.Folded
@@ -313,8 +329,8 @@ func nameClashes(src model.Side, rule model.NameRule) func(*model.TreeNode) stri
 		if !ok {
 			keys = map[string][]string{}
 			for _, c := range dir.Children {
-				// A link or pipe is never written, so it takes no name.
-				if e := c.Sides[src].Entry; e != nil && !e.IsSpecial() {
+				// A pipe is never written, so it takes no name.
+				if e := c.Sides[src].Entry; e != nil && c.Writes(links) {
 					k := guard.Key(c.Name)
 					keys[k] = append(keys[k], c.Name)
 				}
@@ -347,6 +363,38 @@ func nameClashes(src model.Side, rule model.NameRule) func(*model.TreeNode) stri
 		return why
 	}
 	return check
+}
+
+// sourceTwins returns, for a link to copy, why it is refused: the source
+// lists its name twice, as the link and as another kind, which one
+// listing of a folder cannot hold. A server sends what it likes (L7), and
+// the link written first, the other's files were written through it: a
+// link d to /etc and a folder d holding passwd put passwd in /etc. Every
+// other kind is written as it is: nothing leads out of the tree through it.
+func sourceTwins(src model.Side) func(*model.TreeNode) string {
+	byDir := map[*model.TreeNode]map[string]string{} // a folder's source names that are no link, to their kinds
+	return func(n *model.TreeNode) string {
+		dir := n.Parent
+		if dir == nil {
+			return ""
+		}
+		kinds, ok := byDir[dir]
+		if !ok {
+			for _, c := range dir.Children {
+				if e := c.Sides[src].Entry; e != nil && !c.IsLink {
+					if kinds == nil {
+						kinds = map[string]string{}
+					}
+					kinds[c.Name] = e.Kind()
+				}
+			}
+			byDir[dir] = kinds
+		}
+		if kind, ok := kinds[n.Name]; ok {
+			return "the source lists " + n.Name + " twice, as a symbolic link and as a " + kind
+		}
+		return ""
+	}
 }
 
 // partsListed returns whether the scan listed a part file of a node on the
@@ -462,7 +510,8 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 	// The session sends what the copy would send file by file, and only
 	// that: not the rest of the folder, and nothing when nothing differs
 	// (F20). Links, devices and the parts cut-off copies left are not sent:
-	// copyOne skips them, and so does the batch.
+	// copyOne skips them, and so does the batch. The links are made after
+	// it, one by one.
 	var paths []string
 	var skipped []item
 	var batchFiles, batchBytes int64
@@ -488,7 +537,7 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 		return false
 	}
 	p := c.p
-	p.Total.Store(batchFiles)
+	p.Total.Store(batchFiles + int64(len(skipped)))
 	p.TotalBytes.Store(batchBytes)
 	p.InFlight.Store(1)
 	p.Parallel.Store(1)
@@ -519,12 +568,14 @@ func (c *copier) batch(files []item, totalBytes int64) bool {
 		}
 		return false
 	}
-	p.Done.Store(p.Total.Load())
+	p.Done.Store(batchFiles)
 	p.CompletedBytes.Store(p.Bytes.Load())
 	p.CompletedBaseBytes.Store(p.BaseBytes.Load())
 	transport.Log.Add("copy", transport.DirIn, "BATCH "+c.req.RelPath+" OK")
 	for _, f := range skipped {
-		logSkipped(f) // only now: a batch that failed goes file by file, which says so
+		// Only now: a batch that failed goes file by file, which says so.
+		// A link is made now, or skipped with the reason.
+		c.copyOne(f)
 	}
 	return true
 }
@@ -604,11 +655,16 @@ func (c *copier) copyOne(f item) {
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": not on the source side")
 		return
 	}
-	// A link, pipe or device is never read or copied (L2, L9), nor is a part
-	// file (L14). It goes before the twin: nothing is written at its name, so
-	// nothing there is removed.
-	if srcEntry.IsSpecial() {
-		logSkipped(f)
+	// A pipe or device is never read or copied (L2, L9), nor is a part file
+	// (L14). A link is made as a link to the same target, never read or
+	// followed, where the destination makes links. It goes before the twin:
+	// nothing is written at its name, so nothing there is removed.
+	target, link := "", false
+	if srcEntry.IsLink() && c.linker != nil {
+		target, link = srcEntry.Target()
+	}
+	if srcEntry.IsSpecial() && !link {
+		c.logSkipped(f)
 		return
 	}
 	// Before the twin too: nothing is written, so nothing is removed.
@@ -626,7 +682,7 @@ func (c *copier) copyOne(f item) {
 	}
 	// A file can be one object on both sides even when its folders are not:
 	// a hard link, or a destination folder that links into the source.
-	if !srcEntry.IsDir && sameObject(c.src, c.dst, f.relPath) {
+	if !srcEntry.IsDir && sameObject(c.src, c.dst, f.relPath, link) {
 		p.Failed.Add(1)
 		transport.Log.Add("copy", transport.DirErr, "COPY "+f.relPath+": refused, source and destination are the same file")
 		return
@@ -647,6 +703,16 @@ func (c *copier) copyOne(f item) {
 			return
 		}
 		transport.Log.Add("copy", transport.DirIn, "mkdir "+f.relPath)
+		return
+	}
+	if link {
+		p.File.Store(f.relPath)
+		p.beginFile(0)
+		if err := c.linker.Symlink(ctx, target, f.relPath); err != nil {
+			c.failed("COPY "+f.relPath, err)
+			return
+		}
+		transport.Log.Add("copy", transport.DirIn, "COPY "+f.relPath+" OK (a symbolic link to "+target+")")
 		return
 	}
 	slot := p.claimSlot(f.relPath, srcEntry.Size)
@@ -751,11 +817,17 @@ func (c *copier) copyOne(f item) {
 // (L25). The copy keeps the time it was written instead.
 func hasTime(e *model.FileEntry) bool { return !e.ModTime.IsZero() }
 
-// logSkipped says why f, a link, device or part, is not copied.
-func logSkipped(f item) {
-	why := "sc copies files and folders only"
-	if f.src.IsPart() {
+// logSkipped says why f, a link, device or part, is not copied. No skip is
+// a failure: a mirror goes on.
+func (c *copier) logSkipped(f item) {
+	why := "sc copies files, folders and links only"
+	switch {
+	case f.src.IsPart():
 		why = "what a cut-off copy left, never copied itself"
+	case f.src.IsLink() && c.linker == nil:
+		why = "the destination cannot hold links"
+	case f.src.IsLink():
+		why = "the source did not say where it leads"
 	}
 	transport.Log.Add("copy", transport.DirWarn, "COPY "+f.relPath+": skipped, a "+f.src.Kind()+" ("+why+")")
 }

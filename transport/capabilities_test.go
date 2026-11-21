@@ -22,8 +22,10 @@ func methodCaps(b model.Backend) model.Caps {
 	_, prefetch := b.(model.ChecksumPrefetcher)
 	_, sums := b.(model.ChecksumBatcher)
 	_, removes := b.(model.BatchRemover)
+	_, links := b.(model.Linker)
 	return model.Caps{Resume: resume, Parts: parts, RegionSums: region, OpenAt: openAt, SendLocal: send,
-		RecvLocal: recv, Batch: batch, Preload: preload, PrefetchSums: prefetch, BatchSums: sums, BatchRemove: removes}
+		RecvLocal: recv, Batch: batch, Preload: preload, PrefetchSums: prefetch, BatchSums: sums, BatchRemove: removes,
+		Links: links}
 }
 
 // Each backend's Caps says what its methods do (D2): a flag without the

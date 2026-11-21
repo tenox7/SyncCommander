@@ -116,9 +116,32 @@ func (b *LocalBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 		}
 		// A link, pipe or device is listed with its type, so the tree shows
 		// it and a copy does not take its name for free; nothing reads it.
-		result = append(result, localEntry(path.Join(relDir, d.Name()), info))
+		// A link's target is read, not followed.
+		e := localEntry(path.Join(relDir, d.Name()), info)
+		if err := readTarget(&e, filepath.Join(dir, d.Name())); errors.Is(err, fs.ErrNotExist) {
+			continue // removed since ReadDir
+		}
+		result = append(result, e)
 	}
 	return result, nil
+}
+
+// readTarget gives e, if it is a link, its target, the text the link at p
+// holds. A target it cannot read stays unknown: the link compares as not
+// known, and a copy skips it with the reason. Only a link that is gone is
+// an error.
+func readTarget(e *model.FileEntry, p string) error {
+	if !e.IsLink() {
+		return nil
+	}
+	t, err := os.Readlink(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		e.Link = model.LinkTo(t)
+	}
+	return nil
 }
 
 // Stat reports relPath as the disk holds it now, a link as a link.
@@ -131,7 +154,11 @@ func (b *LocalBackend) Stat(_ context.Context, relPath string) (model.FileEntry,
 	if err != nil {
 		return model.FileEntry{}, err
 	}
-	return localEntry(relPath, info), nil
+	e := localEntry(relPath, info)
+	if err := readTarget(&e, p); err != nil {
+		return model.FileEntry{}, err
+	}
+	return e, nil
 }
 
 // localEntry is the row of relPath, whose lstat is info.

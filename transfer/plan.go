@@ -71,7 +71,11 @@ func PlanCopy(scanner *model.Scanner, node *model.TreeNode, leftToRight bool, op
 	var p Plan
 	_, dst := model.CopySides(leftToRight)
 	scanner.ReadTree(func(*model.TreeNode) {
-		for _, c := range model.CollectTypeCollisions(node, leftToRight) {
+		// The plan is read on the UI's goroutine, which does not ask the
+		// destination whether it makes links: that may connect. It plans
+		// for a link written, and a copy to where links cannot be made
+		// removes nothing for a link it skips.
+		for _, c := range model.CollectTypeCollisions(node, leftToRight, true) {
 			if e := c.Sides[dst].Entry; e != nil {
 				p.Conflicts = append(p.Conflicts, Conflict{RelPath: c.RelPath, IsDir: e.IsDir, Kind: e.Kind(), Tally: tally(c)})
 			}

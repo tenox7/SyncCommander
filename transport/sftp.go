@@ -298,27 +298,93 @@ func (b *SFTPBackend) readDir(ctx context.Context, relDir string) ([]model.FileE
 	}
 	Log.Add("sftp", DirIn, fmt.Sprintf("%d entries", len(entries)))
 	result := make([]model.FileEntry, 0, len(entries))
+	links := 0
 	for _, info := range entries {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		// Links, pipes and devices are listed with their type (L2, L9).
-		result = append(result, sftpEntry(path.Join(relDir, info.Name()), info))
+		e := sftpEntry(path.Join(relDir, info.Name()), info)
+		if e.IsLink() {
+			links++
+		}
+		result = append(result, e)
+	}
+	if links == 0 {
+		return result, nil
+	}
+	Log.Add("sftp", DirOut, fmt.Sprintf("READLINK %d in %s", links, dir))
+	err = b.onMain(ctx, func(c *sftp.Client) error {
+		result = readTargets(ctx, c, dir, result)
+		return ctx.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
-// Stat lstats relPath on the server: one request, no listing.
+// readTargets gives each link of entries, the listing of dir, its target:
+// the text the server holds, read with one READLINK each, as READDIR gives
+// none. They go out together, so a folder of links waits about one round
+// trip, not one for each. A link gone since the listing is left out; a
+// target the server does not give stays unknown.
+func readTargets(ctx context.Context, c *sftp.Client, dir string, entries []model.FileEntry) []model.FileEntry {
+	gone := make([]bool, len(entries))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 64)
+	for i := range entries {
+		if !entries[i].IsLink() || ctx.Err() != nil {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(e *model.FileEntry, gone *bool) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			switch t, err := c.ReadLink(path.Join(dir, e.Name)); {
+			case err == nil:
+				e.Link = model.LinkTo(t)
+			case errors.Is(err, fs.ErrNotExist):
+				*gone = true
+			}
+		}(&entries[i], &gone[i])
+	}
+	wg.Wait()
+	kept := entries[:0]
+	for i, e := range entries {
+		if !gone[i] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
+// Stat lstats relPath on the server: one request, no listing, and one more
+// for a link's target.
 func (b *SFTPBackend) Stat(ctx context.Context, relPath string) (model.FileEntry, error) {
-	var info os.FileInfo
-	err := b.onMain(ctx, func(c *sftp.Client) (err error) {
-		info, err = c.Lstat(b.abs(relPath))
-		return err
+	var e model.FileEntry
+	err := b.onMain(ctx, func(c *sftp.Client) error {
+		p := b.abs(relPath)
+		info, err := c.Lstat(p)
+		if err != nil {
+			return err
+		}
+		e = sftpEntry(relPath, info)
+		if e.IsLink() {
+			switch t, err := c.ReadLink(p); {
+			case err == nil:
+				e.Link = model.LinkTo(t)
+			case errors.Is(err, fs.ErrNotExist):
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return model.FileEntry{}, fmt.Errorf("sftp: stat %s: %w", relPath, err)
 	}
-	return sftpEntry(relPath, info), nil
+	return e, nil
 }
 
 // sftpEntry is the row of relPath, whose attributes are info.
@@ -624,6 +690,38 @@ func (b *SFTPBackend) Mkdir(ctx context.Context, relPath string, mode os.FileMod
 		return err
 	}
 	return nil
+}
+
+// Symlink makes relPath a link to target with SFTP's SYMLINK request
+// (model.Linker), and its folder first. A link there goes first: SYMLINK
+// does not replace one. A file or a folder there is refused.
+func (b *SFTPBackend) Symlink(ctx context.Context, target, relPath string) error {
+	if isBaseRel(relPath) {
+		return errors.New("sftp: refusing to make the base directory a link")
+	}
+	full := b.abs(relPath)
+	Log.Add("sftp", DirOut, "SYMLINK "+relPath+" -> "+target)
+	err := b.onMain(ctx, func(c *sftp.Client) error {
+		if err := c.MkdirAll(path.Dir(full)); err != nil {
+			return err
+		}
+		switch fi, err := c.Lstat(full); {
+		case err == nil && fi.Mode()&os.ModeSymlink == 0:
+			return fmt.Errorf("sftp: %s is a %s, not replaced with a link", relPath, model.KindName(fi.Mode()))
+		case err == nil:
+			if err := c.Remove(full); err != nil {
+				return err
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		}
+		return c.Symlink(target, full)
+	})
+	b.listCache.invalidateAncestors(relPath)
+	if err != nil {
+		Log.Add("sftp", DirErr, "SYMLINK "+relPath+": "+err.Error())
+	}
+	return err
 }
 
 // Rename refuses an existing target. It then prefers

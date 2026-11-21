@@ -109,8 +109,9 @@ func TestCopyOntoDestinationLink(t *testing.T) {
 
 // L2: a link only on the destination is a row like any other: a mirror
 // deletes it, the link itself and not what it names. A link on the source
-// is never read: the copy leaves it out and says so, instead of copying
-// the file it names from out of the tree.
+// is never read: since 2026-11-20 the copy makes a link to the same target
+// on the destination, and the file it names, out of the tree, is neither
+// copied nor touched.
 func TestMirrorAndLinks(t *testing.T) {
 	root := t.TempDir()
 	left, right := filepath.Join(root, "left"), filepath.Join(root, "right")
@@ -126,14 +127,13 @@ func TestMirrorAndLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newScenario(t, left, right)
-	mark := len(transport.Log.Lines())
 	p := s.copy(t, "", true, true)
-	wantTree(t, "mirror of a folder with links", right, "a.txt")
+	wantTree(t, "mirror of a folder with links", right, "a.txt", "secret.txt")
 	if p.Failed.Load() != 0 {
 		t.Errorf("mirror: %d failed", p.Failed.Load())
 	}
-	if !loggedSince(mark, "COPY secret.txt: skipped, a symbolic link") {
-		t.Error("the copy did not say it left the source's link out")
+	if got, err := os.Readlink(filepath.Join(right, "secret.txt")); err != nil || got != filepath.Join(root, "target.txt") {
+		t.Errorf("right/secret.txt: a link to %q (%v); want a link to the source's target", got, err)
 	}
 	if got := readFile(t, filepath.Join(root, "target.txt")); got != "keep me" {
 		t.Errorf("the links' target now holds %q", got)

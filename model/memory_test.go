@@ -13,14 +13,17 @@ import (
 // bytes each that are rarely read, a 48-byte rollup that only a folder
 // needs, and padding between scattered flags. Now a node is 224 bytes and
 // an entry 96. A field that makes them bigger again has to be weighed: at
-// ten million files every byte is ten megabytes.
+// ten million files every byte is ten megabytes. An entry is 104 bytes
+// since it keeps a link's target (Link), a pointer that is nil for every
+// entry that is no link: weighed and taken on 2026-11-20, so that two links
+// compare by their targets.
 func TestTreeStructsStaySmall(t *testing.T) {
 	for _, tc := range []struct {
 		what      string
 		size, max uintptr
 	}{
 		{"TreeNode", unsafe.Sizeof(TreeNode{}), 224},
-		{"FileEntry", unsafe.Sizeof(FileEntry{}), 96},
+		{"FileEntry", unsafe.Sizeof(FileEntry{}), 104},
 		{"SideState", unsafe.Sizeof(SideState{}), 48},
 		{"CompareResult", unsafe.Sizeof(CompareResult{}), 8},
 	} {

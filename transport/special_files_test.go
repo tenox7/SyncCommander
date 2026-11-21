@@ -42,6 +42,27 @@ func specialTree(t *testing.T) (dir, root string) {
 
 var specialTreeTypes = map[string]os.FileMode{"a.txt": 0, "link.txt": os.ModeSymlink, "dirlink": os.ModeSymlink, "pipe": os.ModeNamedPipe}
 
+// specialTreeTargets are the targets of specialTree's links under root.
+func specialTreeTargets(root string) map[string]string {
+	return map[string]string{"link.txt": filepath.Join(root, "outside.txt"), "dirlink": filepath.Join(root, "outside")}
+}
+
+// linkTargets maps each link of entries to its target, "?" when the listing
+// gave none.
+func linkTargets(entries []model.FileEntry) map[string]string {
+	got := map[string]string{}
+	for _, e := range entries {
+		if e.IsLink() {
+			t, ok := e.Target()
+			if !ok {
+				t = "?"
+			}
+			got[e.Name] = t
+		}
+	}
+	return got
+}
+
 func entryTypes(entries []model.FileEntry) map[string]os.FileMode {
 	got := make(map[string]os.FileMode, len(entries))
 	for _, e := range entries {
@@ -76,10 +97,16 @@ func within(t *testing.T, what string, d time.Duration, pipe string, f func()) {
 // L2, L9: the local backend left links out of its listings, so a copy took
 // the name for free, and listed named pipes as files.
 func TestLocalListsLinksAndPipes(t *testing.T) {
-	dir, _ := specialTree(t)
+	dir, root := specialTree(t)
 	entries, err := NewLocalBackend(dir).List(context.Background(), "")
 	if got := entryTypes(entries); err != nil || !maps.Equal(got, specialTreeTypes) {
 		t.Errorf("List = %v, %v; want %v", got, err, specialTreeTypes)
+	}
+	if got, want := linkTargets(entries), specialTreeTargets(root); !maps.Equal(got, want) {
+		t.Errorf("List gave the targets %v; want %v", got, want)
+	}
+	if e, err := NewLocalBackend(dir).Stat(context.Background(), "dirlink"); err != nil || linkTargets([]model.FileEntry{e})["dirlink"] != filepath.Join(root, "outside") {
+		t.Errorf("Stat(dirlink) = %+v, %v; want the link with its target", e, err)
 	}
 }
 
@@ -136,7 +163,7 @@ func TestLocalRefusesLinksAndPipes(t *testing.T) {
 // fallback gave every pipe and device as a file. Live listings and the deep
 // listing, with find and with perl.
 func TestRemoteListsLinksAndPipes(t *testing.T) {
-	dir, _ := specialTree(t)
+	dir, root := specialTree(t)
 	ctx := context.Background()
 	servers := map[string]string{"scp": startExecSSHServer(t), "sftp": startExecSFTPServer(t)}
 	for _, lister := range []string{"find", "perl"} {
@@ -154,6 +181,12 @@ func TestRemoteListsLinksAndPipes(t *testing.T) {
 					if got := entryTypes(entries); err != nil || !maps.Equal(got, specialTreeTypes) {
 						t.Errorf("%s %s: List = %v, %v; want %v", scheme, name, got, err, specialTreeTypes)
 					}
+					if got, want := linkTargets(entries), specialTreeTargets(root); !maps.Equal(got, want) {
+						t.Errorf("%s %s: List gave the targets %v; want %v", scheme, name, got, want)
+					}
+				}
+				if e, err := live.(model.Backend).Stat(ctx, "dirlink"); err != nil || linkTargets([]model.FileEntry{e})["dirlink"] != filepath.Join(root, "outside") {
+					t.Errorf("%s: Stat(dirlink) = %+v, %v; want the link with its target", scheme, e, err)
 				}
 			}
 		})
@@ -173,6 +206,9 @@ func TestFTPListsLinksAndDevices(t *testing.T) {
 	if got, want := entryTypes(entries), map[string]os.FileMode{"a.txt": 0, "link.txt": os.ModeSymlink}; err != nil || !maps.Equal(got, want) {
 		t.Errorf("LIST: %v, %v; want %v", got, err, want)
 	}
+	if got, want := linkTargets(entries), map[string]string{"link.txt": "/etc/passwd"}; !maps.Equal(got, want) {
+		t.Errorf("LIST gave the targets %v; want %v", got, want)
+	}
 	mlsd := openFakeFTP(t, &fakeFTPD{mlsd: map[string][]string{"/": {
 		"type=file;size=5;modify=20260101000000; a.txt",
 		"type=OS.unix=symlink;size=11;modify=20260101000000; link.txt",
@@ -186,15 +222,20 @@ func TestFTPListsLinksAndDevices(t *testing.T) {
 	if err != nil || !maps.Equal(got, want) {
 		t.Errorf("MLSD: %v, %v; want %v", got, err, want)
 	}
+	if got, want := linkTargets(entries), map[string]string{"link.txt": "?", "etc": "/etc"}; !maps.Equal(got, want) {
+		t.Errorf("MLSD gave the targets %v; want %v", got, want)
+	}
 }
 
 // L2, L9 on rsync://: gorsyncd lists links and named pipes even without -l
 // and -D. sc dropped the links and took a pipe for a file, which a
-// download then opened. Stock rsync leaves both out of the listing.
+// download then opened. Stock rsync leaves both out of the listing. Since
+// 2026-11-20 every listing asks with -l, which sends each link's target.
 func TestRsyncListsLinksAndPipes(t *testing.T) {
 	ctx := context.Background()
 	url, mod := startGorsyncd(t)
-	dir, _ := specialTree(t)
+	dir, root := specialTree(t)
+	targets := specialTreeTargets(root)
 	for name := range specialTreeTypes {
 		if err := os.Rename(filepath.Join(dir, name), filepath.Join(mod, name)); err != nil {
 			t.Fatal(err)
@@ -208,6 +249,12 @@ func TestRsyncListsLinksAndPipes(t *testing.T) {
 	entries, err := b.List(ctx, "")
 	if got := entryTypes(entries); err != nil || !maps.Equal(got, specialTreeTypes) {
 		t.Errorf("gorsyncd: List = %v, %v; want %v", got, err, specialTreeTypes)
+	}
+	if got := linkTargets(entries); !maps.Equal(got, targets) {
+		t.Errorf("gorsyncd: List gave the targets %v; want %v", got, targets)
+	}
+	if e, err := b.Stat(ctx, "dirlink"); err != nil || !e.IsLink() || e.Link == nil || *e.Link != targets["dirlink"] {
+		t.Errorf("gorsyncd: Stat dirlink = %+v, %v; want the link to %s", e, err, targets["dirlink"])
 	}
 	deep, err := OpenBackend(url, false, 1)
 	if err != nil {
@@ -226,5 +273,8 @@ func TestRsyncListsLinksAndPipes(t *testing.T) {
 	entries, err = deep.List(ctx, "")
 	if got := entryTypes(entries); err != nil || !maps.Equal(got, specialTreeTypes) {
 		t.Errorf("gorsyncd deep: List = %v, %v; want %v", got, err, specialTreeTypes)
+	}
+	if got := linkTargets(entries); !maps.Equal(got, targets) {
+		t.Errorf("gorsyncd deep: List gave the targets %v; want %v", got, targets)
 	}
 }

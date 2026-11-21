@@ -367,7 +367,8 @@ func (b *RsyncBackend) List(ctx context.Context, relDir string) ([]model.FileEnt
 
 // liveList is a non-recursive dry run; -d makes the daemon send the
 // directory's children, without it the sender skips a directory argument and
-// hangs up after an empty list.
+// hangs up after an empty list. -l makes it send links, with their targets:
+// stock rsync left them out, gorsyncd sent them without targets.
 func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.FileEntry, error) {
 	remote, err := b.modulePath(relDir, true)
 	if err != nil {
@@ -375,7 +376,7 @@ func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.Fil
 	}
 	label := "LIST " + remote
 	peer := &peerMsgs{}
-	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d"}, remote, rsyncclient.WithStderr(peer))
+	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d", "-l"}, remote, rsyncclient.WithStderr(peer))
 	if err != nil {
 		// A daemon that cannot open the folder says why, then hangs up:
 		// its reason beats "connection reset".
@@ -431,7 +432,7 @@ func statEntry(label, relPath string, result *rsyncclient.Result, peer *peerMsgs
 			continue
 		}
 		mode := rsyncModeToFileMode(fi.Mode)
-		e := model.FileEntry{RelPath: relPath, Name: path.Base(relPath), Size: fi.Length, ModTime: fi.ModTime, TimeRes: model.TimeSecond, IsDir: mode.IsDir(), Mode: mode}
+		e := linkEntry(model.FileEntry{RelPath: relPath, Name: path.Base(relPath), Size: fi.Length, ModTime: fi.ModTime, TimeRes: model.TimeSecond, IsDir: mode.IsDir(), Mode: mode}, fi)
 		if relPath == "" {
 			e.Name = ""
 		}
@@ -494,7 +495,7 @@ func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit 
 		return err
 	}
 	l := newRsyncListing(scope, emit, complete, b.msgRelPath)
-	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r"}, remote, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
+	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r", "-l"}, remote, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
 		return err
 	}

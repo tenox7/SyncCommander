@@ -115,7 +115,7 @@ func TestShellListingSkipsWhatItCannotRead(t *testing.T) {
 			var completed []string
 			l := newShellListing("", "/r", func(string, []model.FileEntry) {}, func(d string) { completed = append(completed, d) })
 			for _, rec := range tc.recs {
-				l.add(rec)
+				l.add(rec, "")
 			}
 			if early := slices.Clone(completed); !slices.Equal(early, tc.early) {
 				t.Errorf("released during the run: %q, want %q", early, tc.early)

@@ -298,7 +298,9 @@ func expandHome(remotePath string, home func() (string, error)) (string, error) 
 
 // findRecord lays out size, mtime, atime, ctime, octal mode and type letter;
 // the name comes last and the record ends in NUL, so tabs and newlines in
-// names survive.
+// names survive. A second field follows each record, also ending in NUL:
+// a link's target (find's %l, perl's readlink), empty for anything else.
+// A target holds anything but NUL, as a name does.
 const findRecord = `%s\t%T@\t%A@\t%C@\t%m\t%y\t`
 
 // unreadRecord is findRecord for a folder find cannot list (not readable or
@@ -314,7 +316,7 @@ const unreadRecord = `%s\t%T@\t%A@\t%C@\t%m\tD\t`
 // or an entry it cannot lstat, becomes a record of type ! holding the error
 // in the first field and the full path last. A file deleted while it lists
 // is skipped: leaving it out is right.
-const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
+const perlLister = `perl -e 'sub u{my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0\0",$e,$_[0]}sub w{my($d,$r)=@_;my $h;unless(opendir($h,$d)){u($d);return}for(readdir $h){next if $_ eq "."||$_ eq "..";my $p="$d/$_";my @s=lstat($p);unless(@s){u($p)unless $!{ENOENT};next}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";my $k=$t eq "l"?readlink($p):"";$k="" unless defined $k;printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$r?$p:$_,$k;w($p,$r)if $r&&$t eq "d"}}w($ARGV[0],$ARGV[1])'`
 
 // exitNotThere is the exit status of a stat that finds nothing at its path.
 const exitNotThere = 78
@@ -367,7 +369,7 @@ func (s *sshShell) learnForm(form int32, err error) bool {
 // perlStat prints the findRecord of its one argument, lstat'ed, the full
 // path as the name, for hosts whose find has no -printf. It exits
 // exitNotThere when nothing is there.
-const perlStat = `perl -e 'my @s=lstat($ARGV[0]);unless(@s){exit 78 if $!{ENOENT};my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0",$e,$ARGV[0];exit 0}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$ARGV[0]'`
+const perlStat = `perl -e 'my @s=lstat($ARGV[0]);unless(@s){exit 78 if $!{ENOENT};my $e="$!";$e=~s/[\t\0]/ /g;printf "%s\t0\t0\t0\t0\t!\t%s\0\0",$e,$ARGV[0];exit 0}my $t=-l _?"l":-d _?"d":-f _?"f":-p _?"p":-S _?"s":-b _?"b":-c _?"c":"o";my $k=$t eq "l"?readlink($ARGV[0]):"";$k="" unless defined $k;printf "%d\t%d\t%d\t%d\t%o\t%s\t%s\0%s\0",$s[7],$s[9],$s[8],$s[10],$s[2]&07777,$t,$ARGV[0],$k'`
 
 // statCmd prints the list record of p itself, a link as a link, or exits
 // exitNotThere when nothing is there. find starts at p and, with
@@ -377,7 +379,7 @@ func (s *sshShell) statCmd(p string, form int32) string {
 	if form == formPerl {
 		return perlStat + " " + q
 	}
-	return probed(form, fmt.Sprintf(`[ -e %[1]s ] || [ -L %[1]s ] || exit %[2]d; find %[1]s -maxdepth 0 -printf '%[3]s%[4]s\0'`,
+	return probed(form, fmt.Sprintf(`[ -e %[1]s ] || [ -L %[1]s ] || exit %[2]d; find %[1]s -maxdepth 0 -printf '%[3]s%[4]s\0%%l\0'`,
 		q, exitNotThere, findRecord, "%f"))
 }
 
@@ -420,9 +422,11 @@ func (s *sshShell) Stat(ctx context.Context, relPath string) (model.FileEntry, e
 	return e, nil
 }
 
-// statRecord reads the one record a stat prints.
+// statRecord reads the one record a stat prints, and the target after it.
 func statRecord(out string) (listRecord, bool) {
-	return parseListRecord(strings.TrimSuffix(out, "\x00"))
+	rec, target, _ := strings.Cut(strings.TrimSuffix(out, "\x00"), "\x00")
+	r, ok := parseListRecord(rec)
+	return r, ok && r.withTarget(target)
 }
 
 // listCmd lists dir in form, one level or all under it. find leaves out a
@@ -442,7 +446,7 @@ func (s *sshShell) listCmd(dir string, recursive bool, form int32) string {
 	if recursive {
 		depth, name = "", "%p"
 	}
-	return probed(form, fmt.Sprintf(`find %s -ignore_readdir_race%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0' -prune \) -o -printf '%s%s\0'`,
+	return probed(form, fmt.Sprintf(`find %s -ignore_readdir_race%s -mindepth 1 \( -type d \( ! -readable -o ! -executable \) -printf '%s%s\0\0' -prune \) -o -printf '%s%s\0%%l\0'`,
 		shellQuote(findStart(dir)), depth, unreadRecord, name, findRecord, name))
 }
 
@@ -482,11 +486,16 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 		return nil, nil
 	}
 	var result []model.FileEntry
-	for _, rec := range strings.Split(text, "\x00") {
+	fields := strings.Split(text, "\x00")
+	for i := 0; i < len(fields); i += 2 {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		rec := fields[i]
 		r, ok := parseListRecord(rec)
+		// Each record has its target field after it: one missing is a
+		// listing cut off.
+		ok = ok && i+1 < len(fields) && r.withTarget(fields[i+1])
 		switch {
 		case !ok:
 			// Text that is not a record, such as what a login script
@@ -513,7 +522,7 @@ func (s *sshShell) findList(ctx context.Context, relDir string) ([]model.FileEnt
 func (s *sshShell) findRecursive(ctx context.Context, scope string, emit func(string, []model.FileEntry), complete func(string)) error {
 	absPrefix := s.abs(scope)
 	l := newShellListing(scope, absPrefix, emit, complete)
-	w := newRecordWriter(0, l.add)
+	w := newRecordWriter(0, l.field)
 	err := s.list(ctx, absPrefix, true, w)
 	w.flush()
 	if err == nil {
@@ -541,6 +550,8 @@ type shellListing struct {
 	reports          []string
 	bad              bool
 	junk             string // the first text that was not a record
+	rec              string // a record whose target field has not come yet
+	halfway          bool   // rec is waiting
 }
 
 func newShellListing(scope, absPrefix string, emit func(string, []model.FileEntry), complete func(string)) *shellListing {
@@ -549,8 +560,20 @@ func newShellListing(scope, absPrefix string, emit func(string, []model.FileEntr
 	return l
 }
 
-func (l *shellListing) add(rec string) {
+// field takes the listing's next NUL-terminated field: a record, then the
+// target field that follows every record.
+func (l *shellListing) field(f string) {
+	if !l.halfway {
+		l.rec, l.halfway = f, true
+		return
+	}
+	l.halfway = false
+	l.add(l.rec, f)
+}
+
+func (l *shellListing) add(rec, target string) {
 	r, ok := parseListRecord(rec)
+	ok = ok && r.withTarget(target)
 	if !ok {
 		// See findList.
 		if !l.bad {
@@ -599,6 +622,9 @@ func (l *shellListing) unreadBy(relPath string) {
 }
 
 func (l *shellListing) finish(label string) error {
+	if l.halfway { // a record without its target field: the listing was cut off
+		l.bad = true
+	}
 	switch {
 	case l.bad && l.junk != "":
 		return fmt.Errorf("%s: %w: the server answered %s", label, ErrIncompleteListing, clip(l.junk))
@@ -670,6 +696,20 @@ func parseListRecord(rec string) (listRecord, bool) {
 		e.Mode |= os.ModeIrregular
 	}
 	return listRecord{name: f[6], entry: e, unread: f[5] == "D"}, true
+}
+
+// withTarget gives r the target field that follows its record: a link's
+// target, empty for anything else. A target after anything else means the
+// fields are out of step: no listing sc asked for.
+func (r *listRecord) withTarget(target string) bool {
+	switch {
+	case target == "":
+		return true
+	case !r.entry.IsLink():
+		return false
+	}
+	r.entry.Link = model.LinkTo(target)
+	return true
 }
 
 // parseEpoch reads seconds since 1970 with an optional fraction, as find's
@@ -1033,6 +1073,29 @@ func (s *sshShell) Rename(ctx context.Context, oldRel, newRel string) error {
 	_, err := s.run(ctx, renameCmd(s.abs(oldRel), s.abs(newRel)))
 	s.listCache.forgetRenamed(oldRel, newRel)
 	s.forgetDirs(oldRel)
+	return err
+}
+
+// Symlink makes relPath a link to target with ln -s (model.Linker), and its
+// folder first, in one command. A link there goes first: ln -s replaces
+// none. A file or a folder there is refused: ln -s would make the link
+// inside the folder. The user allowed ln -s on 2026-11-20.
+func (s *sshShell) Symlink(ctx context.Context, target, relPath string) error {
+	if isBaseRel(relPath) {
+		return fmt.Errorf("%s: refusing to make the base directory a link", s.proto)
+	}
+	p := s.abs(relPath)
+	q := shellQuote(p)
+	Log.Add(s.proto, DirOut, "SYMLINK "+relPath+" -> "+target)
+	_, err := s.run(ctx, fmt.Sprintf(`mkdir -p %s && if [ -L %s ]; then rm -f %s; elif [ -e %s ]; then exit %d; fi && ln -s -- %s %s`,
+		shellQuote(path.Dir(p)), q, q, q, exitInTheWay, shellQuote(target), q))
+	s.listCache.invalidateAncestors(relPath)
+	if exitCode(err) == exitInTheWay {
+		err = fmt.Errorf("%s: %s: a file or a folder is there, not replaced with a link", s.proto, relPath)
+	}
+	if err != nil {
+		Log.Add(s.proto, DirErr, "SYMLINK "+relPath+": "+err.Error())
+	}
 	return err
 }
 

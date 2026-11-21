@@ -336,9 +336,10 @@ func (p *Panel) eqPrefix(node *model.TreeNode) string {
 }
 
 // zoneShifted reports a file that compares equal, its mtimes equal only by
-// the time-zone rule (model.ZoneShiftHours).
+// the time-zone rule (model.ZoneShiftHours). A link, pipe or socket never
+// compares by its time.
 func zoneShifted(n *model.TreeNode, opts *model.CompareOpts) bool {
-	if opts == nil || !opts.ModTime || fileOtherAttrsDiffer(n, opts) {
+	if opts == nil || !opts.ModTime || n.IsSpecial || fileOtherAttrsDiffer(n, opts) {
 		return false
 	}
 	l, r := n.Sides[model.SideLeft].Entry, n.Sides[model.SideRight].Entry
@@ -455,8 +456,9 @@ func (p *Panel) inlineInfo(node *model.TreeNode) string {
 	return styleChrome.Render(fmt.Sprintf("%4sd %5sf %7s", model.FormatCount(int64(t.Dirs)), model.FormatCount(int64(t.Files)), model.FormatSize(t.Size)))
 }
 
-// specialMark follows a link, pipe or socket's name, as in ls -F. sc lists
-// them but never reads or copies them.
+// specialMark follows a link, pipe or socket's name, as in ls -F. sc copies
+// a link as a link (its target is a row of its own under it) and never
+// reads or copies a pipe or socket.
 func specialMark(e *model.FileEntry) string {
 	switch {
 	case e.Mode&os.ModeSymlink != 0:

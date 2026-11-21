@@ -25,6 +25,32 @@ type FileEntry struct {
 	// takes no room: it fills the gap before Mode.
 	TimeRes TimeRes
 	Mode    os.FileMode
+	// Link is a symbolic link's target, the text as the server holds it
+	// (Target): nil for an entry that is no link, and for a link whose
+	// target the listing does not give. Two links compare by their
+	// targets, and a copy makes a link to the same text. A pointer, so an
+	// entry that is no link pays 8 bytes for it, not a string's 16.
+	Link *string
+}
+
+// LinkTo is the Link of a link to target. An empty target is none known:
+// a listing that could not read it says so.
+func LinkTo(target string) *string {
+	if target == "" {
+		return nil
+	}
+	return &target
+}
+
+// IsLink reports a symbolic link.
+func (e *FileEntry) IsLink() bool { return !e.IsDir && e.Mode&os.ModeSymlink != 0 }
+
+// Target is a link's target, and whether the listing gave it.
+func (e *FileEntry) Target() (string, bool) {
+	if e.Link == nil || !e.IsLink() {
+		return "", false
+	}
+	return *e.Link, true
 }
 
 // IsFileName reports whether name can be the name of one entry in a
@@ -51,8 +77,10 @@ func IsFileName(name string) bool {
 // symbolic link, a named pipe, a socket or a device; or a part file of an
 // unfinished copy (IsPartName). It is listed, so the tree shows it and a
 // same-name file or folder on the other side is a type conflict, but it is
-// never read, summed or copied: a link leads out of the tree, opening a pipe
-// waits for a writer (L2, L9), and a part holds half a file (L14).
+// never read or summed: a link leads out of the tree, opening a pipe waits
+// for a writer (L2, L9), and a part holds half a file (L14). Of these only
+// a link is copied: as a link to the same target (IsLink), never the file
+// it names.
 func (e *FileEntry) IsSpecial() bool {
 	return !e.IsDir && (e.Mode&os.ModeType != 0 || IsPartName(e.Name))
 }
@@ -159,6 +187,7 @@ type Caps struct {
 	PrefetchSums bool // ChecksumPrefetcher
 	BatchSums    bool // ChecksumBatcher
 	BatchRemove  bool // BatchRemover
+	Links        bool // Linker
 	// ListedSums: a prefetch is a listing, which carries the sums (rclone
 	// on S3, GCS, B2, Drive and the like), and reads no file. It pays for
 	// the files right in a folder too, but not for a few files of many
@@ -282,6 +311,17 @@ type PartWriter interface {
 	// from its name: the part is renamed, and the error wraps
 	// ErrModeNotSet.
 	CommitPart(ctx context.Context, relPath string, mode os.FileMode) error
+}
+
+// Linker is implemented by backends that make symbolic links. Symlink makes
+// relPath a link to target, the text as it is: sc never reads it, checks it
+// or makes it relative or absolute, so a copied link may name nothing on
+// the destination, as with rsync -l. A link already at relPath is
+// replaced. A file or a folder there is an error: the copy removes such a
+// twin first, and only with the user's yes. The folders above relPath are
+// made, as for a file (CollectCopyFiles names no folder that holds one).
+type Linker interface {
+	Symlink(ctx context.Context, target, relPath string) error
 }
 
 // ErrPartInTheWay is PartSize's error for something other than a file at a

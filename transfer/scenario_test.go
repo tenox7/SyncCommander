@@ -255,10 +255,10 @@ func TestSameObjectRemoteLocation(t *testing.T) {
 	a := transport.NewLazyBackend("sftp://u:xxxxx@host/data", open)
 	b := transport.NewLazyBackend("sftp://u:xxxxx@host/data/", open)
 	c := transport.NewLazyBackend("sftp://u:xxxxx@host/other", open)
-	if !sameObject(a, b, "f.txt") {
+	if !sameObject(a, b, "f.txt", false) {
 		t.Error("the same URL on both sides is not seen as one object")
 	}
-	if sameObject(a, c, "f.txt") {
+	if sameObject(a, c, "f.txt", false) {
 		t.Error("two different URLs are seen as one object")
 	}
 }
@@ -274,7 +274,7 @@ func TestScenarioCopyFileLeavesSiblingConflictAlone(t *testing.T) {
 	writeFile(t, filepath.Join(right, "notes", "2025.txt"), "more data")
 	s := newScenario(t, left, right)
 
-	if got := model.CollectTypeCollisions(s.node(t, "a.txt"), true); len(got) != 0 {
+	if got := model.CollectTypeCollisions(s.node(t, "a.txt"), true, true); len(got) != 0 {
 		t.Errorf("CollectTypeCollisions(a.txt) = %d nodes, want none", len(got))
 	}
 	if p := s.copy(t, "a.txt", true, false); p.Failed.Load() != 0 {
@@ -297,7 +297,7 @@ func TestScenarioReplaceFolderWithFileNeedsConfirmation(t *testing.T) {
 			file = c
 		}
 	}
-	if got := model.CollectTypeCollisions(file, true); len(got) != 1 || got[0].RelPath != "notes" || !got[0].IsDir {
+	if got := model.CollectTypeCollisions(file, true, true); len(got) != 1 || got[0].RelPath != "notes" || !got[0].IsDir {
 		t.Fatalf("CollectTypeCollisions(notes) = %v, want the folder notes/", got)
 	}
 

@@ -81,6 +81,7 @@ const (
 	exitFolder      = 76 // a folder is where the part goes
 	exitNoPart      = 77 // the part to commit is gone
 	exitModeNotSet  = 79 // the bytes or the name are in place, but chmod failed
+	exitInTheWay    = 80 // a file or a folder is where a link goes
 )
 
 // modeNotSet is err, the end of a write or a commit, as ErrModeNotSet when

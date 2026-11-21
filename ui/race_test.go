@@ -52,7 +52,7 @@ func TestUIRaceAgainstScanner(t *testing.T) {
 					return
 				}
 				model.CollectCopyFiles(root, opts, true, false)
-				model.CollectTypeCollisions(root, true)
+				model.CollectTypeCollisions(root, true, true)
 			})
 			select {
 			case <-scanned:

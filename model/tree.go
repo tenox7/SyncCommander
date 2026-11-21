@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"regexp"
@@ -149,6 +150,10 @@ type TreeNode struct {
 	// IsSpecial marks a row of links, pipes or devices (FileEntry.IsSpecial):
 	// its own kind, so a file of the same name is a twin, as a folder is.
 	IsSpecial bool
+	// IsLink marks a link's row, a special row of a kind of its own: a pipe
+	// of its name is a twin. It compares by target (NodeStatus), and a
+	// copy writes it, as a link, where a pipe or a device is never written.
+	IsLink bool
 	// Expanded is what the user unfolded. Like the rollup fields it belongs
 	// to the UI goroutine, which reads and writes it under the shared lock;
 	// the scanner never touches it. So a fold leaves the tree's revision
@@ -356,22 +361,25 @@ func MergeChildren(parent *TreeNode, leftEntries, rightEntries []FileEntry, dept
 // and rewrites. With none it builds new nodes only, and reads and writes no
 // live node: what the scan does without the lock (F19).
 func mergeChildren(parent *TreeNode, existingChildren []*TreeNode, leftEntries, rightEntries []FileEntry, depth int, opts CompareOpts, changed *ChangedPaths) []*TreeNode {
-	keyFor := func(name string, isDir, special bool) string {
+	keyFor := func(name string, isDir, special, link bool) string {
 		switch {
 		case isDir:
 			return name + "/"
+		case link:
+			return name + "\x00l" // no name holds a NUL
 		case special:
-			return name + "\x00" // no name holds a NUL
+			return name + "\x00"
 		}
 		return name
 	}
 	existing := make(map[string]*TreeNode, len(existingChildren))
 	for _, c := range existingChildren {
-		existing[keyFor(c.Name, c.IsDir, c.IsSpecial)] = c
+		existing[keyFor(c.Name, c.IsDir, c.IsSpecial, c.IsLink)] = c
 	}
 	byKey := make(map[string]*TreeNode)
-	pick := func(name string, isDir, special bool, relPath string) *TreeNode {
-		k := keyFor(name, isDir, special)
+	pick := func(e *FileEntry) *TreeNode {
+		special, link := e.IsSpecial(), e.IsLink()
+		k := keyFor(e.Name, e.IsDir, special, link)
 		if n, ok := byKey[k]; ok {
 			return n
 		}
@@ -383,10 +391,11 @@ func mergeChildren(parent *TreeNode, existingChildren []*TreeNode, leftEntries, 
 			return old
 		}
 		n := &TreeNode{
-			RelPath:   relPath,
-			Name:      name,
-			IsDir:     isDir,
+			RelPath:   e.RelPath,
+			Name:      e.Name,
+			IsDir:     e.IsDir,
 			IsSpecial: special,
+			IsLink:    link,
 			Depth:     depth,
 			Parent:    parent,
 		}
@@ -395,13 +404,11 @@ func mergeChildren(parent *TreeNode, existingChildren []*TreeNode, leftEntries, 
 	}
 	for i := range leftEntries {
 		e := &leftEntries[i]
-		n := pick(e.Name, e.IsDir, e.IsSpecial(), e.RelPath)
-		n.Sides[SideLeft].Entry = e
+		pick(e).Sides[SideLeft].Entry = e
 	}
 	for i := range rightEntries {
 		e := &rightEntries[i]
-		n := pick(e.Name, e.IsDir, e.IsSpecial(), e.RelPath)
-		n.Sides[SideRight].Entry = e
+		pick(e).Sides[SideRight].Entry = e
 	}
 	nodes := make([]*TreeNode, 0, len(byKey))
 	for _, n := range byKey {
@@ -462,8 +469,11 @@ func revalidateChecksum(n *TreeNode, changed *ChangedPaths) {
 }
 
 // checksumStatus derives Compare.Checksum from the cached sums of a file
-// present on both sides.
+// present on both sides; a link's from its targets (targetStatus).
 func checksumStatus(n *TreeNode) AttrStatus {
+	if n.IsLink {
+		return targetStatus(n.Entries())
+	}
 	l, r := n.Sides[SideLeft].Checksum, n.Sides[SideRight].Checksum
 	switch {
 	case l == "" || r == "":
@@ -474,8 +484,30 @@ func checksumStatus(n *TreeNode) AttrStatus {
 	return AttrDifferent
 }
 
-// sortNodes orders directories first, then by name, a file before its
-// special twin.
+// targetStatus compares two links by their targets, the text each holds, as
+// rsync does: a link's content is its target. Their size is the target's
+// length, and their times and modes are not the link's to keep: sftp cannot
+// set a link's time, and Linux gives every link mode 0777. Two links are
+// equal when they hold the same text, also when it names nothing. It is
+// kept in Compare.Checksum, the content's place: a link has no checksum,
+// and CompareResult has no byte to spare (F13).
+func targetStatus(l, r *FileEntry) AttrStatus {
+	if l == nil || r == nil {
+		return AttrNA
+	}
+	lt, lok := l.Target()
+	rt, rok := r.Target()
+	switch {
+	case !lok || !rok:
+		return AttrUnknown
+	case lt == rt:
+		return AttrEqual
+	}
+	return AttrDifferent
+}
+
+// sortNodes orders directories first, then by name: of twins, the file
+// first, then the link, then the other special.
 func sortNodes(nodes []*TreeNode) {
 	slices.SortFunc(nodes, func(a, b *TreeNode) int {
 		if a.IsDir != b.IsDir {
@@ -484,19 +516,35 @@ func sortNodes(nodes []*TreeNode) {
 			}
 			return 1
 		}
-		if c := strings.Compare(a.Name, b.Name); c != 0 || a.IsSpecial == b.IsSpecial {
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
 			return c
 		}
-		if a.IsSpecial {
-			return 1
-		}
-		return -1
+		return cmp.Compare(a.kind(), b.kind())
 	})
 }
 
-// sameKind reports rows of one kind: folder, file, or special. Rows of one
-// name and different kinds are twins.
-func sameKind(a, b *TreeNode) bool { return a.IsDir == b.IsDir && a.IsSpecial == b.IsSpecial }
+// kind numbers a row's kind: folder, file, link, or other special.
+func (n *TreeNode) kind() int {
+	switch {
+	case n.IsDir:
+		return 0
+	case n.IsLink:
+		return 2
+	case n.IsSpecial:
+		return 3
+	}
+	return 1
+}
+
+// sameKind reports rows of one kind: folder, file, link, or other special.
+// Rows of one name and different kinds are twins.
+func sameKind(a, b *TreeNode) bool { return a.kind() == b.kind() }
+
+// Writes reports whether a copy writes the row's source entry: a folder, a
+// file, and a link when links is set (the destination makes them). A pipe,
+// a device and a part file are never written, so nothing on the
+// destination is in their way.
+func (n *TreeNode) Writes(links bool) bool { return !n.IsSpecial || links && n.IsLink }
 
 func compareNode(n *TreeNode, opts CompareOpts) {
 	l, r := n.Entries()
@@ -517,6 +565,9 @@ func compareNode(n *TreeNode, opts CompareOpts) {
 		n.Compare.BirthTime = AttrNA
 		n.Compare.Mode = AttrNA
 		n.Compare.Checksum = AttrNA
+		if n.IsLink {
+			n.Compare.Checksum = targetStatus(l, r)
+		}
 		return
 	}
 	n.Compare.Size = cmpAttr(l.Size == r.Size)
@@ -806,6 +857,13 @@ func NodeStatus(node *TreeNode, opts *CompareOpts) AttrStatus {
 		return AttrUnknown
 	}
 	c := &node.Compare
+	if node.IsLink {
+		// A link is its target, whatever opts compares (targetStatus).
+		if c.Checksum == AttrEqual {
+			return AttrEqual
+		}
+		return AttrUnknown
+	}
 	var attrs [7]AttrStatus
 	n := 0
 	for _, a := range [...]struct {
@@ -939,14 +997,26 @@ func flattenFileAttrs(node *TreeNode, guides uint64, opts *CompareOpts, flat *[]
 	lv, rv := val(func(e *FileEntry) string { return e.Mode.String() })
 	lpraw, rpraw := rawStr(func(e *FileEntry) string { return fmt.Sprintf("0%o", e.Mode.Perm()) })
 	attrs = append(attrs, attr{"perm", lv, rv, lpraw, rpraw, node.Compare.Mode, false, 0, 0})
-	lc, rc := node.Sides[SideLeft].Checksum, node.Sides[SideRight].Checksum
-	if lc == "" {
-		lc = "-"
+	if node.IsLink {
+		// The target, in the place of the checksum (targetStatus); "?"
+		// where the listing did not give it.
+		lt, rt := val(func(e *FileEntry) string {
+			if t, ok := e.Target(); ok {
+				return t
+			}
+			return "?"
+		})
+		attrs = append(attrs, attr{"link", lt, rt, "", "", node.Compare.Checksum, false, 0, 0})
+	} else {
+		lc, rc := node.Sides[SideLeft].Checksum, node.Sides[SideRight].Checksum
+		if lc == "" {
+			lc = "-"
+		}
+		if rc == "" {
+			rc = "-"
+		}
+		attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0, 0})
 	}
-	if rc == "" {
-		rc = "-"
-	}
-	attrs = append(attrs, attr{"cksum", lc, rc, "", "", node.Compare.Checksum, false, 0, 0})
 
 	for i, a := range attrs {
 		*flat = append(*flat, Row{Node: node, Attr: &AttrRow{
@@ -1067,11 +1137,12 @@ func OverwritesNewer(n *TreeNode, leftToRight bool, opts CompareOpts) string {
 // remove before it can write: same-name twins of another kind (file, folder,
 // link or other special) of node itself, and of every node the copy writes
 // inside it. Twins of node's siblings belong to other copies and are never
-// returned. A special source row is never written, so nothing is in its way.
-func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
+// returned. A source row the copy does not write (Writes: a pipe, or a link
+// when links is false) has nothing in its way.
+func CollectTypeCollisions(node *TreeNode, leftToRight, links bool) []*TreeNode {
 	var result []*TreeNode
 	src, dst := CopySides(leftToRight)
-	if node.Parent != nil && node.Sides[src].Entry != nil && !node.IsSpecial {
+	if node.Parent != nil && node.Sides[src].Entry != nil && node.Writes(links) {
 		for _, sib := range node.Parent.Children {
 			if sib != node && sib.Name == node.Name && !sameKind(sib, node) && sib.Sides[dst].Entry != nil {
 				result = append(result, sib)
@@ -1079,15 +1150,15 @@ func CollectTypeCollisions(node *TreeNode, leftToRight bool) []*TreeNode {
 		}
 	}
 	if node.dirOn(src) {
-		collectTypeCollisionsRec(node, leftToRight, &result)
+		collectTypeCollisionsRec(node, leftToRight, links, &result)
 	}
 	return result
 }
 
 // findTwinPairs appends each child on the destination side that has a
 // same-name twin of another kind on the source side, which the copy writes
-// there. A special source row is never written, so its twin stays.
-func findTwinPairs(children []*TreeNode, leftToRight bool, result *[]*TreeNode) {
+// there. A source row the copy does not write leaves its twin as it is.
+func findTwinPairs(children []*TreeNode, leftToRight, links bool, result *[]*TreeNode) {
 	src, dst := CopySides(leftToRight)
 	// Twins need a folder or a special row; most folders have no name twice.
 	var named map[string][]*TreeNode
@@ -1112,7 +1183,7 @@ func findTwinPairs(children []*TreeNode, leftToRight bool, result *[]*TreeNode) 
 			continue
 		}
 		for _, a := range named[b.Name] {
-			if !sameKind(a, b) && !a.IsSpecial && a.Sides[src].Entry != nil {
+			if !sameKind(a, b) && a.Writes(links) && a.Sides[src].Entry != nil {
 				*result = append(*result, b)
 				break
 			}
@@ -1120,12 +1191,12 @@ func findTwinPairs(children []*TreeNode, leftToRight bool, result *[]*TreeNode) 
 	}
 }
 
-func collectTypeCollisionsRec(node *TreeNode, leftToRight bool, result *[]*TreeNode) {
+func collectTypeCollisionsRec(node *TreeNode, leftToRight, links bool, result *[]*TreeNode) {
 	src, _ := CopySides(leftToRight)
-	findTwinPairs(node.Children, leftToRight, result)
+	findTwinPairs(node.Children, leftToRight, links, result)
 	for _, child := range node.Children {
 		if child.dirOn(src) {
-			collectTypeCollisionsRec(child, leftToRight, result)
+			collectTypeCollisionsRec(child, leftToRight, links, result)
 		}
 	}
 }
