@@ -28,8 +28,10 @@ type LogDialog struct {
 	statusAt      time.Time
 }
 
+// NewLogDialog starts on errors only: an error line in all lines went off
+// the screen at once while a long copy or scan wrote more.
 func NewLogDialog() *LogDialog {
-	return &LogDialog{follow: true}
+	return &LogDialog{follow: true, errOnly: true}
 }
 
 func (d *LogDialog) Open() { d.visible = true; d.follow = true }
@@ -65,14 +67,15 @@ func (d *LogDialog) Close() {
 
 // AutoOpen pops the log on new errors or failures (errCount counts both),
 // but not within five seconds of the user closing it; a fatal error always
-// opens it in errors-only mode.
+// opens it. It opens on errors only, also when e had set all lines: the
+// error that opened it went off the screen at once while a long copy or
+// scan wrote more lines. A fatal error also sets an open log to errors
+// only.
 func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 	if fatalCount > d.lastSeenFatal {
 		d.lastSeenErrs = errCount
 		d.lastSeenFatal = fatalCount
-		d.visible = true
-		d.follow = true
-		d.errOnly = true
+		d.openOnErrors()
 		return
 	}
 	if d.visible || errCount <= d.lastSeenErrs {
@@ -82,8 +85,13 @@ func (d *LogDialog) AutoOpen(errCount, fatalCount int) {
 		return
 	}
 	d.lastSeenErrs = errCount
+	d.openOnErrors()
+}
+
+func (d *LogDialog) openOnErrors() {
 	d.visible = true
 	d.follow = true
+	d.errOnly = true
 }
 
 // Export writes the whole log (every retained line, ignoring the errors-only
@@ -140,6 +148,11 @@ func (d *LogDialog) Home() {
 
 func (d *LogDialog) End() { d.follow = true }
 
+var (
+	errOnlyBadge  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("1"))
+	allLinesBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("4"))
+)
+
 func (d *LogDialog) View(width, height int) string {
 	if !d.visible {
 		return ""
@@ -160,13 +173,19 @@ func (d *LogDialog) View(width, height int) string {
 	if d.follow {
 		followMark = "▼"
 	}
-	filterTag := ""
+	// The filter shows in both states, and e says what it changes to:
+	// [errors only] showed only while on, so all lines had no sign.
+	badge := allLinesBadge.Render(" ALL LINES ")
+	eKey := "e=show errors only"
 	if d.errOnly {
-		filterTag = "  [errors only]"
+		badge = errOnlyBadge.Render(" ERRORS ONLY ")
+		eKey = "e=show all lines"
 	}
 
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  (%d lines)%s", d.spinner, followMark, total, filterTag)))
+	title := titleStyle.Render(fmt.Sprintf("%s Remote Log  %s  ", d.spinner, followMark)) + badge +
+		titleStyle.Render("  "+plural(total, "line"))
+	sb.WriteString(ansi.Truncate(title, contentWidth, ""))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render(strings.Repeat("─", contentWidth)))
 	sb.WriteString("\n")
@@ -182,7 +201,8 @@ func (d *LogDialog) View(width, height int) string {
 	if d.status != "" && time.Since(d.statusAt) < 10*time.Second {
 		sb.WriteString(titleStyle.Render(ansi.Truncate(shown(d.status), contentWidth, "")))
 	} else {
-		sb.WriteString(dimStyle.Render("↑↓=scroll  PgUp/Dn=page  Home/End  e=errors  s=save  Esc=close"))
+		keys := "↑↓=scroll  PgUp/Dn=page  Home/End  " + eKey + "  s=save  Esc=close"
+		sb.WriteString(dimStyle.Render(ansi.Truncate(keys, contentWidth, "")))
 	}
 
 	style := lipgloss.NewStyle().
