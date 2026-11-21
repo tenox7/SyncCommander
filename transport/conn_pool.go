@@ -50,6 +50,14 @@ type connPool[T any] struct {
 	// primary's running call with it (S23). Now it is dropped at its
 	// release, or when it is next taken, and the pool dials another.
 	alive func(T) bool
+	// turnedAway, when set, tells a dial the server turned away for having
+	// as many connections as it takes from one that failed (tooManyFTP,
+	// tooManySSH), while the primary is alive. The pool then keeps the
+	// extras it has, and the copies come down to them (ConnLimit): no ERR
+	// line, which opened the log on each copy.
+	turnedAway func(error) bool
+	base       int  // connections besides the extras that carry a copy: the primary
+	lowered    bool // the server turned an extra away since the last resize
 }
 
 // poolRedial is the wait after a failed dial of an extra connection; it
@@ -146,6 +154,15 @@ func (p *connPool[T]) dialLocked(ctx context.Context, failed Dir) (T, bool) {
 	}
 	p.size--
 	p.wakeLocked()
+	if ctx.Err() == nil && p.turnedAway != nil && p.turnedAway(err) && (p.alive == nil || p.alive(p.primary)) {
+		// The extras alive, and those being dialed, are what it takes.
+		if p.size < p.maxExtras {
+			p.maxExtras, p.lowered = p.size, true
+			Log.Add(p.name, DirWarn, fmt.Sprintf("the server took no more connections: %v; %d at a time from now on", err, max(p.size+p.base, 1)))
+		}
+		var zero T
+		return zero, false
+	}
 	// A dial alongside this one that failed first has set the wait.
 	if ctx.Err() == nil && !time.Now().Before(p.next) {
 		p.dialWait = min(max(2*p.dialWait, poolRedial), poolRedialMax)
@@ -213,7 +230,16 @@ func (p *connPool[T]) resize(maxExtras int) {
 		return
 	}
 	p.mu.Lock()
-	p.maxExtras = max(maxExtras, 0)
+	maxExtras = max(maxExtras, 0)
+	if p.lowered && max(maxExtras+p.base, 1) == max(p.maxExtras+p.base, 1) {
+		// The copies the server took, as the UI follows them (ConnLimit):
+		// the limit stays. An FTP pool with no extra left runs its one
+		// copy on the primary, and its 1 dialed one more at each copy.
+		p.mu.Unlock()
+		return
+	}
+	p.maxExtras = maxExtras
+	p.lowered = false
 	var surplus []T
 	for !p.closed && p.size > p.maxExtras {
 		c, ok := p.popIdle()
@@ -234,6 +260,20 @@ func (p *connPool[T]) resize(maxExtras int) {
 			}
 		}()
 	}
+}
+
+// connLimit is how many copies at once the server takes, as it showed when
+// it turned an extra away since the last resize; 0 while it did not.
+func (p *connPool[T]) connLimit() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.lowered {
+		return 0
+	}
+	return max(p.maxExtras+p.base, 1)
 }
 
 // close marks the pool closed and closes every idle extra. Subsequent

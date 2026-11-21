@@ -47,11 +47,14 @@ func newSCPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure b
 	}
 	b.pool = newConnPool("scp", conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	b.pool.alive = sshClientAlive
+	b.pool.turnedAway, b.pool.base = tooManySSH, 1
 	return b, nil
 }
 
 // SetParallel keeps n-1 extra connections, the primary being the n-th.
 func (b *SCPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
+func (b *SCPBackend) ConnLimit() int { return b.pool.connLimit() }
 
 func (b *SCPBackend) Close() error {
 	b.pool.close()

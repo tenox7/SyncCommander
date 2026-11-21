@@ -202,7 +202,9 @@ func SizeMismatch(got, want int64) error {
 // connecting (F7). The words (finalWords) are what servers send as text,
 // kept for the backends that do not mark their errors yet.
 func isPermanentError(err error) bool {
-	if err == nil {
+	// A server with as many connections as it takes lets a later one in,
+	// whatever code its answer has: ProFTPD says so with a 530.
+	if err == nil || errors.Is(err, model.ErrTooMany) {
 		return false
 	}
 	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrExist) || errors.Is(err, fs.ErrInvalid) || errors.Is(err, ErrUnsupported) || errors.Is(err, ErrIncompleteListing) || errors.Is(err, ErrSizeMismatch) || errors.Is(err, ErrSpecialFile) || errors.Is(err, ErrBadName) || errors.Is(err, ErrTempRoom) {

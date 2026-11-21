@@ -371,6 +371,29 @@ func (m *Model) adjustCopyParallel(delta int) {
 	transport.Log.Add("copy", transport.DirOut, fmt.Sprintf("parallel=%d", next))
 }
 
+// followConnLimit lowers the parallel copies to what a server takes, as it
+// showed when it turned a connection away for having too many
+// (transport.ConnLimit): a copy over it waits for a connection of its own.
+// A WARN line says so, no ERR: nothing failed. + raises it again, and the
+// server shows again what it takes.
+func (m *Model) followConnLimit() {
+	if !m.copying() || m.copyProgress.Batched.Load() {
+		return
+	}
+	n := 0
+	for _, b := range []model.Backend{m.left.backend, m.right.backend} {
+		if l := transport.ConnLimit(b); l > 0 && (n == 0 || l < n) {
+			n = l
+		}
+	}
+	if n == 0 || n >= m.copyParallel {
+		return
+	}
+	m.setCopyParallel(n)
+	m.copyProgress.SetParallel(n)
+	transport.Log.Add("copy", transport.DirWarn, fmt.Sprintf("parallel=%d: the server takes no more connections at a time", n))
+}
+
 // setCopyParallel sets the copy worker count and sizes both sides' connection
 // pools to match. It runs before the semaphore grows, so a new worker finds
 // its connection allowed.

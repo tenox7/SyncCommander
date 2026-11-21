@@ -226,6 +226,7 @@ func (m *Model) tick() tea.Cmd {
 	}
 	m.spinFrame = (m.spinFrame + 1) % len(spinnerFrames)
 	m.tickCopy()
+	m.followConnLimit()
 	m.updateChecksumLabel()
 	m.autoOpenLog()
 	m.refreshTree()

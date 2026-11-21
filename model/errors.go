@@ -15,6 +15,12 @@ var (
 	// route, no such host, or the server hung up before the login ended.
 	// Tried again, up to a few connects in a row.
 	ErrUnreachable = errors.New("cannot reach the server")
+	// ErrTooMany: the server turned a connection away because it has as
+	// many as it takes: an rsync daemon's "max connections", an FTP
+	// server's 421. It is no failed connect: the server takes one again
+	// when another closes. sc waits for one of its own to close, and opens
+	// fewer at a time from then on.
+	ErrTooMany = errors.New("the server takes no more connections now")
 	// ErrConnLost: the connection died in the middle of a call. The call is
 	// tried again on a new connection.
 	ErrConnLost = errors.New("connection lost")

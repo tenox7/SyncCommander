@@ -55,6 +55,7 @@ func NewRsyncSSHBackend(ctx context.Context, rawURL string, insecure bool, paral
 	}
 	b.pool = newConnPool(b.proto, conn.client, parallel-1, dial, func(c *ssh.Client) { c.Close() })
 	b.pool.alive = sshClientAlive
+	b.pool.turnedAway, b.pool.base = tooManySSH, 1
 	return b, nil
 }
 
@@ -76,6 +77,8 @@ func (b *RsyncSSHBackend) findRsync(ctx context.Context) error {
 
 // SetParallel keeps n-1 extra connections, the primary being the n-th.
 func (b *RsyncSSHBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
+func (b *RsyncSSHBackend) ConnLimit() int { return b.pool.connLimit() }
 
 func (b *RsyncSSHBackend) Close() error {
 	b.pool.close()

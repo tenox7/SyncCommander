@@ -210,7 +210,8 @@ func TestFTPListingWaitsForThePrimaryOnly(t *testing.T) {
 
 // A server at its limit turns the extra away. The listing runs on the
 // primary, and the refusal is a warning: an error would open the log on
-// every scan of a server that takes few connections, which went fine.
+// every scan of a server that takes few connections, which went fine. The
+// copies come down to what it took (ConnLimit).
 func TestFTPListingOnARefusedExtraIsNoError(t *testing.T) {
 	f := &fakeFTPD{
 		ls:     map[string][]string{"/": {lsLine(".", true), lsLine("..", true), lsLine("a.txt", false)}},
@@ -231,7 +232,7 @@ func TestFTPListingOnARefusedExtraIsNoError(t *testing.T) {
 		got, err := b.List(ctx, "")
 		done <- result{len(got), err}
 	}()
-	waitForLog(t, mark, "an extra connection:")
+	waitForLog(t, mark, "took no more connections")
 	b.unlockPrimary()
 	select {
 	case r := <-done:
@@ -244,8 +245,11 @@ func TestFTPListingOnARefusedExtraIsNoError(t *testing.T) {
 	if n := lastListConn(f); n != 1 {
 		t.Errorf("with the extra refused, the listing ran on connection %d, not on the primary", n)
 	}
+	if n := b.ConnLimit(); n != 1 {
+		t.Errorf("ConnLimit %d with every extra refused; want 1", n)
+	}
 	for _, l := range Log.Lines()[mark:] {
-		if strings.Contains(l, "an extra connection:") && !strings.Contains(l, " ftp WARN ") {
+		if strings.Contains(l, "took no more connections") && !strings.Contains(l, " ftp WARN ") {
 			t.Errorf("a listing's refused extra is logged as more than a warning: %q", l)
 		}
 	}

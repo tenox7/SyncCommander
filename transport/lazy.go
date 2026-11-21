@@ -131,7 +131,13 @@ func (b *lazyBackend) ensureConnected(ctx context.Context) (model.Backend, error
 		if ctx.Err() == nil {
 			err = b.connectFailed(connectFailure(err))
 		}
-		Log.Add(b.proto, DirErr, b.display+": "+err.Error())
+		// A server with as many connections as it takes is no failure of
+		// sc's or the server's: the call's Retry tries it again.
+		level := DirErr
+		if errors.Is(err, model.ErrTooMany) && !errors.Is(err, errNotConnecting) {
+			level = DirWarn
+		}
+		Log.Add(b.proto, level, b.display+": "+err.Error())
 		return nil, err
 	}
 	b.mu.Lock()
@@ -482,6 +488,14 @@ func (b *lazyBackend) Close() error {
 		return nil
 	}
 	return inner.Close()
+}
+
+// ConnLimit is what the connected backend's server takes.
+func (b *lazyBackend) ConnLimit() int {
+	if inner := b.current(); inner != nil {
+		return ConnLimit(inner)
+	}
+	return 0
 }
 
 // SetParallel resizes the connected backend's pool and remembers n for the

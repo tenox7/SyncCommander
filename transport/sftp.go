@@ -184,11 +184,14 @@ func newSFTPBackend(ctx context.Context, conn *sshConn, rawURL string, insecure 
 	}
 	b.pool = newConnPool("sftp", main, parallel-1, dial, func(c *sftpConn) { c.close() })
 	b.pool.alive = func(c *sftpConn) bool { return !c.ended.Load() && sshClientAlive(c.ssh) }
+	b.pool.turnedAway, b.pool.base = tooManySSH, 1
 	return b, nil
 }
 
 // SetParallel keeps n-1 extra connections, the primary being the n-th.
 func (b *SFTPBackend) SetParallel(n int) { b.pool.resize(n - 1) }
+
+func (b *SFTPBackend) ConnLimit() int { return b.pool.connLimit() }
 
 func (b *SFTPBackend) Close() error {
 	b.pool.close()

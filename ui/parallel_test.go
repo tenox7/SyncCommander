@@ -11,6 +11,7 @@ import (
 
 	"sc/model"
 	"sc/transfer"
+	"sc/transport"
 )
 
 // parallelRecorder is a backend that remembers the pool size it was given.
@@ -137,5 +138,48 @@ func TestCopyPopupFitsManyFilesInFlight(t *testing.T) {
 	}
 	if got, want := strings.Count(s, "\n")+1, d.MaxSlotRows+copyPopupFixedRows-2; got != want {
 		t.Fatalf("popup is %d lines, want %d:\n%s", got, want, s)
+	}
+}
+
+// limitedRecorder is a parallelRecorder whose server took limit
+// connections when it turned one away.
+type limitedRecorder struct {
+	*parallelRecorder
+	limit int
+}
+
+func (b *limitedRecorder) ConnLimit() int { return b.limit }
+
+// A server that turned a connection away for having too many brings the
+// parallel copies down to what it took, with a WARN line, no ERR: the
+// copies over it waited each for a connection.
+func TestCopiesFollowTheServerLimit(t *testing.T) {
+	left := &parallelRecorder{Backend: openBackendOrSkip(t, "fake://tiny")}
+	right := &limitedRecorder{parallelRecorder: &parallelRecorder{Backend: openBackendOrSkip(t, "fake://tiny")}}
+	m := newTestModel(t, left, right)
+	sem := transfer.NewDynSem(2)
+	m.copyProgress.Reset(2, true)
+	m.copyProgress.Sem.Store(sem)
+	runningOp(m, opCopy, nil)
+	for range 4 {
+		press(m, "+")
+	}
+	mark := len(transport.Log.Lines())
+	m.followConnLimit()
+	if m.copyParallel != 6 {
+		t.Fatalf("copyParallel %d with no limit; want 6", m.copyParallel)
+	}
+	right.limit = 3
+	m.followConnLimit()
+	if m.copyParallel != 3 || m.copyProgress.Parallel.Load() != 3 || left.n != 3 || right.n != 3 {
+		t.Fatalf("copyParallel %d, popup %d, pools %d/%d; want 3", m.copyParallel, m.copyProgress.Parallel.Load(), left.n, right.n)
+	}
+	lines := transport.Log.Lines()[mark:]
+	if len(lines) != 1 || !strings.Contains(lines[0], " WARN ") {
+		t.Errorf("log %q; want one WARN line", lines)
+	}
+	m.followConnLimit()
+	if n := len(transport.Log.Lines()) - mark; n != 1 {
+		t.Errorf("%d lines after a second tick; want no more", n)
 	}
 }

@@ -76,15 +76,43 @@ func (b *RsyncBackend) daemonHandshake(ctx context.Context, conn io.ReadWriter, 
 			// Another connect is refused the same way, and refused
 			// connects can get an address banned; each read as a passing
 			// failure, six connects a call (R18). A full server is the
-			// one that may let a later connect in, read where the daemon
-			// puts its reason, never in a module name it gives back.
-			if strings.HasPrefix(line, "@ERROR: max connections") {
-				return false, model.WithKind(model.ErrUnreachable, errors.New(line))
+			// one that lets a later connect in, once another closes
+			// (login), read where the daemon puts its reason, never in a
+			// module name it gives back. Stock rsyncd 3.5.1 says "failed
+			// to open lock file" for a full module at times: the lock
+			// file is only read for "max connections", and its log
+			// gives the open a stale errno (No such file or directory)
+			// while other logins at the same time get "max connections".
+			if strings.HasPrefix(line, "@ERROR: max connections") || line == "@ERROR: failed to open lock file" {
+				return false, daemonFull(line)
 			}
 			return false, model.WithKind(model.ErrAuth, errors.New(line))
 		}
 		// Anything else is the message of the day.
 	}
+}
+
+// fullError is a daemon's refusal of a login for having as many as it
+// takes (model.ErrTooMany). most is the number "max connections (N)
+// reached" gives, 0 where it gives none.
+type fullError struct {
+	line string
+	most int
+}
+
+func (e *fullError) Error() string        { return e.line }
+func (e *fullError) Is(target error) bool { return target == model.ErrTooMany }
+
+// daemonFull reads line, a daemon's refusal for being full.
+func daemonFull(line string) error {
+	e := &fullError{line: line}
+	if rest, ok := strings.CutPrefix(line, "@ERROR: max connections ("); ok {
+		n, _, _ := strings.Cut(rest, ")")
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			e.most = v
+		}
+	}
+	return e
 }
 
 // readLine returns one line without its terminator; ctx cancellation reaches

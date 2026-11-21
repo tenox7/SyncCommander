@@ -40,6 +40,12 @@ mid-way: the next file to finish is simply not replaced, and the popup shows
 a connection per file to match. A batch rsync+ssh transfer is one session, so
 `+` and `-` do nothing there.
 
+A server can take fewer connections than that: an rsync daemon past its
+`max connections`, an ftp server that answers 421, an ssh server that drops
+the extra logins. sc then takes the number down to what the server took and
+says so in a WARN line. It is no error, and the log does not open. A file
+over that number waits for a connection. `+` tries more again.
+
 ## Copy safety
 
 A folder copy deletes nothing that is only on the destination unless you

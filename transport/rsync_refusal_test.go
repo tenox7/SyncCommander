@@ -79,19 +79,6 @@ func TestRsyncLoginRefusalIsFinal(t *testing.T) {
 	}
 }
 
-// A full server is the refusal that passes: a later connect may get in.
-func TestRsyncFullServerIsTriedAgain(t *testing.T) {
-	addr, _ := fakeRsyncd(t, "@ERROR: max connections (1) reached -- try again later")
-	b, err := NewRsyncBackend("rsync://" + addr + "/m/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = b.List(context.Background(), "")
-	if !errors.Is(err, model.ErrUnreachable) || errors.Is(err, model.ErrAuth) || isPermanentError(err) {
-		t.Errorf("list: %v; want a server a later connect may get into (ErrUnreachable)", err)
-	}
-}
-
 // A URL with no module, which no try can use, was tried six times a call.
 func TestRsyncURLWithNoModuleIsFinal(t *testing.T) {
 	url := "rsync://127.0.0.1:1/"
@@ -154,5 +141,44 @@ func TestRsyncNotThereReadsTheReason(t *testing.T) {
 		if got := notThere(c.msgs); got != c.want {
 			t.Errorf("notThere(%q) = %v; want %v", c.msgs, got, c.want)
 		}
+	}
+}
+
+// A copy stats each folder it makes on the daemon, which is not there yet.
+// Stock rsyncd says so, then resets the connection, and each such STAT was
+// an ERR line that opened the log. "Not there" is an answer, no error.
+func TestRsyncStatOfAMissingFolderIsNoError(t *testing.T) {
+	port, _ := startRsyncDaemon(t)
+	b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := len(Log.Lines())
+	for range 3 {
+		if _, err := b.Stat(context.Background(), "d"); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stat of a missing folder: %v; want not there", err)
+		}
+	}
+	if n := logCount(mark, " ERR "); n != 0 {
+		t.Errorf("%d ERR lines for 3 stats of a missing folder; want none", n)
+	}
+}
+
+// A run the caller stops, as a scan that is done stops its preload, is no
+// error: it showed as err:1 at each start on an empty module.
+func TestRsyncCanceledRunIsNoError(t *testing.T) {
+	port, _ := startRsyncDaemon(t)
+	b, err := NewRsyncBackend(fmt.Sprintf("rsync://127.0.0.1:%d/testmod", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mark := len(Log.Lines())
+	if _, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r", "-l"}, "testmod/", nil); err == nil {
+		t.Fatal("a canceled run did not fail")
+	}
+	if n := logCount(mark, " ERR "); n != 0 {
+		t.Errorf("%d ERR lines for a canceled run; want none", n)
 	}
 }

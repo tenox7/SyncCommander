@@ -37,6 +37,7 @@ type RsyncBackend struct {
 	sentMtime sync.Map // mtime each upload sent with -t, see SetTimes
 	dirs      sync.Map // folders seen on the daemon, by path: see checkDirs
 	noSum     sumNote  // says the first file the daemon gives no sum
+	gate      connGate // the connections open to the daemon, past "max connections"
 }
 
 func NewRsyncBackend(rawURL string) (*RsyncBackend, error) {
@@ -128,7 +129,7 @@ func (b *RsyncBackend) pushTarget(ctx context.Context, relDir string) (string, e
 	if arg, _ := daemonPath(b.module, p); arg == p {
 		return remote, nil
 	}
-	res, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d"}, remote)
+	res, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d"}, remote, nil)
 	if err != nil {
 		return "", err
 	}
@@ -271,20 +272,34 @@ func dialLimited(ctx context.Context, network, addr string) (net.Conn, error) {
 // runDaemon dials the daemon and runs client's dry run against remotePath,
 // returning the file list. The handshake is sc's own (see daemonHandshake),
 // so the credentials never touch process-wide state.
-func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
+func (b *RsyncBackend) runDaemon(ctx context.Context, label string, flags []string, remotePath string, peer *peerMsgs, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
 	dst, err := tempDir("rsync-daemon-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(dst)
-	return b.runDaemonTo(ctx, label, flags, remotePath, dst+"/", opts...)
+	return b.runDaemonTo(ctx, label, flags, remotePath, dst+"/", peer, opts...)
 }
 
-// runDaemonTo runs client against remotePath, receiving into local.
-func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []string, remotePath, local string, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
+// runDaemonTo runs client against remotePath, receiving into local; peer,
+// when not nil, takes what the daemon says. A failed run is an ERR line,
+// unless the caller ended ctx, as a scan that is done stops its preload
+// (a stall guard's end is an ERR), or peer says the path is not there: stock rsyncd says so, then resets the
+// connection, and the STAT of each folder a copy makes was an ERR line,
+// which opened the log. The caller reads that answer.
+func (b *RsyncBackend) runDaemonTo(ctx context.Context, label string, flags []string, remotePath, local string, peer *peerMsgs, opts ...rsyncclient.Option) (*rsyncclient.Result, error) {
 	Log.Add("rsync", DirOut, label+" "+remotePath)
+	if peer != nil {
+		opts = append(opts, rsyncclient.WithStderr(peer))
+	}
 	result, err := b.runDaemonPaths(ctx, flags, remotePath, []string{local}, opts...)
-	if err != nil {
+	switch {
+	case err == nil:
+	case ctx.Err() != nil && !Stalled(ctx):
+		Log.Add("rsync", DirIn, label+" "+remotePath+": canceled")
+	case peer != nil && notThere(peer.problems()):
+		Log.Add("rsync", DirIn, label+" "+remotePath+": not there")
+	default:
 		Log.Add("rsync", DirErr, label+" "+remotePath+": "+err.Error())
 	}
 	return result, err
@@ -298,21 +313,20 @@ func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remot
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialLimited(ctx, "tcp", b.host)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
 	result := &rsyncclient.Result{}
 	run := func(ctx context.Context) error {
-		// Bytes on the socket show the stall guard the run moves, also
-		// when no progress is credited: a push of a source that counted
-		// its own bytes (D5).
-		c := activeConn(ctx, conn)
-		defer context.AfterFunc(ctx, func() { conn.Close() })()
-		done, err := b.daemonHandshake(ctx, c, client, remotePath)
-		if err == nil && !done {
-			result, err = client.Run(ctx, c, local)
+		conn, done, err := b.login(ctx, client, remotePath)
+		if err != nil {
+			return err
+		}
+		defer b.gate.leave()
+		defer conn.Close()
+		if !done {
+			// Bytes on the socket show the stall guard the run moves,
+			// also when no progress is credited: a push of a source that
+			// counted its own bytes (D5).
+			defer context.AfterFunc(ctx, func() { conn.Close() })()
+			result, err = client.Run(ctx, activeConn(ctx, conn), local)
 		}
 		return err
 	}
@@ -329,6 +343,96 @@ func (b *RsyncBackend) runDaemonPaths(ctx context.Context, flags []string, remot
 	}
 	return result, err
 }
+
+// login connects to the daemon and logs in, as the gate lets it (connGate).
+// A daemon with as many connections as it takes ("max connections") turns
+// the login away: sc then opens no more at a time than it says it takes,
+// and waits for one of its own to close, or, within that, a while, and
+// tries again. Each is a WARN line, no ERR: nothing failed. With none of
+// sc's open, other clients hold them all, and after serverFullWait of that
+// it gives up. The connection holds its place in the gate until the
+// caller's leave. done: the daemon answered EXIT, there is nothing to run.
+func (b *RsyncBackend) login(ctx context.Context, client *rsyncclient.Client, remotePath string) (net.Conn, bool, error) {
+	refused, seen := 0, 0 // turns away in a row, and the limit when they began
+	var fullSince time.Time
+	warned := false
+	for {
+		waited, err := b.gate.enter(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if waited {
+			refused, fullSince = 0, time.Time{}
+		}
+		conn, done, err := b.dialLogin(ctx, client, remotePath)
+		if err == nil {
+			return conn, done, nil
+		}
+		if !errors.Is(err, model.ErrTooMany) || ctx.Err() != nil {
+			b.gate.leave()
+			return nil, false, err
+		}
+		if refused++; refused == 1 {
+			seen = b.gate.limitNow()
+		}
+		most := 0
+		if full := (*fullError)(nil); errors.As(err, &full) {
+			most = full.most
+		}
+		limit, lowered, open := b.gate.turnedAway(refused >= stuckTurns, seen, most)
+		if lowered {
+			Log.Add("rsync", DirWarn, fmt.Sprintf("%s: %v: %d connection(s) at a time from now on", b.display, err, limit))
+		}
+		if lowered || limit != seen {
+			refused, seen = 0, limit
+		}
+		if limit > 0 && open >= limit {
+			continue // enter waits for one to close
+		}
+		switch {
+		case open > 0:
+			fullSince = time.Time{}
+		case fullSince.IsZero():
+			fullSince = time.Now()
+		case time.Since(fullSince) >= serverFullWait:
+			return nil, false, fmt.Errorf("%w for %v, with none of sc's open: %w", errServerFull, serverFullWait, err)
+		}
+		pause := closeLag << min(max(refused-1, 0), 5)
+		if open == 0 && refused >= stuckTurns-1 && !warned {
+			warned = true
+			Log.Add("rsync", DirWarn, fmt.Sprintf("%s: %v: other clients hold them all; trying again for up to %v", b.display, err, serverFullWait))
+		}
+		if err := waitTouching(ctx, nil, pause); err != nil {
+			return nil, false, err
+		}
+	}
+}
+
+// dialLogin dials the daemon and runs sc's handshake (daemonHandshake).
+func (b *RsyncBackend) dialLogin(ctx context.Context, client *rsyncclient.Client, remotePath string) (net.Conn, bool, error) {
+	conn, err := dialLimited(ctx, "tcp", b.host)
+	if err != nil {
+		return nil, false, err
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	done, err := b.daemonHandshake(ctx, activeConn(ctx, conn), client, remotePath)
+	stop()
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		conn.Close()
+		return nil, false, err
+	}
+	return conn, done, nil
+}
+
+// SetParallel is + and -: more copies than the daemon took when it turned
+// one away let it show again what it takes.
+func (b *RsyncBackend) SetParallel(n int) { b.gate.raise(n) }
+
+// ConnLimit is what the daemon took when it turned a login away.
+func (b *RsyncBackend) ConnLimit() int { return b.gate.limitNow() }
 
 // rsyncProgressWriter consumes `rsync --progress` output and credits the
 // leading byte-offset of each progress line to adder. Updates are \r-separated
@@ -376,7 +480,7 @@ func (b *RsyncBackend) liveList(ctx context.Context, relDir string) ([]model.Fil
 	}
 	label := "LIST " + remote
 	peer := &peerMsgs{}
-	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d", "-l"}, remote, rsyncclient.WithStderr(peer))
+	result, err := b.runDaemon(ctx, "LIST", []string{"-n", "-d", "-l"}, remote, peer)
 	if err != nil {
 		// A daemon that cannot open the folder says why, then hangs up:
 		// its reason beats "connection reset".
@@ -408,7 +512,7 @@ func (b *RsyncBackend) Stat(ctx context.Context, relPath string) (model.FileEntr
 	}
 	label := "STAT " + remote
 	peer := &peerMsgs{}
-	result, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d", "-l", "-D"}, remote, rsyncclient.WithStderr(peer))
+	result, err := b.runDaemon(ctx, "STAT", []string{"-n", "-d", "-l", "-D"}, remote, peer)
 	if err != nil {
 		if probs := peer.problems(); notThere(probs) {
 			err = fmt.Errorf("%s: %w", label, fs.ErrNotExist)
@@ -495,7 +599,7 @@ func (b *RsyncBackend) runRecursiveList(ctx context.Context, scope string, emit 
 		return err
 	}
 	l := newRsyncListing(scope, emit, complete, b.msgRelPath)
-	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r", "-l"}, remote, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
+	result, err := b.runDaemon(ctx, "RLIST", []string{"-n", "-r", "-l"}, remote, nil, rsyncclient.WithFileListCallback(l.add), rsyncclient.WithStderr(l))
 	if err != nil {
 		return err
 	}
@@ -539,7 +643,7 @@ func (b *RsyncBackend) fetchMD4(ctx context.Context, scope string, recursive boo
 		return nil, err
 	}
 	peer := &peerMsgs{}
-	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), remote, rsyncclient.WithStderr(peer))
+	result, err := b.runDaemon(ctx, "MD4", md4ListFlags(recursive), remote, peer)
 	if err != nil {
 		// Stock rsyncd says a path is not there, then resets the
 		// connection, which read as a passing failure (R18).
@@ -985,7 +1089,7 @@ func (b *RsyncBackend) openAt(ctx context.Context, relPath string, offset int64)
 	return rsyncOpenViaTemp(ctx, relPath, offset, func(dstDir string) error {
 		if offset > 0 {
 			peer := &peerMsgs{}
-			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, rsyncclient.WithUnverifiedAppend(), rsyncclient.WithStderr(peer))
+			res, err := b.runDaemonTo(ctx, fmt.Sprintf("RECV @%d", offset), b.transferArgs("--append"), remote, dstDir, peer, rsyncclient.WithUnverifiedAppend())
 			if (err != nil || res.XferErrors > 0 || res.IOErrors != 0) && notThere(peer.problems()) {
 				return fmt.Errorf("RECV %s: %w", remote, fs.ErrNotExist)
 			}

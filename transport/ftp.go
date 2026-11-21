@@ -328,13 +328,13 @@ func dialFTPConn(ctx context.Context, addr, scheme, user, pass string, tlsCfg *t
 func loginFTP(addr, user, pass string, opts []ftp.DialOption) (*ftp.ServerConn, error) {
 	conn, err := ftp.Dial(addr, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("ftp dial %s: %w", addr, err)
+		return nil, ftpTooMany(fmt.Errorf("ftp dial %s: %w", addr, err))
 	}
 	if err := conn.Login(user, pass); err != nil {
 		conn.Quit()
-		err = fmt.Errorf("ftp login %s@%s: %w", user, addr, err)
+		err = ftpTooMany(fmt.Errorf("ftp login %s@%s: %w", user, addr, err))
 		// 530: not logged in, the server refused the user or the password.
-		if tp := (*textproto.Error)(nil); errors.As(err, &tp) && tp.Code == ftp.StatusNotLoggedIn {
+		if tp := (*textproto.Error)(nil); errors.As(err, &tp) && tp.Code == ftp.StatusNotLoggedIn && !errors.Is(err, model.ErrTooMany) {
 			err = model.WithKind(model.ErrAuth, err)
 		}
 		return nil, err
@@ -344,6 +344,23 @@ func loginFTP(addr, user, pass string, opts []ftp.DialOption) (*ftp.ServerConn, 
 		return nil, fmt.Errorf("ftp binary mode: %w", err)
 	}
 	return conn, nil
+}
+
+// ftpTooMany marks a greeting or login reply that turns the connection
+// away for having as many as the server takes (model.ErrTooMany): a 421,
+// as vsftpd, Pure-FTPd and FileZilla Server send past their limits, and
+// ProFTPD's 530 "Sorry, the maximum number of clients ... are already
+// connected", read in the reply's own words, which hold no file name. That
+// 530 was a refused login, never tried again.
+func ftpTooMany(err error) error {
+	var tp *textproto.Error
+	if !errors.As(err, &tp) {
+		return err
+	}
+	if tp.Code == ftp.StatusNotAvailable || tp.Code == ftp.StatusNotLoggedIn && strings.Contains(strings.ToLower(tp.Msg), "maximum number of") {
+		return model.WithKind(model.ErrTooMany, err)
+	}
+	return err
 }
 
 // NewFTPBackend connects to rawURL; a cancel of ctx stops the connect.
@@ -426,6 +443,7 @@ func NewFTPBackend(ctx context.Context, rawURL string, insecure bool, parallel i
 	}
 	b.pool = newConnPool[*ftpConn]("ftp", nil, parallel, dial, func(c *ftpConn) { c.close() })
 	b.pool.waits = true
+	b.pool.turnedAway = tooManyFTP
 	return b, nil
 }
 
@@ -466,6 +484,8 @@ func (b *FTPBackend) abs(relPath string) string { return path.Join(b.base, clean
 // SetParallel keeps n extra connections, one for each of n transfers: the
 // primary is for the calls in between (L16).
 func (b *FTPBackend) SetParallel(n int) { b.pool.resize(n) }
+
+func (b *FTPBackend) ConnLimit() int { return b.pool.connLimit() }
 
 // Close says QUIT on the primary connection: now when it is free, or else
 // once the call that holds it lets it go. Close waited for that call, so
