@@ -1395,7 +1395,13 @@ func isTimeValid(t time.Time) bool {
 	return !t.IsZero() && t.Year() >= 1970
 }
 
+// TimeAgo is how long ago t was, as "5m ago", or "" for no time: an
+// entry whose listing gives none (http:// with no Last-Modified, a link
+// on a web server) showed "292yr ago".
 func TimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
 	d := time.Since(t)
 	if d < 0 {
 		d = 0
