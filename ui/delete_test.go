@@ -154,7 +154,7 @@ func TestDeleteDialogSaysWhatTheFolderHolds(t *testing.T) {
 		deep       bool
 		name, want string
 	}{
-		{true, "big", "2 files, 1 folders"},
+		{true, "big", "2 files, 1 folder"},
 		{true, "empty", "empty folder"},
 		{false, "big", "0+ files, 0+ folders (not fully scanned)"},
 	} {

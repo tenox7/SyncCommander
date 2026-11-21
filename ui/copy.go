@@ -41,9 +41,16 @@ const (
 	askUnknown                // y copies the files not compared yet too, s skips them
 )
 
-// copyMirrorKeys are the answers when the destination folder holds entries
-// the source does not.
-const copyMirrorKeys = "c=copy, keep them  d=copy and delete them  Esc=cancel"
+// mirrorKeys are the answers when the destination folder holds entries the
+// source does not; what names them (deletesWhat), on the side dst. Each
+// answer says in capitals what it does to them: "c=copy, keep them
+// d=copy and delete them" did not say which entries "them" were, or that
+// d deletes them on the destination.
+func mirrorKeys(what, dst string) string {
+	return "c   = copy. KEEP " + what + " on the " + dst + ".\n" +
+		"d   = copy. DELETE " + what + " on the " + dst + ".\n" +
+		"Esc = cancel. Nothing changes."
+}
 
 // startCopy copies the cursor node in the given direction, asking first when
 // the copy would destroy anything on the destination, would put an older or
@@ -52,7 +59,9 @@ const copyMirrorKeys = "c=copy, keep them  d=copy and delete them  Esc=cancel"
 // destination is deleted only when the user picks that: a folder copy was
 // always a mirror, with no way to copy and keep (F15). The questions show
 // the copy's plan, read from the tree once, and the copy is held to it: it
-// destroys or writes over nothing the dialog did not show (D6).
+// destroys or writes over nothing the dialog did not show (D6). When the
+// source holds less than the destination, the first question shows a red
+// warning: that is almost always the wrong folder or the wrong way.
 func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	node := m.activePanel().CursorNode()
 	blocked := model.PresenceRightOnly
@@ -71,10 +80,76 @@ func (m *Model) startCopy(leftToRight bool) tea.Cmd {
 	lines := m.copyConfirmLines(node, leftToRight, plan)
 	if len(plan.Deletes) > 0 {
 		m.pendingCopy.ask = askMirror
-		m.confirm.OpenKeys(title, lines, true, copyMirrorKeys)
+		_, dst := copySideNames(leftToRight)
+		what, _ := deletesWhat(plan.Deletes)
+		m.confirm.OpenKeys(title, lines, true, mirrorKeys(what, dst))
+		m.confirm.Warn(lessDataWarning(plan, leftToRight))
 		return nil
 	}
-	return m.askNextCopy(lines)
+	cmd := m.askNextCopy(lines)
+	if m.confirm.IsOpen() {
+		m.confirm.Warn(lessDataWarning(plan, leftToRight))
+	}
+	return cmd
+}
+
+// lessDataWarning is the red warning of a folder copy whose source holds
+// less than its destination: fewer files, fewer folders or fewer bytes, or
+// no files at all while the destination holds some (a disk not mounted
+// leaves an empty folder). A mirror of it deletes what the source does not
+// hold. It is nil when the source holds as much, and when a folder under it
+// is not listed, as what it holds is not known then.
+func lessDataWarning(plan transfer.Plan, leftToRight bool) []string {
+	src, dst := plan.Src, plan.Dst
+	if !src.Complete {
+		return nil
+	}
+	srcName, dstName := copySideNames(leftToRight)
+	check := "Make sure that the folder and the direction are correct."
+	if src.Files == 0 && dst.Files > 0 {
+		return []string{
+			"⚠ WARNING: THE " + strings.ToUpper(srcName) + " HAS NO FILES.",
+			"The " + dstName + " has " + holdsText(dst) + ".",
+			"This is almost always a mistake.",
+			check,
+		}
+	}
+	var less []string
+	if src.Files < dst.Files {
+		less = append(less, "FEWER FILES")
+	}
+	if src.Dirs < dst.Dirs {
+		less = append(less, "FEWER FOLDERS")
+	}
+	if src.Size < dst.Size {
+		less = append(less, "LESS DATA")
+	}
+	if len(less) == 0 {
+		return nil
+	}
+	what := less[0]
+	if n := len(less); n > 1 {
+		what = strings.Join(less[:n-1], ", ") + " AND " + less[n-1]
+	}
+	return []string{
+		"⚠ WARNING: THE " + strings.ToUpper(srcName) + " HAS " + what + " THAN THE " + strings.ToUpper(dstName) + ".",
+		fmt.Sprintf("%-6s %s", sideTitle(srcName)+":", holdsText(src)),
+		fmt.Sprintf("%-6s %s", sideTitle(dstName)+":", holdsText(dst)),
+		check,
+	}
+}
+
+// sideTitle is a side's name at the start of a line: "Left", "Right".
+func sideTitle(side string) string { return strings.ToUpper(side[:1]) + side[1:] }
+
+// holdsText says what a side holds: "3 files, 1 folder, 1.2M", with "at
+// least" while a folder in it is not listed.
+func holdsText(h transfer.Holds) string {
+	s := plural(h.Files, "file") + ", " + plural(h.Dirs, "folder") + ", " + model.FormatSize(h.Size)
+	if !h.Complete {
+		s = "at least " + s
+	}
+	return s
 }
 
 // askNextCopy shows the copy's next question below lines, or runs the copy
@@ -131,8 +206,8 @@ func (m *Model) answerCopy(k string) tea.Cmd {
 
 // copyLabel is the copied node's name, and a warning when its subtree is
 // not fully listed, for a question that follows another.
-func (m *Model) copyLabel(node *model.TreeNode, unlisted bool) []string {
-	lines := append([]string{""}, m.nodeLines(node)...)
+func (m *Model) copyLabel(node *model.TreeNode, leftToRight, unlisted bool) []string {
+	lines := append([]string{""}, m.nodeLines(node, leftToRight)...)
 	if unlisted {
 		lines = append(lines, unlistedWarning...)
 	}
@@ -146,7 +221,7 @@ func (m *Model) copyLabel(node *model.TreeNode, unlisted bool) []string {
 func (m *Model) askNewerCopies(lines []string) {
 	pc := m.pendingCopy
 	if len(lines) == 0 {
-		lines = m.copyLabel(pc.node, pc.plan.Unlisted)
+		lines = m.copyLabel(pc.node, pc.leftToRight, pc.plan.Unlisted)
 	}
 	side := "right"
 	if !pc.leftToRight {
@@ -170,7 +245,7 @@ func (m *Model) askNewerCopies(lines []string) {
 func (m *Model) askUnknownCopies(lines []string) {
 	pc := m.pendingCopy
 	if len(lines) == 0 {
-		lines = m.copyLabel(pc.node, pc.plan.Unlisted)
+		lines = m.copyLabel(pc.node, pc.leftToRight, pc.plan.Unlisted)
 	}
 	why := "their checksums are not computed yet."
 	if !m.cmpOpts.Checksum {
@@ -352,12 +427,52 @@ func (m *Model) isTopRow(node *model.TreeNode) bool {
 	return top
 }
 
-// nodeLines names node and both its folders for a copy's dialog, under
-// the read lock.
-func (m *Model) nodeLines(node *model.TreeNode) []string {
-	var lines []string
-	m.readTree(func(*model.TreeNode) { lines = m.whereLines(node, true, true) })
-	return lines
+// nodeLines names node for a copy's dialog by its whole path, and the
+// folder it is copied from and the one it is copied to, as the panel
+// titles show them: "in L:" and "in R:" did not say which way the copy
+// goes. It takes the read lock.
+func (m *Model) nodeLines(node *model.TreeNode, leftToRight bool) []string {
+	from, to := "  from L: "+m.left.backend.BasePath(), "  to R:   "+m.right.backend.BasePath()
+	if !leftToRight {
+		from, to = "  from R: "+m.right.backend.BasePath(), "  to L:   "+m.left.backend.BasePath()
+	}
+	var name string
+	m.readTree(func(*model.TreeNode) { name = nodeName(node) })
+	return []string{name, from, to}
+}
+
+// copySideNames names a copy's source and destination sides.
+func copySideNames(leftToRight bool) (src, dst string) {
+	if leftToRight {
+		return "left", "right"
+	}
+	return "right", "left"
+}
+
+// deletesWhat names the entries only on the destination by the files and
+// folders they hold: "this file", "these 3 files", "these 2 files and 1
+// folder". one says it names one file or one folder.
+func deletesWhat(deletes []transfer.Delete) (what string, one bool) {
+	files, dirs := transfer.DeleteCounts(deletes)
+	switch {
+	case files == 1 && dirs == 0:
+		return "this file", true
+	case files == 0 && dirs == 1:
+		return "this folder", true
+	case dirs == 0:
+		return "these " + plural(files, "file"), false
+	case files == 0:
+		return "these " + plural(dirs, "folder"), false
+	}
+	return "these " + plural(files, "file") + " and " + plural(dirs, "folder"), false
+}
+
+// plural counts n things: "1 file", "3 files".
+func plural(n int, thing string) string {
+	if n == 1 {
+		return "1 " + thing
+	}
+	return fmt.Sprintf("%d %ss", n, thing)
 }
 
 // maxConfirmPaths caps how many paths a confirm dialog lists by name.
@@ -372,23 +487,29 @@ var unlistedWarning = []string{"", "⚠ subtree not fully scanned: the copy may 
 // destination entries of the other type the copy replaces, and the entries
 // only on the destination, each named up to maxConfirmPaths, then the
 // warning when a folder under the node is not listed yet. It is empty when
-// the plan has neither conflicts nor deletes.
+// the plan has neither conflicts nor deletes. A delete is said in
+// capitals.
 func (m *Model) copyConfirmLines(node *model.TreeNode, leftToRight bool, plan transfer.Plan) []string {
 	if len(plan.Conflicts) == 0 && len(plan.Deletes) == 0 {
 		return nil
 	}
-	side := "right"
-	if !leftToRight {
-		side = "left"
-	}
-	lines := append([]string{""}, m.nodeLines(node)...)
-	if len(plan.Conflicts) > 0 {
-		lines = append(lines, fmt.Sprintf("Will delete on %s, to put the other type there:", side))
-		lines = appendNamed(lines, len(plan.Conflicts), func(i int) string { return describeConflict(plan.Conflicts[i]) })
+	src, dst := copySideNames(leftToRight)
+	lines := append([]string{""}, m.nodeLines(node, leftToRight)...)
+	if n := len(plan.Conflicts); n > 0 {
+		these, them := "These items have", "them"
+		if n == 1 {
+			these, them = "This item has", "it"
+		}
+		lines = append(lines, "", these+" a different type on the "+src+".", "The copy DELETES "+them+" on the "+dst+":")
+		lines = appendNamed(lines, n, func(i int) string { return describeConflict(plan.Conflicts[i]) })
 	}
 	if len(plan.Deletes) > 0 {
-		files, dirs := transfer.DeleteCounts(plan.Deletes)
-		lines = append(lines, fmt.Sprintf("Only on %s: %d files, %d folders", side, files, dirs))
+		what, one := deletesWhat(plan.Deletes)
+		are := "are"
+		if one {
+			are = "is"
+		}
+		lines = append(lines, "", strings.ToUpper(what[:1])+what[1:]+" "+are+" only on the "+dst+":")
 		lines = appendNamed(lines, len(plan.Deletes), func(i int) string { return describeDelete(plan.Deletes[i]) })
 	}
 	if plan.Unlisted {
@@ -421,6 +542,9 @@ func describeConflict(c transfer.Conflict) string {
 // describeDelete names an entry only on the destination, which a mirror
 // deletes.
 func describeDelete(d transfer.Delete) string {
+	if d.IsPart {
+		return d.RelPath + "  (part file of a copy that stopped)"
+	}
 	if !d.IsDir {
 		return d.RelPath
 	}

@@ -93,8 +93,12 @@ func describeTally(t transfer.Tally) string {
 		return fmt.Sprintf("%d+ files, %d+ folders (not fully scanned)", t.Files, t.Dirs)
 	case t.Files == 0 && t.Dirs == 0:
 		return "empty folder"
+	case t.Dirs == 0:
+		return plural(t.Files, "file")
+	case t.Files == 0:
+		return plural(t.Dirs, "folder")
 	}
-	return fmt.Sprintf("%d files, %d folders", t.Files, t.Dirs)
+	return plural(t.Files, "file") + ", " + plural(t.Dirs, "folder")
 }
 
 // confirmDelete runs the pending delete on side. When a rescan changed the

@@ -60,6 +60,8 @@ func (m *Model) cursorOn(t *testing.T, name string) {
 func TestDialogsNameTheWholePath(t *testing.T) {
 	m := pathsModel(t, 120)
 	inL, inR := "  in L: "+m.left.backend.BasePath(), "  in R: "+m.right.backend.BasePath()
+	// A copy's dialog says which way it goes.
+	fromL, toR := "  from L: "+m.left.backend.BasePath(), "  to R:   "+m.right.backend.BasePath()
 	for _, c := range []struct {
 		name, key string
 		want      []string
@@ -69,7 +71,7 @@ func TestDialogsNameTheWholePath(t *testing.T) {
 		{"sub", "d", []string{"d/sub/", inL, inR}, ""},
 		{"only-left.txt", "d", []string{"only-left.txt", inL}, inR},
 		{"extra.txt", "d", []string{"extra.txt", inR}, inL},
-		{"", ">", []string{"the top folder", inL, inR}, "//"},
+		{"", ">", []string{"the top folder", fromL, toR}, "//"},
 	} {
 		if c.name == "" {
 			for range 50 {

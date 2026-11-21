@@ -989,13 +989,16 @@ func (c *copier) removeIn(br model.BatchRemover, dir string, victims []Delete) (
 
 // unplannedDeletes are the entries only on the destination that the tree
 // holds now and the plan does not: in a folder the copy listed as it ran, or
-// found by a rescan after the dialog.
+// found by a rescan after the dialog. A part file of a source file is none:
+// the copy wrote into it, or left it for the next copy to ask about.
 func (c *copier) unplannedDeletes() []string {
 	planned := pathSet(c.req.Plan.Deletes, func(d Delete) string { return d.RelPath })
+	src, dst := model.CopySides(c.req.LeftToRight)
 	var extra []string
 	c.req.Scanner.ReadTree(func(*model.TreeNode) {
 		for _, d := range model.CollectMirrorDeletes(c.req.Node, c.req.LeftToRight) {
-			if !planned[d.RelPath] {
+			// The part of a file the copy wrote is gone, and is no delete.
+			if !planned[d.RelPath] && !partOfSourceFile(d, src, dst) {
 				extra = append(extra, d.RelPath)
 			}
 		}

@@ -34,6 +34,18 @@ type Plan struct {
 	// Unlisted says a folder under the node was not listed yet: the copy
 	// lists it, and finds there what the plan does not have.
 	Unlisted bool
+	// Src and Dst are what a folder node holds on each side: the dialog
+	// warns when the source holds less, or no files at all.
+	Src, Dst Holds
+}
+
+// Holds is what a folder holds on one side: its files, its folders and the
+// files' bytes. Complete is false while a folder in it is not listed, when
+// it holds more than this.
+type Holds struct {
+	Files, Dirs int
+	Size        int64
+	Complete    bool
 }
 
 // Conflict is a destination entry of the other type in a copy's way.
@@ -52,6 +64,7 @@ type Newer struct{ RelPath, Why string }
 type Delete struct {
 	RelPath string
 	IsDir   bool
+	IsPart  bool // what a cut-off copy left, of a file the copy does not write
 	Size    int64
 	ModTime time.Time
 	Tally   // what a folder holds
@@ -69,7 +82,7 @@ type Tally struct {
 // what the user does not want; Mirror is off until the user turns it on.
 func PlanCopy(scanner *model.Scanner, node *model.TreeNode, leftToRight bool, opts model.CompareOpts) Plan {
 	var p Plan
-	_, dst := model.CopySides(leftToRight)
+	src, dst := model.CopySides(leftToRight)
 	scanner.ReadTree(func(*model.TreeNode) {
 		// The plan is read on the UI's goroutine, which does not ask the
 		// destination whether it makes links: that may connect. It plans
@@ -80,7 +93,12 @@ func PlanCopy(scanner *model.Scanner, node *model.TreeNode, leftToRight bool, op
 				p.Conflicts = append(p.Conflicts, Conflict{RelPath: c.RelPath, IsDir: e.IsDir, Kind: e.Kind(), Tally: tally(c)})
 			}
 		}
+		// The part files the copy writes into, of the files it writes.
+		parts := map[string]bool{}
 		visit := func(n *model.TreeNode, notCompared bool) {
+			if e := n.Sides[src].Entry; e != nil && !e.IsDir && !e.IsSpecial() {
+				parts[model.PartPath(n.RelPath)] = true
+			}
 			if notCompared {
 				p.Unknown = append(p.Unknown, n.RelPath)
 			}
@@ -94,14 +112,63 @@ func PlanCopy(scanner *model.Scanner, node *model.TreeNode, leftToRight bool, op
 			return
 		}
 		model.WalkCopyFiles(node, &opts, leftToRight, visit)
+		p.Src, p.Dst = holdsOn(node, src), holdsOn(node, dst)
 		for _, d := range model.CollectMirrorDeletes(node, leftToRight) {
-			if e := d.Sides[dst].Entry; e != nil {
-				p.Deletes = append(p.Deletes, Delete{RelPath: d.RelPath, IsDir: e.IsDir, Size: e.Size, ModTime: e.ModTime, Tally: tally(d)})
+			switch e := d.Sides[dst].Entry; {
+			case e == nil:
+			case e.IsPart() && parts[d.RelPath]:
+				// What a cut-off copy of a file it writes left: the copy
+				// writes into it and renames it over the file. The dialog
+				// asked to keep it or to delete it, and the copy did
+				// neither. A destination that takes no parts leaves it,
+				// and the next copy asks.
+			default:
+				p.Deletes = append(p.Deletes, Delete{RelPath: d.RelPath, IsDir: e.IsDir, IsPart: e.IsPart(), Size: e.Size, ModTime: e.ModTime, Tally: tally(d)})
 			}
 		}
 		p.Unlisted = model.UnlistedDir(node) != nil
 	})
 	return p
+}
+
+// partOfSourceFile reports whether d, only on the destination, is the part
+// file of a file the source holds beside it: what a cut-off copy of that
+// file left, which a copy of it writes into.
+func partOfSourceFile(d *model.TreeNode, src, dst model.Side) bool {
+	e := d.Sides[dst].Entry
+	if e == nil || !e.IsPart() || d.Parent == nil {
+		return false
+	}
+	for _, f := range d.Parent.Children {
+		if s := f.Sides[src].Entry; s != nil && !s.IsDir && !s.IsSpecial() && model.PartName(f.Name) == d.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsOn counts the files, folders and bytes a folder node holds on side.
+func holdsOn(node *model.TreeNode, side model.Side) Holds {
+	h := Holds{Complete: true}
+	var walk func(*model.TreeNode)
+	walk = func(n *model.TreeNode) {
+		if !n.Listed || n.ListErr {
+			h.Complete = false
+		}
+		for _, c := range n.Children {
+			switch e := c.Sides[side].Entry; {
+			case e == nil, e.IsPart(): // what a cut-off copy left is no data
+			case e.IsDir:
+				h.Dirs++
+				walk(c)
+			default:
+				h.Files++
+				h.Size += e.Size
+			}
+		}
+	}
+	walk(node)
+	return h
 }
 
 // tally counts what a folder node holds; nothing for a file.

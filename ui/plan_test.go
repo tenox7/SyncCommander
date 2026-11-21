@@ -63,7 +63,7 @@ func TestMirrorDeletesOnlyWhatTheDialogShowed(t *testing.T) {
 	cursorTo(t, m, "x", true)
 	press(m, ">")
 	body := strings.Join(m.confirm.lines, "\n")
-	if !m.confirm.IsOpen() || m.confirm.keys != copyMirrorKeys {
+	if !askingMirror(m) {
 		t.Fatalf("> did not ask whether to delete:\n%s", body)
 	}
 	if !strings.Contains(body, "x/gone.txt") {
@@ -163,7 +163,7 @@ func TestMirrorKeepsAFileThatChangedSinceTheDialog(t *testing.T) {
 	m := scannedModel(t, left, right)
 	cursorTo(t, m, "d", true)
 	press(m, ">")
-	if !m.confirm.IsOpen() || m.confirm.keys != copyMirrorKeys {
+	if !askingMirror(m) {
 		t.Fatalf("> did not ask whether to delete: keys %q", m.confirm.keys)
 	}
 	writeTestFile(t, filepath.Join(right, "d", "gone.txt"), "new work, written after the dialog")
